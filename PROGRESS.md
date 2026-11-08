@@ -1,3 +1,20 @@
+### [2026-11-08 21:33 UTC+07:00] — [Feature] Smooth animations: notch spring, tabs, rows, drops
+
+**Done:**
+The notch panel springs open (slight overshoot) and closed (no overshoot) instead of the old fixed `setFrame:display:animate:`. Content slides out from under the notch, fading and scaling (0.97 → 1) in once the frame is 55% open, and fades out before the frame closes, so it never squeezes. Tab switches crossfade. Task rows (Today card and Week columns) tint under the pointer, fade in where they land while other rows slide, and fade out before their gap closes. Pill buttons dim while pressed. Kanban columns ease their drop highlight in and out. Reduce Motion drops the spring, scale and row sliding but keeps short fades. Idle CPU stays 0% (the display link pauses at rest); RSS 54.8 → 55.1 MB; release binary 372 → 390 KB.
+
+**Changed  files:**
+- `src/notch_motion.rs` — created (`NotchMotion`, display-link spring for the panel frame and content fade)
+- `src/list_row.rs` — created (`ListRow` hover tint and hairline; `snapshot`/`animate_changes` for row in/out)
+- `src/pill_button.rs` — created (`PillButton`, press dim)
+- `src/controller.rs` — modified (`set_expanded` delegates to `NotchMotion`, hover check counts the expanded frame while opening, tab crossfade, rows wrapped in `ListRow`, Today separators became row hairlines, drop lookup goes through `ListRow`)
+- `src/drop_column.rs` — modified (highlight is a fading layer behind the content)
+- `src/widgets.rs` — modified (`fade`, `reduce_motion`, `pill` builds a `PillButton`)
+- `src/main.rs` — modified (modules)
+
+**Flow explained:**
+Hover still calls `set_expanded`, which now only sets the target on `NotchMotion`. A `CADisplayLink` on the panel wakes the spring and steps it each frame: it sets the window frame between the collapsed and expanded rects, keeps the content centred and pinned to the bottom edge, and sets the content's alpha and scale. When the frame and fade are at rest, the link pauses. Exit events are still checked against the real pointer, and while open the full expanded rect counts, so an exit during the spring polls `recheckHover:` rather than closing. Rows are rebuilt on every render as before. `list_row::snapshot` records the old rows by task text first, and `animate_changes` then puts the removed rows back as inert ghosts that fade out and then hide inside an implicit-animation group, and fades new rows in at their final frames while the stack animates the rest of the layout.
+
 ### [2026-11-08 21:11 UTC+07:00] — [Feature] Hexagon logo; Week kanban drag-and-drop
 
 **Done:**

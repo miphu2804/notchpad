@@ -2,13 +2,16 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
-use objc2::MainThreadMarker;
+use objc2::{ClassType, MainThreadMarker, msg_send};
 use objc2_app_kit::{
-    NSButton, NSColor, NSFocusRingType, NSFont, NSFontWeight, NSImage, NSImageSymbolConfiguration,
-    NSLayoutConstraintOrientation, NSLineBreakMode, NSStackView, NSTextField,
-    NSUserInterfaceLayoutOrientation, NSView,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSButton, NSColor, NSFocusRingType, NSFont,
+    NSFontWeight, NSImage, NSImageSymbolConfiguration, NSLayoutConstraintOrientation,
+    NSLineBreakMode, NSStackView, NSTextField, NSUserInterfaceLayoutOrientation, NSView,
+    NSWorkspace,
 };
 use objc2_foundation::NSString;
+
+use crate::pill_button::PillButton;
 
 pub fn rgba(r: u8, g: u8, b: u8, a: f64) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, a)
@@ -72,8 +75,11 @@ pub fn icon_button(
 }
 
 /// Borderless text button on a rounded fill, padded around its title.
-pub fn pill(title: &str, height: f64, target: &AnyObject, action: Sel, mtm: MainThreadMarker) -> Retained<NSButton> {
-    let button = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(title), Some(target), Some(action), mtm) };
+pub fn pill(title: &str, height: f64, target: &AnyObject, action: Sel, _mtm: MainThreadMarker) -> Retained<NSButton> {
+    let title = NSString::from_str(title);
+    let button: Retained<PillButton> =
+        unsafe { msg_send![PillButton::class(), buttonWithTitle: &*title, target: Some(target), action: Some(action)] };
+    let button = button.into_super();
     button.setBordered(false);
     button.setFont(Some(&NSFont::systemFontOfSize_weight(12.0, unsafe { objc2_app_kit::NSFontWeightMedium })));
     button.setTranslatesAutoresizingMaskIntoConstraints(false);
@@ -153,4 +159,17 @@ pub fn spacer(mtm: MainThreadMarker) -> Retained<NSView> {
     view.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
     view.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Vertical);
     view
+}
+
+/// System Settings › Accessibility › Display › Reduce motion.
+pub fn reduce_motion() -> bool {
+    NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
+
+/// Animates `view`'s opacity to `alpha`. Core Animation runs it, so no timer is involved.
+pub fn fade(view: &NSView, alpha: f64, seconds: f64) {
+    NSAnimationContext::beginGrouping();
+    NSAnimationContext::currentContext().setDuration(seconds);
+    view.animator().setAlphaValue(alpha);
+    NSAnimationContext::endGrouping();
 }

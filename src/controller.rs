@@ -17,10 +17,13 @@ use objc2_app_kit::{
     NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
+use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 
 use crate::days;
 use crate::drop_column::DropColumn;
+use crate::list_row::{self, ListRow};
 use crate::logo::LogoMark;
+use crate::notch_motion::NotchMotion;
 use crate::task_row::TaskRow;
 use crate::panel::{self, NotchPanel, NotchShape};
 use crate::store::{self, Task};
@@ -38,6 +41,8 @@ const FOCUS_CARD_WIDTH: f64 = 236.0;
 const PROGRESS_WIDTH: f64 = 150.0;
 const MAX_CARD_ROWS: usize = 5;
 const MAX_COLUMN_ROWS: usize = 6;
+/// Gap between Today rows; a hairline is drawn in its middle.
+const CARD_ROW_GAP: f64 = 15.0;
 const DURATIONS_MIN: [u64; 4] = [15, 25, 45, 60];
 
 /// Week columns, also used as the add-field tag that picks the new task's day.
@@ -89,8 +94,8 @@ struct Ui {
     focus: FocusCard,
     tasks: TaskCard,
     columns: Vec<Column>,
-    collapsed: NSRect,
     expanded: NSRect,
+    motion: Retained<NotchMotion>,
 }
 
 #[derive(Default)]
@@ -338,27 +343,19 @@ impl Controller {
 
     /// Tracking areas can report an exit while the pointer is still on the panel
     /// (e.g. mid-animation), so exits are confirmed against the real pointer position.
+    /// While open, the full expanded frame counts even if the spring hasn't reached it.
     fn pointer_over_panel(&self) -> bool {
         let p = NSEvent::mouseLocation();
-        let f = self.ui().panel.frame();
-        p.x >= f.origin.x
-            && p.x <= f.origin.x + f.size.width
-            && p.y >= f.origin.y
-            && p.y <= f.origin.y + f.size.height
+        let ui = self.ui();
+        let inside = |f: NSRect| {
+            p.x >= f.origin.x && p.x <= f.origin.x + f.size.width && p.y >= f.origin.y && p.y <= f.origin.y + f.size.height
+        };
+        inside(ui.panel.frame()) || (self.ivars().expanded.get() && inside(ui.expanded))
     }
 
     fn set_expanded(&self, on: bool) {
-        let ui = self.ui();
-        if self.ivars().expanded.replace(on) == on {
-            return;
-        }
-        // Content shows only at full size so it never squeezes during the animation.
-        if on {
-            ui.panel.setFrame_display_animate(ui.expanded, true, true);
-            ui.content.setHidden(false);
-        } else {
-            ui.content.setHidden(true);
-            ui.panel.setFrame_display_animate(ui.collapsed, true, true);
+        if self.ivars().expanded.replace(on) != on {
+            self.ui().motion.set_open(on);
         }
     }
 
@@ -415,6 +412,9 @@ impl Controller {
     fn render_tabs(&self) {
         let ui = self.ui();
         let week = self.ivars().week_tab.get();
+        if ui.week.isHidden() == week && !ui.content.isHidden() {
+            crossfade(&ui.content);
+        }
         ui.workspace.setHidden(week);
         ui.week.setHidden(!week);
         let (on, off) = if week { (&ui.tab_week, &ui.tab_workspace) } else { (&ui.tab_workspace, &ui.tab_week) };
@@ -461,16 +461,19 @@ impl Controller {
         w::fit_pill(&card.todo, 10.0);
         w::fit_pill(&card.done, 10.0);
 
+        let before = list_row::snapshot(&card.rows);
         clear(&card.rows);
         let shown = if show_completed { &done } else { &todo };
         for (k, &i) in shown.iter().take(MAX_CARD_ROWS).enumerate() {
+            let row = ListRow::new(&tasks[i].text, &self.card_row(i, &tasks[i]), &ink(0.07), self.mtm());
             if k > 0 {
-                add_full_width(&card.rows, &w::filled(&ink(0.08), 0.0, self.mtm()), Some(1.0));
+                row.add_rule(&ink(0.08), CARD_ROW_GAP, self.mtm());
             }
-            add_full_width(&card.rows, &self.card_row(i, &tasks[i]), None);
+            add_full_width(&card.rows, &row, None);
         }
         let empty = if show_completed { "Nothing completed yet today" } else { "All clear. Add a task below." };
         self.add_overflow_note(&card.rows, shown.len(), MAX_CARD_ROWS, empty, &ink(0.5));
+        list_row::animate_changes(&card.rows, before);
     }
 
     fn card_row(&self, index: usize, task: &Task) -> Retained<NSView> {
@@ -503,11 +506,14 @@ impl Controller {
                 })
                 .collect();
             ui.count.setStringValue(&NSString::from_str(&shown.len().to_string()));
+            let before = list_row::snapshot(&ui.list);
             clear(&ui.list);
             for &i in shown.iter().take(MAX_COLUMN_ROWS) {
-                add_full_width(&ui.list, &self.week_row(i, &tasks[i]), None);
+                let row = ListRow::new(&tasks[i].text, &self.week_row(i, &tasks[i]), &white(0.07), self.mtm());
+                add_full_width(&ui.list, &row, None);
             }
             self.add_overflow_note(&ui.list, shown.len(), MAX_COLUMN_ROWS, "", &white(0.4));
+            list_row::animate_changes(&ui.list, before);
         }
     }
 
@@ -524,11 +530,9 @@ impl Controller {
     /// Moves a dragged task into `column`, placed above the first row whose middle is
     /// below the drop point, and reschedules it for that column's day.
     fn drop_task(&self, index: usize, column: isize, at: NSPoint) {
-        let before = self.ui().columns[column as usize]
-            .list
-            .arrangedSubviews()
-            .iter()
-            .filter_map(|view| view.downcast::<TaskRow>().ok())
+        let before = list_row::snapshot(&self.ui().columns[column as usize].list)
+            .into_iter()
+            .filter_map(|(_, row)| row.content().downcast::<TaskRow>().ok())
             .find(|row| {
                 let frame = row.convertRect_toView(row.bounds(), None);
                 at.y > frame.origin.y + frame.size.height / 2.0
@@ -654,7 +658,8 @@ impl Controller {
             card.heightAnchor().constraintEqualToAnchor(&workspace.heightAnchor()).setActive(true);
         }
 
-        Ui { panel, content, workspace, week, tab_workspace, tab_week, focus, tasks, columns, collapsed, expanded }
+        let motion = NotchMotion::new(panel.clone(), content.clone(), collapsed, expanded, mtm);
+        Ui { panel, content, workspace, week, tab_workspace, tab_week, focus, tasks, columns, expanded, motion }
     }
 
     fn build_header(&self, mtm: MainThreadMarker) -> (Retained<NSStackView>, Retained<NSButton>, Retained<NSButton>) {
@@ -731,7 +736,7 @@ impl Controller {
         let todo = w::pill("To do", 22.0, self.target(), sel!(showTodo:), mtm);
         let done = w::pill("Completed", 22.0, self.target(), sel!(showCompleted:), mtm);
         let pills = w::stack(&[&todo, &done], false, 4.0, mtm);
-        let rows = w::stack(&[], true, 7.0, mtm);
+        let rows = w::stack(&[], true, CARD_ROW_GAP, mtm);
         let top = w::stack(&[&head, &pills, &rows], true, 10.0, mtm);
         card.addSubview(&top);
         w::pin(&top, &card, 14.0, None);
@@ -814,6 +819,16 @@ impl Controller {
 /// Open task scheduled for today or rolled over from an earlier day (Inbox excluded).
 fn is_open_today(task: &Task, today: &str) -> bool {
     !task.done && !task.day.is_empty() && task.day.as_str() <= today
+}
+
+/// Crossfades everything `view` shows from now to its next drawn state.
+fn crossfade(view: &NSView) {
+    let fade = CATransition::new();
+    fade.setType(unsafe { kCATransitionFade });
+    fade.setDuration(0.18);
+    if let Some(layer) = view.layer() {
+        layer.addAnimation_forKey(&fade, None);
+    }
 }
 
 fn clear(stack: &NSStackView) {
