@@ -4,7 +4,7 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::time::{Duration, Instant};
 
-use objc2::rc::Retained;
+use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyObject;
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
@@ -19,7 +19,9 @@ use objc2_app_kit::{
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 
 use crate::days;
+use crate::drop_column::DropColumn;
 use crate::logo::LogoMark;
+use crate::task_row::TaskRow;
 use crate::panel::{self, NotchPanel, NotchShape};
 use crate::store::{self, Task};
 use crate::widgets::{self as w, rgba};
@@ -246,6 +248,11 @@ define_class!(
             }
         }
 
+        #[unsafe(method(redraw:))]
+        fn redraw(&self, _arg: Option<&AnyObject>) {
+            self.refresh();
+        }
+
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: &AnyObject) {
             NSApplication::sharedApplication(self.mtm()).terminate(None);
@@ -356,11 +363,15 @@ impl Controller {
     }
 
     fn save_and_refresh(&self) {
+        self.save();
+        self.refresh();
+    }
+
+    fn save(&self) {
         if let Err(err) = store::save(&self.ivars().tasks.borrow()) {
             eprintln!("notchpad: could not save tasks: {err}");
         }
         self.ivars().seen_mtime.set(store::modified());
-        self.refresh();
     }
 
     fn refresh(&self) {
@@ -506,7 +517,55 @@ impl Controller {
         check.setTag(index as isize);
         let title = w::label(&task.text, 13.0, unsafe { NSFontWeightRegular }, &white(0.9), mtm);
         title.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
-        w::stack(&[&check, &title], false, 8.0, mtm).into_super()
+        let content = w::stack(&[&check, &title], false, 8.0, mtm);
+        TaskRow::new(index, &content, mtm).into_super()
+    }
+
+    /// Moves a dragged task into `column`, placed above the first row whose middle is
+    /// below the drop point, and reschedules it for that column's day.
+    fn drop_task(&self, index: usize, column: isize, at: NSPoint) {
+        let before = self.ui().columns[column as usize]
+            .list
+            .arrangedSubviews()
+            .iter()
+            .filter_map(|view| view.downcast::<TaskRow>().ok())
+            .find(|row| {
+                let frame = row.convertRect_toView(row.bounds(), None);
+                at.y > frame.origin.y + frame.size.height / 2.0
+            })
+            .map(|row| row.index());
+        {
+            let mut tasks = self.ivars().tasks.borrow_mut();
+            if index >= tasks.len() {
+                return;
+            }
+            let mut task = tasks.remove(index);
+            task.day = match column {
+                INBOX => String::new(),
+                TOMORROW => days::key(1),
+                _ => days::key(0),
+            };
+            let to = match before {
+                Some(b) if b > index => b - 1,
+                Some(b) => b,
+                None => tasks.len(),
+            };
+            tasks.insert(to, task);
+            // The focus card refers to tasks by index, so follow the shift.
+            let focus = self.ivars().focus.get().map(|f| match f {
+                f if f == index => to,
+                f => {
+                    let f = if f > index { f - 1 } else { f };
+                    if f >= to { f + 1 } else { f }
+                }
+            });
+            self.ivars().focus.set(focus);
+        }
+        self.save();
+        // Rebuilding the rows now would tear down the drag source while AppKit is still
+        // finishing its session, so re-render on the next run-loop pass.
+        let none: Option<&AnyObject> = None;
+        let _: () = unsafe { msg_send![self, performSelector: sel!(redraw:), withObject: none, afterDelay: 0.0f64] };
     }
 
     fn add_overflow_note(&self, list: &NSStackView, total: usize, max: usize, empty: &str, color: &NSColor) {
@@ -701,7 +760,13 @@ impl Controller {
         week.setDistribution(NSStackViewDistribution::FillEqually);
         let mut columns = Vec::new();
         for (tag, offset) in [(INBOX, 0), (TODAY, 0), (TOMORROW, 1)] {
-            let card = w::filled(&rgba(42, 42, 45, 1.0), 16.0, mtm);
+            let me = Weak::new(self);
+            let on_drop = Box::new(move |index, at| {
+                if let Some(controller) = me.load() {
+                    controller.drop_task(index, tag, at);
+                }
+            });
+            let card = DropColumn::new(rgba(42, 42, 45, 1.0), rgba(62, 62, 68, 1.0), on_drop, mtm);
             let title: Retained<NSView> = match tag {
                 INBOX => {
                     let tray = NSImageView::imageViewWithImage(&w::symbol("tray"), mtm);

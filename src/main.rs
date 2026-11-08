@@ -1,9 +1,11 @@
 mod controller;
 mod days;
+mod drop_column;
 mod hotkey;
 mod logo;
 mod panel;
 mod store;
+mod task_row;
 mod widgets;
 
 use std::cell::RefCell;
