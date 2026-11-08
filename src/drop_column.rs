@@ -14,13 +14,13 @@ pub type OnDrop = Box<dyn Fn(usize, NSPoint)>;
 const RADIUS: f64 = 16.0;
 
 pub struct Ivars {
-    fill: Retained<NSColor>,
-    highlight: Retained<NSColor>,
+    /// Highlight-coloured layer behind the column's content, faded in while hovered.
+    glow: Retained<NSView>,
     on_drop: OnDrop,
 }
 
 define_class!(
-    /// Lightens while a row hovers over it, then hands the drop to `on_drop`.
+    /// Eases lighter while a row hovers over it, then hands the drop to `on_drop`.
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     #[ivars = Ivars]
@@ -30,18 +30,18 @@ define_class!(
     impl DropColumn {
         #[unsafe(method(draggingEntered:))]
         fn dragging_entered(&self, _info: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
-            w::paint(self, &self.ivars().highlight, RADIUS);
+            w::fade(&self.ivars().glow, 1.0, 0.15);
             NSDragOperation::Move
         }
 
         #[unsafe(method(draggingExited:))]
         fn dragging_exited(&self, _info: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
-            w::paint(self, &self.ivars().fill, RADIUS);
+            w::fade(&self.ivars().glow, 0.0, 0.25);
         }
 
         #[unsafe(method(performDragOperation:))]
         fn perform_drag(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
-            w::paint(self, &self.ivars().fill, RADIUS);
+            w::fade(&self.ivars().glow, 0.0, 0.25);
             let text = info.draggingPasteboard().stringForType(unsafe { NSPasteboardTypeString });
             let index = text.and_then(|t| t.to_string().parse::<usize>().ok());
             if let Some(index) = index {
@@ -54,10 +54,15 @@ define_class!(
 
 impl DropColumn {
     pub fn new(fill: Retained<NSColor>, highlight: Retained<NSColor>, on_drop: OnDrop, mtm: MainThreadMarker) -> Retained<Self> {
-        let this = mtm.alloc::<Self>().set_ivars(Ivars { fill, highlight, on_drop });
+        let glow = w::filled(&highlight, RADIUS, mtm);
+        glow.setAlphaValue(0.0);
+        let this = mtm.alloc::<Self>().set_ivars(Ivars { glow, on_drop });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         this.setTranslatesAutoresizingMaskIntoConstraints(false);
-        w::paint(&this, &this.ivars().fill, RADIUS);
+        w::paint(&this, &fill, RADIUS);
+        // First subview, so it sits behind everything added later.
+        this.addSubview(&this.ivars().glow);
+        w::pin(&this.ivars().glow, &this, 0.0, Some(0.0));
         this.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeString }]));
         this
     }
