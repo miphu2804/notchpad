@@ -1,14 +1,18 @@
 //! Task model and persistence in `~/Library/Application Support/notchpad/tasks.txt`.
 //!
-//! One task per line: `done<TAB>day<TAB>text[<TAB>ext]`, where `done` is `0`/`1`, `day` is
-//! `YYYY-MM-DD` or empty for the Inbox, and the optional `ext` is the stable id of the task in
-//! an external service (`notion:<page>`, `linear:<ENG-1>`, `gcal:<event>`). Lines written
-//! before `ext` existed have three columns and parse with an empty `ext`.
+//! One task per line: `done<TAB>day<TAB>text[<TAB>ext[<TAB>time<TAB>priority<TAB>project<TAB>minutes]]`,
+//! where `done` is `0`/`1`, `day` is `YYYY-MM-DD` or empty for the Inbox, and the optional `ext`
+//! is the stable id of the task in an external service (`notion:<page>`, `linear:<ENG-1>`,
+//! `gcal:<event>`). The planning columns are `time` (`HH:MM`, 24-hour), `priority` (`low`,
+//! `medium`, `high`), `project` (short label) and `minutes` (estimated focus length). Every
+//! optional column may be empty, and trailing empty columns are not written, so lines from
+//! before `ext` (three columns) or before the planning columns (four) still parse.
 //!
 //! Shared by the app and the `notchpad-mcp` binary (which includes this file by path).
 
 use std::{fs, io, path::PathBuf, time::SystemTime};
 
+#[derive(Default)]
 pub struct Task {
     pub text: String,
     pub done: bool,
@@ -16,6 +20,14 @@ pub struct Task {
     pub day: String,
     /// External id used to dedupe synced tasks; empty for local-only tasks.
     pub ext: String,
+    /// `HH:MM` (24-hour) when the task is scheduled at a time of day, else empty.
+    pub time: String,
+    /// `low`, `medium` or `high`; empty means no priority.
+    pub priority: String,
+    /// Short project or area label such as `Work` or `Home`; may be empty.
+    pub project: String,
+    /// Estimated focus length in minutes; 0 when unknown.
+    pub minutes: u32,
 }
 
 pub fn path() -> PathBuf {
@@ -42,8 +54,13 @@ pub fn save(tasks: &[Task]) -> io::Result<()> {
     let lines: Vec<String> = tasks
         .iter()
         .map(|t| {
-            let line = format!("{}\t{}\t{}", u8::from(t.done), t.day, t.text);
-            if t.ext.is_empty() { line } else { format!("{line}\t{}", t.ext) }
+            let minutes = if t.minutes == 0 { String::new() } else { t.minutes.to_string() };
+            let done = if t.done { "1" } else { "0" };
+            let mut cols = vec![done, &t.day, &t.text, &t.ext, &t.time, &t.priority, &t.project, &minutes];
+            while cols.len() > 3 && cols.last() == Some(&"") {
+                cols.pop();
+            }
+            cols.join("\t")
         })
         .collect();
     let tmp = path.with_extension("tmp");
@@ -52,14 +69,20 @@ pub fn save(tasks: &[Task]) -> io::Result<()> {
 }
 
 fn parse(line: &str) -> Task {
-    match line.splitn(4, '\t').collect::<Vec<_>>()[..] {
-        [done, day, text, ext] => {
-            Task { text: text.to_owned(), done: done == "1", day: day.to_owned(), ext: ext.to_owned() }
-        }
-        [done, day, text] => {
-            Task { text: text.to_owned(), done: done == "1", day: day.to_owned(), ext: String::new() }
-        }
+    let cols: Vec<&str> = line.split('\t').collect();
+    if cols.len() < 3 {
         // A line without tabs (hand-edited file) becomes an Inbox task.
-        _ => Task { text: line.to_owned(), done: false, day: String::new(), ext: String::new() },
+        return Task { text: line.to_owned(), ..Task::default() };
+    }
+    let col = |i: usize| cols.get(i).copied().unwrap_or("").to_owned();
+    Task {
+        done: cols[0] == "1",
+        day: col(1),
+        text: col(2),
+        ext: col(3),
+        time: col(4),
+        priority: col(5),
+        project: col(6),
+        minutes: col(7).parse().unwrap_or(0),
     }
 }

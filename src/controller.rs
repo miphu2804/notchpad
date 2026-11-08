@@ -151,7 +151,7 @@ define_class!(
                     TOMORROW => days::key(1),
                     _ => days::key(0),
                 };
-                self.ivars().tasks.borrow_mut().push(Task { text: text.to_owned(), done: false, day, ext: String::new() });
+                self.ivars().tasks.borrow_mut().push(Task { text: text.to_owned(), day, ..Task::default() });
                 self.save_and_refresh();
             }
             field.setStringValue(&NSString::new());
