@@ -1,6 +1,7 @@
 mod controller;
 mod days;
 mod hotkey;
+mod logo;
 mod panel;
 mod store;
 mod widgets;

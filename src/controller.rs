@@ -19,6 +19,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 
 use crate::days;
+use crate::logo::LogoMark;
 use crate::panel::{self, NotchPanel, NotchShape};
 use crate::store::{self, Task};
 use crate::widgets::{self as w, rgba};
@@ -598,7 +599,8 @@ impl Controller {
     }
 
     fn build_header(&self, mtm: MainThreadMarker) -> (Retained<NSStackView>, Retained<NSButton>, Retained<NSButton>) {
-        let owl = w::label("🦉", 16.0, unsafe { NSFontWeightRegular }, &white(1.0), mtm);
+        let logo = LogoMark::new(20.0, mtm);
+        fixed_size(&logo, 20.0, 20.0);
         let name = w::label("Notchpad", 14.0, unsafe { NSFontWeightSemibold }, &white(1.0), mtm);
         let tab_workspace = w::pill("Workspace", 24.0, self.target(), sel!(showWorkspace:), mtm);
         let tab_week = w::pill("Week", 24.0, self.target(), sel!(showWeek:), mtm);
@@ -607,7 +609,7 @@ impl Controller {
         let quit = w::icon_button("xmark", "", 10.0, &white(0.55), self.target(), sel!(quit:), mtm);
 
         let header = w::stack(&[], false, 8.0, mtm);
-        header.addView_inGravity(&owl, NSStackViewGravity::Leading);
+        header.addView_inGravity(&logo, NSStackViewGravity::Leading);
         header.addView_inGravity(&name, NSStackViewGravity::Leading);
         header.addView_inGravity(&tab_workspace, NSStackViewGravity::Trailing);
         header.addView_inGravity(&tab_week, NSStackViewGravity::Trailing);
