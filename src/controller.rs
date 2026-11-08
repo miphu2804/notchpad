@@ -12,20 +12,22 @@ use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
     NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
-    NSLayoutConstraintOrientation, NSMainMenuWindowLevel, NSScreen, NSStackView,
+    NSLayoutConstraintOrientation, NSMainMenuWindowLevel, NSScreen, NSScrollView, NSStackView,
     NSStackViewDistribution, NSStackViewGravity, NSTextAlignment, NSTextField, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 
+use crate::clip_card::{self, ClipCard};
+use crate::clips::ClipHistory;
 use crate::days;
 use crate::drop_column::DropColumn;
 use crate::list_row::{self, ListRow};
 use crate::logo::LogoMark;
 use crate::notch_motion::NotchMotion;
 use crate::task_row::TaskRow;
-use crate::panel::{self, NotchPanel, NotchShape};
+use crate::panel::{self, FileDrag, NotchPanel, NotchShape};
 use crate::store::{self, Task};
 use crate::widgets::{self as w, rgba};
 
@@ -84,6 +86,22 @@ struct TaskCard {
     input: Retained<NSTextField>,
 }
 
+struct ClipsView {
+    body: Retained<NSView>,
+    /// Cards newest first, left to right, inside a horizontal scroll view.
+    strip: Retained<NSStackView>,
+    count: Retained<NSTextField>,
+    empty: Retained<NSTextField>,
+}
+
+#[derive(Clone, Copy, PartialEq, Default)]
+enum Tab {
+    #[default]
+    Workspace,
+    Week,
+    Clips,
+}
+
 struct Ui {
     panel: Retained<NotchPanel>,
     content: Retained<NSView>,
@@ -91,6 +109,8 @@ struct Ui {
     week: Retained<NSStackView>,
     tab_workspace: Retained<NSButton>,
     tab_week: Retained<NSButton>,
+    tab_clips: Retained<NSButton>,
+    clips: ClipsView,
     focus: FocusCard,
     tasks: TaskCard,
     columns: Vec<Column>,
@@ -105,7 +125,8 @@ pub struct State {
     expanded: Cell<bool>,
     /// Opened by hotkey: stays open until the pointer has visited and left.
     pinned: Cell<bool>,
-    week_tab: Cell<bool>,
+    tab: Cell<Tab>,
+    clips: RefCell<ClipHistory>,
     show_completed: Cell<bool>,
     /// Task index chosen with ▶; falls back to the first open task of today.
     focus: Cell<Option<usize>>,
@@ -190,14 +211,34 @@ define_class!(
 
         #[unsafe(method(showWorkspace:))]
         fn show_workspace(&self, _sender: &AnyObject) {
-            self.ivars().week_tab.set(false);
+            self.ivars().tab.set(Tab::Workspace);
             self.refresh();
         }
 
         #[unsafe(method(showWeek:))]
         fn show_week(&self, _sender: &AnyObject) {
-            self.ivars().week_tab.set(true);
+            self.ivars().tab.set(Tab::Week);
             self.refresh();
+        }
+
+        #[unsafe(method(showClips:))]
+        fn show_clips(&self, _sender: &AnyObject) {
+            self.ivars().tab.set(Tab::Clips);
+            self.refresh();
+        }
+
+        #[unsafe(method(clearClips:))]
+        fn clear_clips(&self, _sender: &AnyObject) {
+            self.ivars().clips.borrow_mut().clear();
+            self.render_clips();
+        }
+
+        #[unsafe(method(pollClips:))]
+        fn poll_clips(&self, _timer: &NSTimer) {
+            let changed = self.ivars().clips.borrow_mut().poll();
+            if changed {
+                self.render_clips();
+            }
         }
 
         #[unsafe(method(toggleTimer:))]
@@ -233,7 +274,7 @@ define_class!(
             if Instant::now() >= deadline {
                 self.stop_timer();
                 unsafe { NSBeep() };
-                self.ivars().week_tab.set(false);
+                self.ivars().tab.set(Tab::Workspace);
                 self.refresh();
                 self.pin_open();
             } else {
@@ -280,8 +321,11 @@ impl Controller {
         unsafe {
             // Lives for the whole process, so the returned timer handle is not kept.
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(2.0, this.target(), sel!(reload:), None, true);
+            // Reading the pasteboard's change count is cheap, so copies show up within half a second.
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.5, this.target(), sel!(pollClips:), None, true);
         }
         this.refresh();
+        this.render_clips();
         this.ui().panel.orderFrontRegardless();
         this
     }
@@ -292,7 +336,7 @@ impl Controller {
             self.ivars().pinned.set(false);
             self.set_expanded(false);
         } else {
-            self.ivars().week_tab.set(false);
+            self.ivars().tab.set(Tab::Workspace);
             self.refresh();
             self.pin_open();
         }
@@ -411,15 +455,55 @@ impl Controller {
 
     fn render_tabs(&self) {
         let ui = self.ui();
-        let week = self.ivars().week_tab.get();
-        if ui.week.isHidden() == week && !ui.content.isHidden() {
+        let current = self.ivars().tab.get();
+        let tabs: [(&NSView, &NSButton, Tab); 3] = [
+            (&ui.workspace, &ui.tab_workspace, Tab::Workspace),
+            (&ui.week, &ui.tab_week, Tab::Week),
+            (&ui.clips.body, &ui.tab_clips, Tab::Clips),
+        ];
+        if !ui.content.isHidden() && tabs.iter().any(|(body, _, tab)| body.isHidden() == (*tab == current)) {
             crossfade(&ui.content);
         }
-        ui.workspace.setHidden(week);
-        ui.week.setHidden(!week);
-        let (on, off) = if week { (&ui.tab_week, &ui.tab_workspace) } else { (&ui.tab_workspace, &ui.tab_week) };
-        w::style_pill(on, &white(1.0), &NSColor::blackColor(), 12.0);
-        w::style_pill(off, &white(0.1), &white(0.8), 12.0);
+        for (body, pill, tab) in tabs {
+            body.setHidden(tab != current);
+            if tab == current {
+                w::style_pill(pill, &white(1.0), &NSColor::blackColor(), 12.0);
+            } else {
+                w::style_pill(pill, &white(0.1), &white(0.8), 12.0);
+            }
+        }
+    }
+
+    /// Rebuilds the cards; called only when the history changes, so a card being dragged
+    /// out isn't torn down by unrelated refreshes.
+    fn render_clips(&self) {
+        let view = &self.ui().clips;
+        let history = self.ivars().clips.borrow();
+        clear(&view.strip);
+        for clip in history.clips() {
+            view.strip.addArrangedSubview(&ClipCard::new(clip, self.mtm()));
+        }
+        let n = history.clips().len();
+        view.count.setStringValue(&NSString::from_str(&n.to_string()));
+        view.empty.setHidden(n > 0);
+    }
+
+    /// Files dragged over the notch open it on Clips; dropped ones become clips.
+    fn file_drag(&self, event: FileDrag) {
+        match event {
+            FileDrag::Entered => {
+                self.cancel_recheck();
+                self.ivars().tab.set(Tab::Clips);
+                self.render_tabs();
+                self.set_expanded(true);
+            }
+            FileDrag::Exited => self.collapse_when_left(),
+            FileDrag::Dropped(paths) => {
+                self.ivars().clips.borrow_mut().add_files(paths);
+                self.render_clips();
+                self.collapse_when_left();
+            }
+        }
     }
 
     fn render_focus(&self) {
@@ -614,8 +698,13 @@ impl Controller {
         );
         panel.setAppearance(unsafe { NSAppearance::appearanceNamed(NSAppearanceNameDarkAqua) }.as_deref());
 
-        let background_alloc = mtm.alloc::<NotchShape>().set_ivars(());
-        let background: Retained<NotchShape> = unsafe { msg_send![super(background_alloc), initWithFrame: collapsed] };
+        let me = Weak::new(self);
+        let on_file_drag = Box::new(move |event| {
+            if let Some(controller) = me.load() {
+                controller.file_drag(event);
+            }
+        });
+        let background = NotchShape::new(collapsed, on_file_drag, mtm);
         panel.setContentView(Some(&background));
         let tracking = unsafe {
             NSTrackingArea::initWithRect_options_owner_userInfo(
@@ -637,7 +726,7 @@ impl Controller {
         content.setHidden(true);
         background.addSubview(&content);
 
-        let (header, tab_workspace, tab_week) = self.build_header(mtm);
+        let (header, tab_workspace, tab_week, tab_clips) = self.build_header(mtm);
         content.addSubview(&header);
         header.leadingAnchor().constraintEqualToAnchor_constant(&content.leadingAnchor(), 18.0).setActive(true);
         header.trailingAnchor().constraintEqualToAnchor_constant(&content.trailingAnchor(), -14.0).setActive(true);
@@ -650,7 +739,8 @@ impl Controller {
         workspace.setDistribution(NSStackViewDistribution::Fill);
         task_view.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
         let (week, columns) = self.build_week(mtm);
-        for body in [&workspace, &week] {
+        let clips = self.build_clips(mtm);
+        for body in [&*workspace, &*week, &*clips.body] {
             content.addSubview(body);
             body.leadingAnchor().constraintEqualToAnchor_constant(&content.leadingAnchor(), 12.0).setActive(true);
             body.trailingAnchor().constraintEqualToAnchor_constant(&content.trailingAnchor(), -12.0).setActive(true);
@@ -662,17 +752,19 @@ impl Controller {
         }
 
         let motion = NotchMotion::new(panel.clone(), content.clone(), collapsed, expanded, mtm);
-        Ui { panel, content, workspace, week, tab_workspace, tab_week, focus, tasks, columns, expanded, motion }
+        Ui { panel, content, workspace, week, tab_workspace, tab_week, tab_clips, clips, focus, tasks, columns, expanded, motion }
     }
 
-    fn build_header(&self, mtm: MainThreadMarker) -> (Retained<NSStackView>, Retained<NSButton>, Retained<NSButton>) {
+    fn build_header(&self, mtm: MainThreadMarker) -> (Retained<NSStackView>, Retained<NSButton>, Retained<NSButton>, Retained<NSButton>) {
         let logo = LogoMark::new(20.0, mtm);
         fixed_size(&logo, 20.0, 20.0);
         let name = w::label("Notchpad", 14.0, unsafe { NSFontWeightSemibold }, &white(1.0), mtm);
         let tab_workspace = w::pill("Workspace", 24.0, self.target(), sel!(showWorkspace:), mtm);
         let tab_week = w::pill("Week", 24.0, self.target(), sel!(showWeek:), mtm);
-        w::fit_pill(&tab_workspace, 12.0);
-        w::fit_pill(&tab_week, 12.0);
+        let tab_clips = w::pill("Clips", 24.0, self.target(), sel!(showClips:), mtm);
+        for tab in [&tab_workspace, &tab_week, &tab_clips] {
+            w::fit_pill(tab, 12.0);
+        }
         let quit = w::icon_button("xmark", "", 10.0, &white(0.55), self.target(), sel!(quit:), mtm);
 
         let header = w::stack(&[], false, 8.0, mtm);
@@ -680,8 +772,9 @@ impl Controller {
         header.addView_inGravity(&name, NSStackViewGravity::Leading);
         header.addView_inGravity(&tab_workspace, NSStackViewGravity::Trailing);
         header.addView_inGravity(&tab_week, NSStackViewGravity::Trailing);
+        header.addView_inGravity(&tab_clips, NSStackViewGravity::Trailing);
         header.addView_inGravity(&quit, NSStackViewGravity::Trailing);
-        (header, tab_workspace, tab_week)
+        (header, tab_workspace, tab_week, tab_clips)
     }
 
     fn build_focus_card(&self, mtm: MainThreadMarker) -> (Retained<NSView>, FocusCard) {
@@ -808,6 +901,53 @@ impl Controller {
             columns.push(Column { list, count });
         }
         (week, columns)
+    }
+
+    /// Title row, then the clips hanging from a line in a sideways-scrolling strip, then a hint.
+    fn build_clips(&self, mtm: MainThreadMarker) -> ClipsView {
+        let title = w::label("Clipboard", 15.0, unsafe { NSFontWeightBold }, &white(0.95), mtm);
+        let count = w::label("0", 12.0, unsafe { NSFontWeightMedium }, &white(0.45), mtm);
+        let clear_all = w::pill("Clear", 22.0, self.target(), sel!(clearClips:), mtm);
+        w::fit_pill(&clear_all, 10.0);
+        w::style_pill(&clear_all, &white(0.1), &white(0.8), 11.0);
+        let head = w::stack(&[&title, &count, &w::spacer(mtm), &clear_all], false, 8.0, mtm);
+
+        let strip = w::stack(&[], false, 10.0, mtm);
+        strip.setAlignment(NSLayoutAttribute::Top);
+        let scroll = NSScrollView::new(mtm);
+        scroll.setTranslatesAutoresizingMaskIntoConstraints(false);
+        scroll.setDrawsBackground(false);
+        scroll.setHasHorizontalScroller(false);
+        scroll.setDocumentView(Some(&strip));
+        let clip_view = scroll.contentView();
+        strip.leadingAnchor().constraintEqualToAnchor(&clip_view.leadingAnchor()).setActive(true);
+        strip.topAnchor().constraintEqualToAnchor(&clip_view.topAnchor()).setActive(true);
+        strip.heightAnchor().constraintEqualToAnchor(&clip_view.heightAnchor()).setActive(true);
+        // Room above the cards for their pegs, which straddle the line.
+        scroll.heightAnchor().constraintEqualToConstant(clip_card::HEIGHT + 4.0).setActive(true);
+        strip.setEdgeInsets(objc2_foundation::NSEdgeInsets { top: 2.0, left: 6.0, bottom: 2.0, right: 6.0 });
+
+        let empty = w::label("Copy something, take a screenshot, or drop a file on the notch.", 12.0, unsafe { NSFontWeightRegular }, &white(0.45), mtm);
+        let hint = w::label("Click a clip to copy it · drag it into any app", 11.0, unsafe { NSFontWeightRegular }, &white(0.35), mtm);
+
+        let body = w::stack(&[&head, &scroll, &hint], true, 8.0, mtm);
+        body.setCustomSpacing_afterView(4.0, &scroll);
+        for view in [&**head, &**scroll] {
+            view.widthAnchor().constraintEqualToAnchor(&body.widthAnchor()).setActive(true);
+        }
+        // Behind the cards, through the middle of their pegs.
+        let line = w::filled(&white(0.18), 0.5, mtm);
+        body.addSubview_positioned_relativeTo(&line, NSWindowOrderingMode::Below, None);
+        line.heightAnchor().constraintEqualToConstant(1.0).setActive(true);
+        line.leadingAnchor().constraintEqualToAnchor(&body.leadingAnchor()).setActive(true);
+        line.trailingAnchor().constraintEqualToAnchor(&body.trailingAnchor()).setActive(true);
+        line.centerYAnchor().constraintEqualToAnchor_constant(&scroll.topAnchor(), 2.0 + clip_card::PEG_HEIGHT / 2.0).setActive(true);
+        // On the body, not the scroll view, which lays out its own subviews.
+        body.addSubview(&empty);
+        empty.setTranslatesAutoresizingMaskIntoConstraints(false);
+        empty.centerXAnchor().constraintEqualToAnchor(&scroll.centerXAnchor()).setActive(true);
+        empty.centerYAnchor().constraintEqualToAnchor(&scroll.centerYAnchor()).setActive(true);
+        ClipsView { body: body.into_super(), strip, count, empty }
     }
 
     /// "+ <input>" row used under every task list.

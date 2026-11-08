@@ -1,3 +1,5 @@
+mod clip_card;
+mod clips;
 mod controller;
 mod days;
 mod drop_column;

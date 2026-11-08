@@ -5,7 +5,7 @@ use objc2::runtime::ProtocolObject;
 use objc2::{AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSButton, NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession, NSDraggingSource,
-    NSEvent, NSImage, NSPasteboardItem, NSPasteboardTypeString, NSView,
+    NSEvent, NSPasteboardItem, NSPasteboardTypeString, NSView,
 };
 use objc2_foundation::{NSArray, NSObjectProtocol, NSPoint, NSString};
 
@@ -63,7 +63,7 @@ define_class!(
                 NSDraggingItem::alloc(),
                 ProtocolObject::from_ref(&*payload),
             );
-            unsafe { item.setDraggingFrame_contents(self.bounds(), Some(&self.snapshot())) };
+            unsafe { item.setDraggingFrame_contents(self.bounds(), Some(&crate::widgets::snapshot(self))) };
             self.beginDraggingSessionWithItems_event_source(
                 &NSArray::from_retained_slice(&[item]),
                 event,
@@ -88,16 +88,5 @@ impl TaskRow {
 
     pub fn index(&self) -> usize {
         self.ivars().index
-    }
-
-    /// Image of the row as drawn now, shown under the pointer while dragging.
-    fn snapshot(&self) -> Retained<NSImage> {
-        let bounds = self.bounds();
-        let image = NSImage::initWithSize(NSImage::alloc(), bounds.size);
-        if let Some(rep) = self.bitmapImageRepForCachingDisplayInRect(bounds) {
-            self.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
-            image.addRepresentation(&rep);
-        }
-        image
     }
 }

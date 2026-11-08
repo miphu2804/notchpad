@@ -2,7 +2,7 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
-use objc2::{ClassType, MainThreadMarker, msg_send};
+use objc2::{AnyThread, ClassType, MainThreadMarker, msg_send};
 use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSAnimationContext, NSButton, NSColor, NSFocusRingType, NSFont,
     NSFontWeight, NSImage, NSImageSymbolConfiguration, NSLayoutConstraintOrientation,
@@ -159,6 +159,17 @@ pub fn spacer(mtm: MainThreadMarker) -> Retained<NSView> {
     view.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
     view.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Vertical);
     view
+}
+
+/// Image of `view` as drawn now, shown under the pointer while dragging it.
+pub fn snapshot(view: &NSView) -> Retained<NSImage> {
+    let bounds = view.bounds();
+    let image = NSImage::initWithSize(NSImage::alloc(), bounds.size);
+    if let Some(rep) = view.bitmapImageRepForCachingDisplayInRect(bounds) {
+        view.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
+        image.addRepresentation(&rep);
+    }
+    image
 }
 
 /// System Settings › Accessibility › Display › Reduce motion.

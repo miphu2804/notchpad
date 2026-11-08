@@ -1,8 +1,16 @@
 //! The notch window: a borderless panel and the view that draws the notch shape.
 
-use objc2::{MainThreadOnly, define_class};
-use objc2_app_kit::{NSBezierPath, NSColor, NSPanel, NSScreen, NSView};
-use objc2_foundation::{NSPoint, NSRect};
+use std::path::PathBuf;
+
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2_app_kit::{
+    NSBezierPath, NSColor, NSDragOperation, NSDraggingInfo, NSPanel, NSPasteboardTypeFileURL, NSScreen, NSView,
+};
+use objc2_foundation::{NSArray, NSPoint, NSRect};
+
+use crate::clips;
 
 /// Width of the concave "ears" where the notch meets the top bezel, for a given height.
 /// Matches the MacBook Pro (M4 Pro) notch when collapsed and grows a little when expanded.
@@ -37,16 +45,48 @@ define_class!(
     }
 );
 
+/// A file drag over the notch, reported to the controller.
+pub enum FileDrag {
+    Entered,
+    Exited,
+    Dropped(Vec<PathBuf>),
+}
+
+pub struct ShapeIvars {
+    on_file_drag: Box<dyn Fn(FileDrag)>,
+}
+
 define_class!(
     /// Black notch silhouette: concave ears at the top corners flowing into the bezel,
     /// rounded bottom corners. Radii follow the current height, so the shape morphs
     /// smoothly while the window animates between collapsed and expanded.
+    /// Also the drop target for files dragged onto the notch.
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
+    #[ivars = ShapeIvars]
     #[name = "NotchShape"]
     pub struct NotchShape;
 
     impl NotchShape {
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(&self, _info: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            (self.ivars().on_file_drag)(FileDrag::Entered);
+            NSDragOperation::Copy
+        }
+
+        #[unsafe(method(draggingExited:))]
+        fn dragging_exited(&self, _info: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
+            (self.ivars().on_file_drag)(FileDrag::Exited);
+        }
+
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            let paths = clips::file_paths(&info.draggingPasteboard());
+            let accepted = !paths.is_empty();
+            (self.ivars().on_file_drag)(FileDrag::Dropped(paths));
+            accepted
+        }
+
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
             // Cubic Bézier factor for a quarter circle.
@@ -72,3 +112,12 @@ define_class!(
         }
     }
 );
+
+impl NotchShape {
+    pub fn new(frame: NSRect, on_file_drag: Box<dyn Fn(FileDrag)>, mtm: MainThreadMarker) -> Retained<Self> {
+        let this = mtm.alloc::<Self>().set_ivars(ShapeIvars { on_file_drag });
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+        this.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
+        this
+    }
+}
