@@ -1,0 +1,28 @@
+[package]
+name = "notchpad"
+version = "0.1.0"
+edition = "2024"
+default-run = "notchpad"
+
+[[bin]]
+name = "notchpad"
+path = "src/main.rs"
+
+[[bin]]
+name = "notchpad-mcp"
+path = "src/bin/notchpad-mcp.rs"
+
+[dependencies]
+objc2 = "0.6.5"
+objc2-app-kit = "0.3.2"
+objc2-core-graphics = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2-quartz-core = "0.3.2"
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
