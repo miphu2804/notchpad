@@ -1,3 +1,15 @@
+### [2026-11-08 21:58 UTC+07:00] — [Feature] Notchpad.app bundle
+
+**Done:**
+`macos/bundle.sh` builds an ad-hoc signed `Notchpad.app` with the hexagon icon, and `--install` copies it to `/Applications`. It runs as an agent app: no Dock icon, no menu bar.
+
+**Changed  files:**
+- `macos/bundle.sh`, `macos/Info.plist`, `macos/AppIcon.icns` — created
+- `README.md` — modified (install section)
+
+**Flow explained:**
+The script runs `cargo build --release`, lays out `Contents/{MacOS,Resources}` with both binaries, the plist and the icon, signs with `codesign --sign -`, then optionally replaces the copy in `/Applications`. The icon is the `LogoMark` view rendered at 824 pt on a 1024 pt canvas and converted with `iconutil`.
+
 ### [2026-11-08 21:33 UTC+07:00] — [Feature] Smooth animations: notch spring, tabs, rows, drops
 
 **Done:**

@@ -3,6 +3,13 @@
 Tiny native macOS notch task app (Rust, AppKit). `cargo build --release` produces two binaries:
 `notchpad` (the app) and `notchpad-mcp` (a stdio MCP server over the same task file).
 
+## Install as a Mac app
+
+`macos/bundle.sh --install` builds `Notchpad.app` (icon, no Dock icon, ad-hoc signed) and copies
+it to `/Applications`. Open it from Spotlight or Launchpad; quit with the ✕ in the notch.
+Re-run the script after pulling changes. To start it at login, add it in System Settings ›
+General › Login Items.
+
 ## Task sync (Notion, Linear, Google Calendar)
 
 Sync is Claude-driven: Claude uses the service's MCP connector plus the `notchpad` MCP server.
