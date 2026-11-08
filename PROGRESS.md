@@ -1,3 +1,19 @@
+### [2026-11-08 22:06 UTC+07:00] — [Feature] Clips: clipboard history in the notch
+
+**Done:**
+New Clips tab. Text, images and files you copy, new screenshots and screen recordings, and files dragged onto the notch hang as cards on a line, newest first, in a sideways-scrolling strip (12 kept). Clicking a card puts it back on the clipboard; dragging a card drops it into any app. Clear empties the list. Clips stay in memory only. Copies marked concealed or transient (password managers) are skipped. TIFF copies are stored as PNG, and previews are 240 pt thumbnails, so a full-screen screenshot doesn't stay decoded. Idle CPU stays at 0%, RSS 18 MB; the release binary grew from 390 KB to 423 KB.
+
+**Changed  files:**
+- `src/clips.rs` — created (`ClipHistory`: pasteboard and screenshot-folder polling, dedupe, copy back)
+- `src/clip_card.rs` — created (`ClipCard`: click to copy, drag source)
+- `src/panel.rs` — modified (`NotchShape` accepts file drags and reports `FileDrag` events)
+- `src/controller.rs` — modified (`Tab` enum with Clips, `render_clips`, `file_drag`, 0.5 s `pollClips:` timer)
+- `src/widgets.rs`, `src/task_row.rs` — modified (`snapshot` shared by both drag sources)
+- `src/main.rs` — modified (modules)
+
+**Flow explained:**
+Every 0.5 s `pollClips:` compares the general pasteboard's `changeCount` and, only when the screenshot folder's mtime changed, lists that folder (`com.apple.screencapture location`, else Desktop) for new files tagged `kMDItemIsScreenCapture` or named like screenshots. A new clip equal to an existing one moves that one to the front, so a clicked card (re-copied) also jumps to the front on the next poll. Cards are rebuilt only when the history changes, so a refresh never tears down a card mid-drag. A file dragged over the notch opens it on Clips; dropping adds the files, and the panel closes once the pointer leaves.
+
 ### [2026-11-08 21:44 UTC+07:00] — [Feature] Notchpad.app bundle
 
 **Done:**
