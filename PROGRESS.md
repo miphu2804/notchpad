@@ -1,3 +1,17 @@
+### [2026-11-08 21:20 UTC+07:00] — [Feature] Let Claude plan it
+
+**Done:**
+Tasks gained optional `time` (HH:MM), `priority` (low/medium/high), `project` and `minutes`, stored as columns 5-8 of `tasks.txt`; 3- and 4-column lines still load, and trailing empty columns are not written. The MCP server has a new `plan_day` tool (several tasks, one atomic save, upsert by `ext` or by same open title on the same day) and `update_task`; `add_task` and `list_tasks` carry the new fields, and day/time/priority are validated. Today and Week rows show a dim line such as `5:00 PM · High · Home · 45 min`; Today's open tasks sort by time, untimed after. Lists now count two-line rows as 1.5 rows so they never overflow the card. `/plan-day` command added.
+
+**Changed  files:**
+- `src/store.rs` — modified (planning fields, line format, `Default`)
+- `src/bin/notchpad-mcp.rs` — modified (`plan_day`, `update_task`, field validation)
+- `src/controller.rs` — modified (`with_meta`, `meta_line`, `rows_that_fit`, Today time sort)
+- `.claude/commands/plan-day.md` — created
+
+**Flow explained:**
+"plan my afternoon: call mom at 5pm, gym after work !high" → Claude splits it and calls `plan_day` once → the server validates every item, upserts them in memory and saves `tasks.txt` once (any invalid item aborts with nothing written) → the app sees the new mtime within 2s and re-renders, with timed tasks first in the Today card.
+
 ### [2026-11-08 21:11 UTC+07:00] — [Feature] Hexagon logo; Week kanban drag-and-drop
 
 **Done:**
