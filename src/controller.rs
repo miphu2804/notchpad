@@ -449,7 +449,10 @@ impl Controller {
         let card = &self.ui().tasks;
         let today = days::key(0);
         let tasks = self.ivars().tasks.borrow();
-        let todo: Vec<usize> = (0..tasks.len()).filter(|&i| is_open_today(&tasks[i], &today)).collect();
+        let mut todo: Vec<usize> = (0..tasks.len()).filter(|&i| is_open_today(&tasks[i], &today)).collect();
+        // Timed tasks first in clock order; untimed keep their stored order after them.
+        let list: &[Task] = &tasks;
+        todo.sort_by_key(|&i| (list[i].time.is_empty(), list[i].time.as_str()));
         let done: Vec<usize> = (0..tasks.len()).filter(|&i| tasks[i].done && tasks[i].day == today).collect();
 
         let show_completed = self.ivars().show_completed.get();
@@ -463,14 +466,15 @@ impl Controller {
 
         clear(&card.rows);
         let shown = if show_completed { &done } else { &todo };
-        for (k, &i) in shown.iter().take(MAX_CARD_ROWS).enumerate() {
+        let fit = rows_that_fit(&tasks, shown, MAX_CARD_ROWS);
+        for (k, &i) in shown.iter().take(fit).enumerate() {
             if k > 0 {
                 add_full_width(&card.rows, &w::filled(&ink(0.08), 0.0, self.mtm()), Some(1.0));
             }
             add_full_width(&card.rows, &self.card_row(i, &tasks[i]), None);
         }
         let empty = if show_completed { "Nothing completed yet today" } else { "All clear. Add a task below." };
-        self.add_overflow_note(&card.rows, shown.len(), MAX_CARD_ROWS, empty, &ink(0.5));
+        self.add_overflow_note(&card.rows, shown.len(), fit, empty, &ink(0.5));
     }
 
     fn card_row(&self, index: usize, task: &Task) -> Retained<NSView> {
@@ -479,8 +483,7 @@ impl Controller {
         let check = w::icon_button(circle, "", 15.0, &ink(0.7), self.target(), sel!(toggleTask:), mtm);
         check.setTag(index as isize);
         let alpha = if task.done { 0.45 } else { 0.9 };
-        let title = w::label(&task.text, 13.0, unsafe { NSFontWeightRegular }, &ink(alpha), mtm);
-        title.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
+        let title = with_meta(task, w::label(&task.text, 13.0, unsafe { NSFontWeightRegular }, &ink(alpha), mtm), &ink(0.5), mtm);
         let play = w::icon_button("play.fill", "", 10.0, &ink(0.45), self.target(), sel!(focusTask:), mtm);
         play.setTag(index as isize);
         play.setHidden(task.done);
@@ -504,10 +507,11 @@ impl Controller {
                 .collect();
             ui.count.setStringValue(&NSString::from_str(&shown.len().to_string()));
             clear(&ui.list);
-            for &i in shown.iter().take(MAX_COLUMN_ROWS) {
+            let fit = rows_that_fit(&tasks, &shown, MAX_COLUMN_ROWS);
+            for &i in shown.iter().take(fit) {
                 add_full_width(&ui.list, &self.week_row(i, &tasks[i]), None);
             }
-            self.add_overflow_note(&ui.list, shown.len(), MAX_COLUMN_ROWS, "", &white(0.4));
+            self.add_overflow_note(&ui.list, shown.len(), fit, "", &white(0.4));
         }
     }
 
@@ -515,8 +519,7 @@ impl Controller {
         let mtm = self.mtm();
         let check = w::icon_button("circle", "", 14.0, &white(0.55), self.target(), sel!(toggleTask:), mtm);
         check.setTag(index as isize);
-        let title = w::label(&task.text, 13.0, unsafe { NSFontWeightRegular }, &white(0.9), mtm);
-        title.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
+        let title = with_meta(task, w::label(&task.text, 13.0, unsafe { NSFontWeightRegular }, &white(0.9), mtm), &white(0.45), mtm);
         let content = w::stack(&[&check, &title], false, 8.0, mtm);
         TaskRow::new(index, &content, mtm).into_super()
     }
@@ -814,6 +817,56 @@ impl Controller {
 /// Open task scheduled for today or rolled over from an earlier day (Inbox excluded).
 fn is_open_today(task: &Task, today: &str) -> bool {
     !task.done && !task.day.is_empty() && task.day.as_str() <= today
+}
+
+/// The row's title, stretched to fill the row, with a dim metadata line under it when the
+/// task has a time, priority, project or estimate.
+fn with_meta(task: &Task, title: Retained<NSTextField>, color: &NSColor, mtm: MainThreadMarker) -> Retained<NSView> {
+    let meta = meta_line(task);
+    let view: Retained<NSView> = if meta.is_empty() {
+        title.into_super().into_super()
+    } else {
+        let line = w::label(&meta, 11.0, unsafe { NSFontWeightRegular }, color, mtm);
+        let stack = w::stack(&[&title, &line], true, 1.0, mtm);
+        // A stack view hugs its content through its own priority, not the NSView one.
+        stack.setHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
+        stack.into_super()
+    };
+    view.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
+    view
+}
+
+/// `5:00 PM · High · Home · 45 min`, skipping parts the task doesn't have.
+fn meta_line(task: &Task) -> String {
+    let mut parts = Vec::new();
+    if let Some((h, m)) = task.time.split_once(':').and_then(|(h, m)| Some((h.parse::<u32>().ok()?, m))) {
+        let suffix = if h < 12 { "AM" } else { "PM" };
+        parts.push(format!("{}:{m} {suffix}", (h + 11) % 12 + 1));
+    }
+    let mut priority = task.priority.chars();
+    if let Some(first) = priority.next() {
+        parts.push(first.to_uppercase().chain(priority).collect());
+    }
+    if !task.project.is_empty() {
+        parts.push(task.project.clone());
+    }
+    if task.minutes > 0 {
+        parts.push(format!("{} min", task.minutes));
+    }
+    parts.join(" · ")
+}
+
+/// How many of `shown` fit in a list sized for `max_rows` plain rows. A row with a metadata
+/// line is about 1.5 times as tall, so rows are counted in half-row units.
+fn rows_that_fit(tasks: &[Task], shown: &[usize], max_rows: usize) -> usize {
+    let mut used = 0;
+    shown
+        .iter()
+        .take_while(|&&i| {
+            used += if meta_line(&tasks[i]).is_empty() { 2 } else { 3 };
+            used <= 2 * max_rows
+        })
+        .count()
 }
 
 fn clear(stack: &NSStackView) {
