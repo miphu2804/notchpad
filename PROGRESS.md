@@ -1,4 +1,4 @@
-### [2026-11-08 21:58 UTC+07:00] — [Feature] Notchpad.app bundle
+### [2026-11-08 21:44 UTC+07:00] — [Feature] Notchpad.app bundle
 
 **Done:**
 `macos/bundle.sh` builds an ad-hoc signed `Notchpad.app` with the hexagon icon, and `--install` copies it to `/Applications`. It runs as an agent app: no Dock icon, no menu bar.
