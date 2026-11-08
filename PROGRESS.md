@@ -1,3 +1,18 @@
+### [2026-11-08 21:11 UTC+07:00] — [Feature] Hexagon logo; Week kanban drag-and-drop
+
+**Done:**
+Header owl replaced by a vector logo (two interlinked rounded-hexagon rings, violet and amber, on a lavender tile). Week rows can be dragged onto any column: the drop reschedules the task (Inbox = no day, Today, Tomorrow) and places it above the row under the pointer. Project is now under git (`main`, Conventional Commits, one branch per feature).
+
+**Changed  files:**
+- `src/logo.rs` — created (`LogoMark` view)
+- `src/task_row.rs` — created (`TaskRow`, drag source)
+- `src/drop_column.rs` — created (`DropColumn`, drop target)
+- `src/controller.rs` — modified (logo in header, `drop_task`, `save`, `redraw:`)
+- `src/main.rs` — modified (modules)
+
+**Flow explained:**
+Dragging a row puts its store index on the pasteboard. The column under the pointer highlights, and on drop calls `Controller::drop_task`, which moves the task in the list, sets its day, keeps the focus index pointing at the same task, saves, and re-renders on the next run-loop pass so the drag source is not torn down mid-session.
+
 ### [2026-11-08 21:05 UTC+07:00] — [Feature] MCP server and task-sync groundwork
 
 **Done:**
