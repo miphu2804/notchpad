@@ -37,7 +37,7 @@ const BAR_PERIODS: [f64; 4] = [0.47, 0.61, 0.38, 0.54];
 
 /// Centre-to-centre spacing of the dot-matrix countdown; [`COLS`] of it fits [`TIME_WIDTH`].
 const DOT_PITCH: f64 = 1.7;
-const DOT_SIZE: f64 = 1.2;
+const DOT_SIZE: f64 = 1.4;
 
 const CORAL: (u8, u8, u8) = (217, 112, 90);
 const BREAK_GREEN: (u8, u8, u8) = (120, 190, 130);
