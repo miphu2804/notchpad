@@ -20,10 +20,11 @@ use objc2_event_kit::EKEventStoreChangedNotification;
 use objc2_foundation::{NSMutableAttributedString, NSNumber, NSRange, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 
+use crate::ascii_timer;
 use crate::calendar::{self, Access, Calendar, Event};
 use crate::clip_card::{self, ClipCard};
 use crate::clips::ClipHistory;
-use crate::settings::{self as prefs, Settings, Size};
+use crate::settings::{self as prefs, Settings, Size, TimerStyle};
 use crate::settings_window::SettingsWindow;
 use crate::days;
 use crate::export;
@@ -87,6 +88,10 @@ const SNOOZE_MIN: u32 = 5;
 const REMIND_GRACE_MIN: u32 = 5;
 const TOMATO_SIZE: f64 = 22.0;
 const CORAL: (u8, u8, u8) = (217, 112, 90);
+/// The calm colour of a break, as the focus ring draws it.
+const CALM: (u8, u8, u8) = (111, 201, 160);
+/// ASCII timer frames per second.
+const ASCII_FPS: f64 = 10.0;
 /// Cards and the controls on them, in the near-black, faintly cool greys of Linear's dark theme.
 const SURFACE_RAISED: (u8, u8, u8) = (40, 41, 45);
 
@@ -100,6 +105,11 @@ fn white(alpha: f64) -> Retained<NSColor> {
 
 struct FocusCard {
     ring: Retained<FocusRing>,
+    /// The ASCII timer style's stand-in for the ring and tomatoes: the art and its "ends at" line.
+    ascii: Retained<NSStackView>,
+    art: Retained<NSTextField>,
+    art_ends: Retained<NSTextField>,
+    grid: Retained<NSStackView>,
     round: Retained<NSTextField>,
     daily_focus: Retained<NSTextField>,
     count: Retained<NSTextField>,
@@ -272,6 +282,10 @@ pub struct State {
     done_today: Cell<usize>,
     focus_today: Cell<u32>,
     ticker: RefCell<Option<Retained<NSTimer>>>,
+    /// Runs only while an ASCII-style session counts down where it can be seen.
+    ascii_timer: RefCell<Option<Retained<NSTimer>>>,
+    /// Animation frame of the ASCII timer.
+    frame: Cell<u64>,
     /// Modification time of `tasks.txt` as last loaded or saved by this process.
     seen_mtime: Cell<Option<std::time::SystemTime>>,
     /// Made on first use. While it is open it hosts the panel's content view, and hover
@@ -723,6 +737,16 @@ define_class!(
             self.render_focus();
         }
 
+        #[unsafe(method(tickAscii:))]
+        fn tick_ascii(&self, _timer: &NSTimer) {
+            self.ivars().frame.set(self.ivars().frame.get().wrapping_add(1));
+            if self.ivars().expanded.get() {
+                self.render_art();
+            } else {
+                self.sync_activity();
+            }
+        }
+
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: &NSTimer) {
             let Some(deadline) = self.ivars().deadline.get() else {
@@ -1005,6 +1029,7 @@ impl Controller {
         if self.ivars().expanded.replace(on) != on {
             self.ui().motion.set_open(on);
             self.sync_music_timer();
+            self.sync_ascii_timer();
             self.sync_activity();
             if !on && self.terminal_has_focus() {
                 self.ui().panel.makeFirstResponder(None);
@@ -1163,6 +1188,39 @@ impl Controller {
             timer.invalidate();
         }
         self.render_focus();
+    }
+
+    /// Frames only while the ASCII style runs and shows: in the open panel, or in the collapsed
+    /// wing. Paused, idle, hidden or under Reduce Motion there is no timer at all.
+    fn sync_ascii_timer(&self) {
+        let state = self.ivars();
+        let settings = state.settings.borrow();
+        let seen = state.expanded.get() || settings.wing_focus;
+        let wanted = settings.timer_style == TimerStyle::Ascii && self.running() && seen && !w::reduce_motion();
+        let mut timer = state.ascii_timer.borrow_mut();
+        if wanted && timer.is_none() {
+            *timer = Some(unsafe {
+                NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(1.0 / ASCII_FPS, self.target(), sel!(tickAscii:), None, true)
+            });
+        } else if !wanted && let Some(timer) = timer.take() {
+            timer.invalidate();
+        }
+    }
+
+    /// Reduce Motion gets the first frame.
+    fn art_frame(&self) -> u64 {
+        if w::reduce_motion() { 0 } else { self.ivars().frame.get() }
+    }
+
+    fn render_art(&self) {
+        let card = &self.ui().focus;
+        let state = self.ivars();
+        let total = if self.stopwatch() { 0 } else { self.session_secs() };
+        let on_break = state.on_break.get();
+        let art = ascii_timer::frame(self.shown_secs(), total, self.art_frame(), on_break);
+        card.art.setStringValue(&NSString::from_str(&art));
+        let (r, g, b) = if on_break { CALM } else { CORAL };
+        card.art.setTextColor(Some(&rgba(r, g, b, 1.0)));
     }
 
     /// One-second ticks only while someone can see the position move.
@@ -1381,15 +1439,24 @@ impl Controller {
             "Break · short".to_owned()
         });
         set(&card.time, &mmss(remaining));
+        let ascii = state.settings.borrow().timer_style == TimerStyle::Ascii;
+        card.ring.setHidden(ascii);
+        card.grid.setHidden(ascii);
+        card.ascii.setHidden(!ascii);
         // Recomputed on every tick, never cached: `Instant` skips sleep, so the end moves later by
         // the time the Mac slept and the label is only right if it is derived again after wake.
-        set(&card.ends, &match (running, active) {
+        let ends = match (running, active) {
             (true, _) if stopwatch => "counting up".to_owned(),
             (true, _) => format!("ends at {}", days::clock_in(remaining)),
             (false, true) => "paused".to_owned(),
             (false, false) if stopwatch => "∞ no limit".to_owned(),
             (false, false) => format!("{} min", remaining / 60),
-        });
+        };
+        set(&card.ends, &ends);
+        set(&card.art_ends, &ends);
+        if ascii {
+            self.render_art();
+        }
         card.pause.setTitle(&NSString::from_str(match (running, active) {
             (true, _) => "Pause",
             (false, true) => "Resume",
@@ -1401,6 +1468,8 @@ impl Controller {
         card.plus.setAlphaValue(if active && !stopwatch { 1.0 } else { 0.4 });
         let hint = (!active).then(|| NSString::from_str("Click to change the length"));
         card.time.setToolTip(hint.as_deref());
+        card.art.setToolTip(hint.as_deref());
+        self.sync_ascii_timer();
         self.sync_activity();
     }
 
@@ -1409,10 +1478,14 @@ impl Controller {
         let state = self.ivars();
         let ui = self.ui();
         let settings = state.settings.borrow();
-        let countdown = (settings.wing_focus && self.session_active()).then(|| mmss(self.shown_secs()));
+        let ascii = settings.timer_style == TimerStyle::Ascii;
+        let countdown = (settings.wing_focus && self.session_active()).then(|| {
+            if ascii { ascii_timer::wing(self.shown_secs(), self.art_frame()) } else { mmss(self.shown_secs()) }
+        });
         let activity = Activity {
             music: state.now_playing.borrow().track.as_ref().filter(|t| t.playing && settings.wing_music).map(|t| t.artwork.clone()),
             countdown: countdown.as_deref().map(|text| (text, state.on_break.get())),
+            mono: ascii,
         };
         ui.activity.show(&activity, !state.expanded.get());
         let wings = activity.wing();
@@ -1967,6 +2040,16 @@ impl Controller {
         // In the compact notch the ring must shrink before any text row is compressed.
         preferred.setPriority(200.0);
         preferred.setActive(true);
+        let art = w::label("", 12.0, unsafe { NSFontWeightRegular }, &white(0.9), mtm);
+        art.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(12.0, unsafe { NSFontWeightRegular })));
+        art.setAlignment(NSTextAlignment::Center);
+        art.setLineBreakMode(NSLineBreakMode::ByClipping);
+        let cycle_art = unsafe { NSClickGestureRecognizer::initWithTarget_action(mtm.alloc(), Some(self.target()), Some(sel!(cycleDuration:))) };
+        art.addGestureRecognizer(&cycle_art);
+        let art_ends = w::label("", 10.0, unsafe { NSFontWeightRegular }, &white(0.55), mtm);
+        let ascii = w::stack(&[&art, &art_ends], true, 4.0, mtm);
+        ascii.setAlignment(NSLayoutAttribute::CenterX);
+        ascii.setHidden(true);
         let clock = w::stack(&[&time, &ends], true, 0.0, mtm);
         clock.setAlignment(NSLayoutAttribute::CenterX);
         ring.addSubview(&clock);
@@ -1987,7 +2070,7 @@ impl Controller {
 
         let rule = w::filled(&white(0.08), 0.0, mtm);
         rule.heightAnchor().constraintEqualToConstant(1.0).setActive(true);
-        let column = w::stack(&[&header, &task, &ring, &grid, &buttons, &rule, &footer], true, 4.0, mtm);
+        let column = w::stack(&[&header, &task, &ring, &ascii, &grid, &buttons, &rule, &footer], true, 4.0, mtm);
         column.setAlignment(NSLayoutAttribute::CenterX);
         card.addSubview(&column);
         column.centerXAnchor().constraintEqualToAnchor(&card.centerXAnchor()).setActive(true);
@@ -1999,7 +2082,7 @@ impl Controller {
             view.widthAnchor().constraintEqualToConstant(inner).setActive(true);
         }
 
-        (card, FocusCard { ring, round, daily_focus, count, tomatoes, task, badge, time, ends, pause, end, plus })
+        (card, FocusCard { ring, ascii, art, art_ends, grid, round, daily_focus, count, tomatoes, task, badge, time, ends, pause, end, plus })
     }
 
     fn build_task_card(&self, mtm: MainThreadMarker) -> (Retained<NSView>, TaskCard) {

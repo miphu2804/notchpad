@@ -1,3 +1,4 @@
+mod ascii_timer;
 mod brand_logos;
 mod calendar;
 mod chime;

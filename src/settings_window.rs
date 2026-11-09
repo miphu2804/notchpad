@@ -18,7 +18,7 @@ use crate::calendar::{self, Access};
 use crate::reminders;
 use crate::claude_mcp;
 use crate::linear;
-use crate::settings::{FOCUS_CHOICES, LONG_BREAK_CHOICES, REMIND_CHOICES, SECTIONS, SHORT_BREAK_CHOICES, Settings, Size};
+use crate::settings::{FOCUS_CHOICES, LONG_BREAK_CHOICES, REMIND_CHOICES, SECTIONS, SHORT_BREAK_CHOICES, Settings, Size, TimerStyle};
 use crate::widgets::{self as w, rgba};
 
 const WIDTH: f64 = 680.0;
@@ -42,6 +42,7 @@ const FOCUS_ROW: isize = 0;
 const SHORT_BREAK_ROW: isize = 1;
 const LONG_BREAK_ROW: isize = 2;
 const REMIND_ROW: isize = 3;
+const STYLE_ROW: isize = 4;
 /// Rows of the Integrations pane, in order; they are the tags of their controls (not below 10: labels and
 /// image views default to tag 0), and their blurbs carry `STATUS + row` so the actions can rewrite them.
 const CLAUDE_CODE_ROW: isize = 10;
@@ -133,6 +134,7 @@ define_class!(
                 SHORT_BREAK_ROW => settings.short_break = SHORT_BREAK_CHOICES[index],
                 LONG_BREAK_ROW => settings.long_break = LONG_BREAK_CHOICES[index],
                 REMIND_ROW => settings.remind = REMIND_CHOICES[index],
+                STYLE_ROW => settings.timer_style = TimerStyle::ALL[index],
                 _ => return,
             }
             self.commit(settings);
@@ -383,6 +385,7 @@ impl SettingsWindow {
             menu_row("cup.and.saucer", "Short break", None, minutes(&SHORT_BREAK_CHOICES, settings.short_break)),
             menu_row("sofa", "Long break", Some("After every fourth pomodoro"), minutes(&LONG_BREAK_CHOICES, settings.long_break)),
             menu_row("bell", "Task reminders", Some("A card under the notch for timed tasks"), Some((remind_items, remind_index, sel!(setFocusOption:)))),
+            menu_row("textformat", "Timer style", Some("Draw the countdown as animated text"), Some((TimerStyle::ALL.iter().map(|t| t.name().to_owned()).collect(), settings.timer_style as usize, sel!(setFocusOption:)))),
             Row { symbol: "speaker.wave.2", name: "Sound", blurb: Some("Chime when a session ends or a task is due"), switch: Some((settings.sound, sel!(toggleSound:))), ..Row::default() },
         ];
         let general = [Row { symbol: "power", name: "Open at login", switch: Some((opens_at_login(), sel!(toggleLogin:))), ..Row::default() }];
