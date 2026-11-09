@@ -1,4 +1,6 @@
+mod calendar;
 mod chime;
+mod claude_mcp;
 mod clip_card;
 mod clips;
 mod controller;
@@ -6,6 +8,7 @@ mod days;
 mod export;
 mod hotkey;
 mod list_row;
+mod linear;
 mod live_activity;
 mod notch_banner;
 mod now_playing;

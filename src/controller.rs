@@ -16,15 +16,18 @@ use objc2_app_kit::{NSClickGestureRecognizer, NSControl, NSControlTextEditingDel
     NSStackViewDistribution, NSTextAlignment, NSTextField, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
+use objc2_event_kit::EKEventStoreChangedNotification;
 use objc2_foundation::{NSMutableAttributedString, NSNumber, NSRange, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 
+use crate::calendar::{self, Access, Calendar, Event};
 use crate::clip_card::{self, ClipCard};
 use crate::clips::ClipHistory;
 use crate::settings::{self as prefs, Settings, Size};
 use crate::settings_window::SettingsWindow;
 use crate::days;
 use crate::export;
+use crate::linear::{self, Linear};
 use crate::list_row::{self, ListRow};
 use crate::live_activity::{Activity, LiveActivity};
 use crate::notch_banner::{NotchBanner, Notice};
@@ -56,6 +59,8 @@ const MUSIC_PROGRESS_WIDTH: f64 = 340.0;
 const ICON_TAB_WIDTH: f64 = 32.0;
 const ARTWORK_SIZE: f64 = 120.0;
 const MAX_CARD_ROWS: usize = 5;
+/// Calendar events shown above the tasks; the rest of today's stay in the calendar app.
+const MAX_EVENT_ROWS: usize = 3;
 /// Gap between Today rows; a hairline is drawn in its middle.
 const CARD_ROW_GAP: f64 = 15.0;
 const DURATIONS_MIN: [u64; 4] = prefs::FOCUS_CHOICES;
@@ -201,6 +206,12 @@ struct Ui {
 pub struct State {
     ui: OnceCell<Ui>,
     tasks: RefCell<Vec<Task>>,
+    /// Today's calendar events (empty unless the setting is on and macOS allowed access), and the
+    /// day they were read for, so the list rolls over at midnight.
+    events: RefCell<Vec<Event>>,
+    events_day: RefCell<String>,
+    calendar: RefCell<Calendar>,
+    linear: RefCell<Linear>,
     expanded: Cell<bool>,
     /// Opened by hotkey: stays open until the pointer has visited and left.
     pinned: Cell<bool>,
@@ -345,6 +356,7 @@ define_class!(
         fn toggle_task(&self, sender: &NSButton) {
             if let Some(task) = self.ivars().tasks.borrow_mut().get_mut(sender.tag() as usize) {
                 task.set_done(!task.done);
+                self.complete_remote(task);
             }
             self.save_and_refresh();
         }
@@ -411,6 +423,7 @@ define_class!(
                 let task = tasks.iter_mut().find(|t| !t.done && t.day == today && t.text == reminder.text && t.time == reminder.time);
                 if let Some(task) = task {
                     task.set_done(true);
+                    self.complete_remote(task);
                 }
             }
             self.save_and_refresh();
@@ -534,6 +547,28 @@ define_class!(
             self.ivars().now_playing.borrow_mut().drain();
             self.render_music();
             self.sync_activity();
+        }
+
+        /// A Linear fetch finished: new assigned issues become tasks.
+        #[unsafe(method(linearSynced:))]
+        fn linear_synced(&self, _arg: Option<&AnyObject>) {
+            let Some(result) = self.ivars().linear.borrow_mut().take() else { return };
+            match result {
+                Ok(issues) => {
+                    let added = linear::import(&mut self.ivars().tasks.borrow_mut(), &issues, &days::key(0));
+                    if added > 0 {
+                        self.save_and_refresh();
+                    }
+                }
+                Err(err) => eprintln!("notchpad: Linear sync failed: {err}"),
+            }
+        }
+
+        /// Called when the user answers the calendar prompt and whenever the calendars change.
+        #[unsafe(method(reloadEvents:))]
+        fn reload_events(&self, _arg: Option<&AnyObject>) {
+            self.load_events();
+            self.render_task_card();
         }
 
         #[unsafe(method(tickMusic:))]
@@ -680,6 +715,13 @@ define_class!(
         #[unsafe(method(reload:))]
         fn reload(&self, _timer: &NSTimer) {
             self.remind_tasks();
+            if self.ivars().settings.borrow().calendar && *self.ivars().events_day.borrow() != days::key(0) {
+                self.load_events();
+                self.render_task_card();
+            }
+            if self.ivars().settings.borrow().linear && self.ivars().linear.borrow().due() {
+                self.ivars().linear.borrow_mut().fetch(self.target(), sel!(linearSynced:));
+            }
             let mtime = store::modified();
             if mtime != self.ivars().seen_mtime.get() {
                 self.ivars().seen_mtime.set(mtime);
@@ -775,6 +817,7 @@ impl Controller {
             center.addObserver_selector_name_object(
                 this.target(), sel!(terminalResigned:), Some(&NSString::from_str(terminal_view::RESIGNED_NOTIFICATION)), Some(terminal),
             );
+            center.addObserver_selector_name_object(this.target(), sel!(reloadEvents:), Some(EKEventStoreChangedNotification), None);
             // The controller lives for the process. Re-anchor after hot-plug, resolution,
             // primary-display or arrangement changes instead of keeping startup coordinates.
             NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
@@ -793,10 +836,25 @@ impl Controller {
             clips.setTolerance(0.25);
         }
         this.sync_now_playing();
+        this.load_events();
         this.refresh();
         this.render_clips();
         this.ui().panel.orderFrontRegardless();
         this
+    }
+
+    /// A task just done in Notchpad that mirrors a Linear issue is completed there too.
+    fn complete_remote(&self, task: &Task) {
+        if task.done && self.ivars().settings.borrow().linear {
+            Linear::complete(&task.ext);
+        }
+    }
+
+    /// Reads today's events; empty unless the setting is on and macOS has allowed access.
+    fn load_events(&self) {
+        let events = if self.ivars().settings.borrow().calendar { self.ivars().calendar.borrow_mut().today() } else { Vec::new() };
+        *self.ivars().events.borrow_mut() = events;
+        *self.ivars().events_day.borrow_mut() = days::key(0);
     }
 
     /// Hotkey entry point: open and focus today's input, or close if already open.
@@ -1315,11 +1373,19 @@ impl Controller {
         let before = list_row::snapshot(&card.rows);
         clear(&card.rows);
         let shown = if show_completed { &done } else { &todo };
-        let fit = rows_that_fit(&tasks, shown, MAX_CARD_ROWS);
+        let events: Vec<Event> = if show_completed { Vec::new() } else { self.ivars().events.borrow().iter().take(MAX_EVENT_ROWS).cloned().collect() };
+        for (k, event) in events.iter().enumerate() {
+            let row = ListRow::new(&event.title, &self.event_row(event), &white(0.07), self.mtm());
+            if k > 0 {
+                row.add_rule(&white(0.08), CARD_ROW_GAP, self.mtm());
+            }
+            add_full_width(&card.rows, &row, None);
+        }
+        let fit = rows_that_fit(&tasks, shown, MAX_CARD_ROWS - events.len());
         for (k, &i) in shown.iter().take(fit).enumerate() {
             let row = ListRow::new(&tasks[i].text, &self.card_row(i, &tasks[i]), &white(0.07), self.mtm());
             unsafe { row.setMenu(Some(&self.task_menu(i, &tasks[i].priority))) };
-            if k > 0 {
+            if k > 0 || !events.is_empty() {
                 row.add_rule(&white(0.08), CARD_ROW_GAP, self.mtm());
             }
             add_full_width(&card.rows, &row, None);
@@ -1409,6 +1475,16 @@ impl Controller {
         }
     }
 
+    /// A calendar event: no checkbox, since it cannot be completed here.
+    fn event_row(&self, event: &Event) -> Retained<NSView> {
+        let mtm = self.mtm();
+        let icon = NSImageView::imageViewWithImage(&w::symbol("calendar"), mtm);
+        icon.setContentTintColor(Some(&white(0.45)));
+        let when = clock_12h(&event.time).unwrap_or_else(|| "All day".to_owned());
+        let label = w::label(&format!("{when}  {}", event.title), 13.0, unsafe { NSFontWeightRegular }, &white(0.6), mtm);
+        w::stack(&[&icon, &label], false, 10.0, mtm).into_super()
+    }
+
     fn card_row(&self, index: usize, task: &Task) -> Retained<NSView> {
         let mtm = self.mtm();
         let (circle, tint) = if task.done { ("checkmark.circle.fill", white(0.45)) } else { ("circle", priority_color(&task.priority)) };
@@ -1462,10 +1538,20 @@ impl Controller {
     /// Live: pills, tab fallback and wings follow from a re-render.
     fn apply_settings(&self, settings: Settings) {
         let focus_changed = self.ivars().settings.borrow().focus != settings.focus;
+        // The one place macOS is asked for calendar access: the user just turned the switch on.
+        let calendar_turned_on = settings.calendar && !self.ivars().settings.borrow().calendar;
+        let linear_changed = settings.linear != self.ivars().settings.borrow().linear;
         if focus_changed && !self.session_active() {
             self.ivars().duration_idx.set(focus_index(&settings));
         }
         *self.ivars().settings.borrow_mut() = settings;
+        if linear_changed {
+            self.ivars().linear.borrow_mut().reset();
+        }
+        if calendar_turned_on && calendar::access() == Access::Undecided {
+            self.ivars().calendar.borrow_mut().request_access(self.target(), sel!(reloadEvents:));
+        }
+        self.load_events();
         self.sync_now_playing();
         self.refresh();
     }

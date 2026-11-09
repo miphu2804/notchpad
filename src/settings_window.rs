@@ -9,12 +9,15 @@ use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSButton, NSCellImagePosition,
-    NSControlSize, NSControlStateValueOn, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSImageView,
-    NSPopUpButton, NSSwitch, NSTextAlignment, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSControlSize, NSControlStateValueOn, NSFont, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSImageView,
+    NSPopUpButton, NSSecureTextField, NSSwitch, NSTextAlignment, NSTextField, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
+use crate::calendar::{self, Access};
+use crate::claude_mcp;
+use crate::linear;
 use crate::settings::{FOCUS_CHOICES, LONG_BREAK_CHOICES, REMIND_CHOICES, SECTIONS, SHORT_BREAK_CHOICES, Settings, Size};
 use crate::widgets::{self as w, rgba};
 
@@ -27,22 +30,45 @@ const ROW: f64 = 50.0;
 const MENU_WIDTH: f64 = 120.0;
 
 /// Sidebar rows, top to bottom: SF Symbol and name.
-const PANES: [(&str, &str); 4] =
-    [("square.grid.2x2", "Sections"), ("rectangle.topthird.inset.filled", "Notch"), ("timer", "Focus"), ("gearshape", "General")];
+const PANES: [(&str, &str); 5] = [
+    ("square.grid.2x2", "Sections"),
+    ("rectangle.topthird.inset.filled", "Notch"),
+    ("timer", "Focus"),
+    ("puzzlepiece.extension", "Integrations"),
+    ("gearshape", "General"),
+];
 /// Rows of the Focus pane, in order; their tags in `setFocusOption:`.
 const FOCUS_ROW: isize = 0;
 const SHORT_BREAK_ROW: isize = 1;
 const LONG_BREAK_ROW: isize = 2;
 const REMIND_ROW: isize = 3;
+/// Rows of the Integrations pane, in order; they are the tags of their controls (not below 10: labels and
+/// image views default to tag 0), and their blurbs carry `STATUS + row` so the actions can rewrite them.
+const CLAUDE_CODE_ROW: isize = 10;
+const CLAUDE_DESKTOP_ROW: isize = 11;
+const CALENDAR_ROW: isize = 12;
+const LINEAR_ROW: isize = 13;
+/// The Linear key field carries `FIELD + row`.
+const FIELD: isize = 200;
+const STATUS: isize = 100;
+const BUTTON_WIDTH: f64 = 90.0;
+const FIELD_WIDTH: f64 = 120.0;
+/// Index of the Integrations pane in [`PANES`].
+const INTEGRATIONS_PANE: usize = 3;
 
 /// One settings row: symbol, name, optional dim description, and its controls, laid out right to
-/// left: a switch (state, action) and left of it a menu (items, selected index, action).
+/// left: a button (title, action), a switch (state, action) and left of those a menu (items,
+/// selected index, action).
+#[derive(Default)]
 struct Row<'a> {
     symbol: &'a str,
     name: &'a str,
     blurb: Option<&'a str>,
     switch: Option<(bool, Sel)>,
     menu: Option<(Vec<String>, usize, Sel)>,
+    button: Option<(&'a str, Sel)>,
+    /// Placeholder of a secure text field, left of the button.
+    field: Option<&'a str>,
 }
 const WINGS: [(&str, &str); 2] = [("play.circle", "Show what's playing"), ("timer", "Show focus countdown")];
 
@@ -121,6 +147,50 @@ define_class!(
             self.commit(settings);
         }
 
+        #[unsafe(method(addClaudeCode:))]
+        fn add_claude_code(&self, _sender: &NSButton) {
+            let error = claude_mcp::add_to_code().err();
+            self.refresh_integrations(CLAUDE_CODE_ROW, error);
+        }
+
+        #[unsafe(method(addClaudeDesktop:))]
+        fn add_claude_desktop(&self, _sender: &NSButton) {
+            let error = claude_mcp::add_to_desktop().err();
+            self.refresh_integrations(CLAUDE_DESKTOP_ROW, error);
+        }
+
+        /// Connects with the key typed into the field, or disconnects. The key goes to the Keychain
+        /// and nowhere else; the field is emptied once it has been used.
+        #[unsafe(method(toggleLinear:))]
+        fn toggle_linear(&self, _sender: &NSButton) {
+            let mut settings = self.ivars().settings.borrow().clone();
+            let field = self.integrations_view(FIELD + LINEAR_ROW).and_then(|v| v.downcast::<NSTextField>().ok());
+            let result = if settings.linear {
+                linear::disconnect();
+                Ok(())
+            } else {
+                let key = field.as_ref().map(|f| f.stringValue().to_string()).unwrap_or_default();
+                if key.trim().is_empty() { Err("Paste a personal API key first".to_owned()) } else { linear::connect(key.trim()) }
+            };
+            if let Err(error) = result {
+                return self.refresh_integrations(LINEAR_ROW, Some(error));
+            }
+            if let Some(field) = field {
+                field.setStringValue(&NSString::new());
+            }
+            settings.linear = !settings.linear;
+            self.commit(settings);
+            self.refresh_integrations(-1, None);
+        }
+
+        #[unsafe(method(toggleCalendar:))]
+        fn toggle_calendar(&self, sender: &NSSwitch) {
+            let mut settings = self.ivars().settings.borrow().clone();
+            settings.calendar = sender.state() == NSControlStateValueOn;
+            self.commit(settings);
+            self.refresh_integrations(-1, None);
+        }
+
         /// Registers or removes the app as a login item. macOS refuses for a binary outside an
         /// app bundle; the switch then snaps back to the real state.
         #[unsafe(method(toggleLogin:))]
@@ -147,10 +217,13 @@ impl SettingsWindow {
         let parts = this.build(mtm);
         this.ivars().parts.set(parts).ok().expect("built once");
         this.show_pane(0);
+        this.refresh_integrations(-1, None);
         this
     }
 
     pub fn show(&self) {
+        // The user may have added the server from a terminal since the window was last open.
+        self.refresh_integrations(-1, None);
         let window = self.window();
         window.makeKeyAndOrderFront(None);
         #[allow(deprecated)] // `activate()` needs macOS 14
@@ -219,9 +292,10 @@ impl SettingsWindow {
             blurb: Some(s.blurb),
             switch: Some((!settings.hidden[i], sel!(toggleSection:))),
             menu: Some((size_names(), Size::ALL.iter().position(|z| *z == settings.sizes[i]).unwrap_or(0), sel!(setSize:))),
+            ..Row::default()
         }).collect();
         let wings: Vec<_> = WINGS.iter().zip([settings.wing_music, settings.wing_focus])
-            .map(|((symbol, name), on)| Row { symbol, name, blurb: None, switch: Some((on, sel!(toggleWing:))), menu: None })
+            .map(|((symbol, name), on)| Row { symbol, name, switch: Some((on, sel!(toggleWing:))), ..Row::default() })
             .collect();
         let minutes = |choices: &[u64], current: u64| {
             let items = choices.iter().map(|m| format!("{m} min")).collect();
@@ -233,19 +307,20 @@ impl SettingsWindow {
             Some(m) => format!("{m} min before"),
         }).collect();
         let remind_index = REMIND_CHOICES.iter().position(|r| *r == settings.remind).unwrap_or(0);
-        let menu_row = |symbol, name, blurb, menu| Row { symbol, name, blurb, switch: None, menu };
+        let menu_row = |symbol, name, blurb, menu| Row { symbol, name, blurb, menu, ..Row::default() };
         let focus = [
             menu_row("timer", "Focus length", Some("Clicking the timer still cycles lengths"), minutes(&FOCUS_CHOICES, settings.focus)),
             menu_row("cup.and.saucer", "Short break", None, minutes(&SHORT_BREAK_CHOICES, settings.short_break)),
             menu_row("sofa", "Long break", Some("After every fourth pomodoro"), minutes(&LONG_BREAK_CHOICES, settings.long_break)),
             menu_row("bell", "Task reminders", Some("A card under the notch for timed tasks"), Some((remind_items, remind_index, sel!(setFocusOption:)))),
-            Row { symbol: "speaker.wave.2", name: "Sound", blurb: Some("Chime when a session ends or a task is due"), switch: Some((settings.sound, sel!(toggleSound:))), menu: None },
+            Row { symbol: "speaker.wave.2", name: "Sound", blurb: Some("Chime when a session ends or a task is due"), switch: Some((settings.sound, sel!(toggleSound:))), ..Row::default() },
         ];
-        let general = [Row { symbol: "power", name: "Open at login", blurb: None, switch: Some((opens_at_login(), sel!(toggleLogin:))), menu: None }];
+        let general = [Row { symbol: "power", name: "Open at login", switch: Some((opens_at_login(), sel!(toggleLogin:))), ..Row::default() }];
         let panes = vec![
             self.pane("Sections", &sections, mtm),
             self.pane("Collapsed notch", &wings, mtm),
             self.pane("Focus", &focus, mtm),
+            self.integrations_pane(mtm),
             self.pane("General", &general, mtm),
         ];
         for pane in &panes {
@@ -254,21 +329,68 @@ impl SettingsWindow {
         Parts { window, rows, panes }
     }
 
-    /// A large title over one card of rows. Each control's tag is its row's index.
+    /// A large title over one card of rows.
     fn pane(&self, title: &str, rows: &[Row], mtm: MainThreadMarker) -> Retained<NSView> {
-        let pane = frame_view(SIDEBAR, 0.0, PANE, HEIGHT, mtm);
-        let heading = w::label(title, 24.0, unsafe { NSFontWeightBold }, &rgba(255, 255, 255, 1.0), mtm);
-        heading.setFrame(rect(MARGIN, from_top(HEIGHT, 36.0, 32.0), PANE - 2.0 * MARGIN, 32.0));
-        pane.addSubview(&heading);
+        let pane = titled_pane(title, mtm);
+        pane.addSubview(&self.card(rows, 84.0, 0, mtm));
+        pane
+    }
 
+    /// Titled groups of rows, each its own card under a small caption.
+    fn integrations_pane(&self, mtm: MainThreadMarker) -> Retained<NSView> {
+        let pane = titled_pane("Integrations", mtm);
+        let claude = [
+            Row { symbol: "terminal", name: "Claude Code", blurb: Some(""), button: Some(("Add", sel!(addClaudeCode:))), ..Row::default() },
+            Row { symbol: "bubble.left", name: "Claude Desktop", blurb: Some(""), button: Some(("Add", sel!(addClaudeDesktop:))), ..Row::default() },
+        ];
+        let calendars = [Row {
+            symbol: "calendar",
+            name: "Show calendar events",
+            blurb: Some(""),
+            switch: Some((self.ivars().settings.borrow().calendar, sel!(toggleCalendar:))),
+            ..Row::default()
+        }];
+        let linear = [Row {
+            symbol: "arrow.triangle.branch",
+            name: "Linear",
+            blurb: Some(""),
+            button: Some(("Connect", sel!(toggleLinear:))),
+            field: Some("Personal API key"),
+            ..Row::default()
+        }];
+        let calendar_note = "Add a Google account in System Settings › Internet Accounts. Notion Calendar events come from that same Google calendar.";
+        let (mut top, mut base) = (80.0, CLAUDE_CODE_ROW);
+        for (caption, rows, note) in [("Claude", &claude[..], None), ("Calendars", &calendars[..], Some(calendar_note)), ("Linear", &linear[..], None)] {
+            let caption = w::label(&caption.to_uppercase(), 11.0, unsafe { NSFontWeightMedium }, &rgba(255, 255, 255, 0.45), mtm);
+            caption.setFrame(rect(MARGIN + 4.0, from_top(HEIGHT, top, 14.0), PANE - 2.0 * MARGIN, 14.0));
+            pane.addSubview(&caption);
+            top += 18.0;
+            pane.addSubview(&self.card(rows, top, base, mtm));
+            top += rows.len() as f64 * ROW;
+            base += rows.len() as isize;
+            if let Some(note) = note {
+                let note = NSTextField::wrappingLabelWithString(&NSString::from_str(note), mtm);
+                note.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+                note.setTextColor(Some(&rgba(255, 255, 255, 0.45)));
+                note.setFrame(rect(MARGIN + 4.0, from_top(HEIGHT, top + 6.0, 30.0), PANE - 2.0 * MARGIN - 8.0, 30.0));
+                pane.addSubview(&note);
+                top += 36.0;
+            }
+            top += 14.0;
+        }
+        pane
+    }
+
+    /// One card of rows whose top edge is `top` below the pane's. Each control's tag is `base` plus its row's index.
+    fn card(&self, rows: &[Row], top: f64, base: isize, mtm: MainThreadMarker) -> Retained<NSView> {
         let card_width = PANE - 2.0 * MARGIN;
         let card_height = rows.len() as f64 * ROW;
-        let card = frame_view(MARGIN, from_top(HEIGHT, 84.0, card_height), card_width, card_height, mtm);
+        let card = frame_view(MARGIN, from_top(HEIGHT, top, card_height), card_width, card_height, mtm);
         w::paint(&card, &rgba(255, 255, 255, 0.06), 10.0);
-        pane.addSubview(&card);
 
         let target: &AnyObject = self.as_ref();
-        for (i, Row { symbol, name, blurb, switch, menu }) in rows.iter().enumerate() {
+        for (i, Row { symbol, name, blurb, switch, menu, button, field }) in rows.iter().enumerate() {
+            let tag = base + i as isize;
             let row = frame_view(0.0, from_top(card_height, i as f64 * ROW, ROW), card_width, ROW, mtm);
             let icon = NSImageView::imageViewWithImage(&w::symbol(symbol), mtm);
             icon.setContentTintColor(Some(&rgba(255, 255, 255, 0.85)));
@@ -278,13 +400,33 @@ impl SettingsWindow {
             // Controls are laid out right to left from their intrinsic sizes: macOS 26 draws a
             // wider switch than the classic 38×22, and a fixed frame let it overrun the menu.
             let mut controls_x = card_width - 2.0;
+            if let Some((title, action)) = button {
+                let button = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(title), Some(target), Some(*action), mtm) };
+                button.setControlSize(NSControlSize::Small);
+                let height = button.intrinsicContentSize().height;
+                controls_x -= 12.0 + BUTTON_WIDTH;
+                button.setFrame(rect(controls_x, (ROW - height) / 2.0, BUTTON_WIDTH, height));
+                button.setTag(tag);
+                row.addSubview(&button);
+            }
+            if let Some(placeholder) = field {
+                let field = NSSecureTextField::initWithFrame(mtm.alloc(), NSRect::ZERO);
+                field.setControlSize(NSControlSize::Small);
+                field.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+                field.setPlaceholderString(Some(&NSString::from_str(placeholder)));
+                let height = field.intrinsicContentSize().height;
+                controls_x -= 12.0 + FIELD_WIDTH;
+                field.setFrame(rect(controls_x, (ROW - height) / 2.0, FIELD_WIDTH, height));
+                field.setTag(FIELD + tag);
+                row.addSubview(&field);
+            }
             if let Some((on, action)) = switch {
                 let switch = NSSwitch::new(mtm);
                 let size = switch.intrinsicContentSize();
                 controls_x -= 12.0 + size.width;
                 switch.setFrame(rect(controls_x, (ROW - size.height) / 2.0, size.width, size.height));
                 switch.setState(if *on { NSControlStateValueOn } else { 0 });
-                switch.setTag(i as isize);
+                switch.setTag(tag);
                 unsafe {
                     switch.setTarget(Some(target));
                     switch.setAction(Some(*action));
@@ -301,7 +443,7 @@ impl SettingsWindow {
                 controls_x -= 12.0 + MENU_WIDTH;
                 menu.setFrame(rect(controls_x, (ROW - menu_height) / 2.0, MENU_WIDTH, menu_height));
                 menu.selectItemAtIndex(*selected as isize);
-                menu.setTag(i as isize);
+                menu.setTag(tag);
                 unsafe {
                     menu.setTarget(Some(target));
                     menu.setAction(Some(*action));
@@ -315,6 +457,7 @@ impl SettingsWindow {
                 Some(blurb) => {
                     name.setFrame(rect(48.0, ROW - 9.0 - 16.0, text_width, 16.0));
                     let blurb = w::label(blurb, 11.0, unsafe { NSFontWeightRegular }, &rgba(255, 255, 255, 0.5), mtm);
+                    blurb.setTag(STATUS + tag);
                     blurb.setFrame(rect(48.0, 9.0, text_width, 14.0));
                     row.addSubview(&blurb);
                 }
@@ -329,8 +472,67 @@ impl SettingsWindow {
             }
             card.addSubview(&row);
         }
-        pane
+        card
     }
+
+    fn integrations_view(&self, tag: isize) -> Option<Retained<NSView>> {
+        self.ivars().parts.get()?.panes[INTEGRATIONS_PANE].viewWithTag(tag)
+    }
+
+    /// Rewrites the Integrations rows from what is on disk and in macOS; `error` is shown on row `failed` instead of its blurb.
+    fn refresh_integrations(&self, failed: isize, error: Option<String>) {
+        let pane = &self.ivars().parts.get().expect("built in new()").panes[INTEGRATIONS_PANE];
+        let linear_on = self.ivars().settings.borrow().linear;
+        let linear_blurb = match &error {
+            Some(error) if failed == LINEAR_ROW => error,
+            _ if linear_on => "Syncing your assigned issues",
+            _ => "Imports your assigned issues",
+        };
+        if let Some(label) = pane.viewWithTag(STATUS + LINEAR_ROW).and_then(|v| v.downcast::<NSTextField>().ok()) {
+            label.setStringValue(&NSString::from_str(linear_blurb));
+        }
+        if let Some(button) = pane.viewWithTag(LINEAR_ROW).and_then(|v| v.downcast::<NSButton>().ok()) {
+            button.setTitle(&NSString::from_str(if linear_on { "Disconnect" } else { "Connect" }));
+        }
+        if let Some(field) = pane.viewWithTag(FIELD + LINEAR_ROW) {
+            field.setHidden(linear_on);
+        }
+        let rows = [
+            (CLAUDE_CODE_ROW, claude_mcp::code_added(), "Gives Claude Code your tasks", "Claude Code can use your tasks"),
+            (CLAUDE_DESKTOP_ROW, claude_mcp::desktop_added(), "Gives Claude Desktop your tasks", "Added. Restart Claude Desktop"),
+        ];
+        // Access can be refused in the prompt or later in System Settings; say where to change it.
+        let calendar = if self.ivars().settings.borrow().calendar && calendar::access() == Access::Denied {
+            "Allow Notchpad in System Settings › Privacy › Calendars"
+        } else {
+            "Today's events, read-only"
+        };
+        if let Some(label) = pane.viewWithTag(STATUS + CALENDAR_ROW).and_then(|v| v.downcast::<NSTextField>().ok()) {
+            label.setStringValue(&NSString::from_str(calendar));
+        }
+        for (row, added, idle, done) in rows {
+            let blurb = match &error {
+                Some(error) if row == failed => error,
+                _ if added => done,
+                _ => idle,
+            };
+            if let Some(label) = pane.viewWithTag(STATUS + row).and_then(|v| v.downcast::<NSTextField>().ok()) {
+                label.setStringValue(&NSString::from_str(blurb));
+            }
+            if let Some(button) = pane.viewWithTag(row).and_then(|v| v.downcast::<NSButton>().ok()) {
+                button.setTitle(&NSString::from_str(if added { "Added ✓" } else { "Add" }));
+                button.setEnabled(!added);
+            }
+        }
+    }
+}
+
+fn titled_pane(title: &str, mtm: MainThreadMarker) -> Retained<NSView> {
+    let pane = frame_view(SIDEBAR, 0.0, PANE, HEIGHT, mtm);
+    let heading = w::label(title, 24.0, unsafe { NSFontWeightBold }, &rgba(255, 255, 255, 1.0), mtm);
+    heading.setFrame(rect(MARGIN, from_top(HEIGHT, 36.0, 32.0), PANE - 2.0 * MARGIN, 32.0));
+    pane.addSubview(&heading);
+    pane
 }
 
 /// Whether macOS will start the app at login; "requires approval" counts, since the user has asked.
