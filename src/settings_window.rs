@@ -556,7 +556,7 @@ impl SettingsWindow {
             _ if linear_pending => "Waiting for Linear authorization…",
             _ if linear_on => "Syncing your assigned issues",
             _ if linear::oauth_client_id().is_some() => "Connects with Linear using OAuth",
-            _ => "Paste a key from Linear › Settings › Security & access",
+            _ => "Key from Security & access",
         };
         if let Some(label) = pane.viewWithTag(STATUS + LINEAR_ROW).and_then(|v| v.downcast::<NSTextField>().ok()) {
             label.setStringValue(&NSString::from_str(linear_blurb));
