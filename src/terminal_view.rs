@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::SelectionType;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
@@ -84,10 +86,16 @@ define_class!(
         }
 
         #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, _event: &NSEvent) {
+        fn mouse_down(&self, event: &NSEvent) {
             if let Some(window) = self.window() {
                 window.makeFirstResponder(Some(self));
             }
+            self.select_at(event, true);
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            self.select_at(event, false);
         }
 
         #[unsafe(method(setFrameSize:))]
@@ -106,14 +114,17 @@ define_class!(
             self.handle_key(event);
         }
 
-        /// ⌘V arrives as a key equivalent, and nothing else in this app owns a Paste item.
+        /// ⌘V and ⌘C arrive as key equivalents, and nothing else in this app owns those items.
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
             let focused = self.window().and_then(|w| w.firstResponder()).is_some_and(|r| std::ptr::eq(&*r as *const _ as *const u8, self as *const _ as *const u8));
             let command = event.modifierFlags().contains(NSEventModifierFlags::Command);
-            let pastes = event.charactersIgnoringModifiers().is_some_and(|c| c.to_string() == "v");
-            if focused && command && pastes {
+            let key = event.charactersIgnoringModifiers().map(|c| c.to_string());
+            if focused && command && key.as_deref() == Some("v") {
                 self.paste();
+                true
+            } else if focused && command && key.as_deref() == Some("c") {
+                self.copy();
                 true
             } else {
                 unsafe { msg_send![super(self), performKeyEquivalent: event] }
@@ -275,6 +286,7 @@ impl TerminalView {
     /// Input of any kind returns the view to the live screen first.
     fn send(&self, bytes: impl Into<std::borrow::Cow<'static, [u8]>>) {
         if let Some(session) = self.ivars().session.borrow().as_ref() {
+            session.clear_selection();
             session.scroll(Scroll::Bottom);
             session.write(bytes);
         }
@@ -343,6 +355,43 @@ impl TerminalView {
         }
     }
 
+    /// Copies the selection; with none, ⌘C is swallowed rather than sent to the shell as a key.
+    fn copy(&self) {
+        let text = self.ivars().session.borrow().as_ref().and_then(|s| s.selected_text());
+        if let Some(text) = text {
+            let pasteboard = NSPasteboard::generalPasteboard();
+            pasteboard.clearContents();
+            pasteboard.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
+        }
+    }
+
+    /// Starts (click) or extends (drag) the selection under the pointer. A program that
+    /// asked for mouse reports owns the mouse, except while Shift is held.
+    fn select_at(&self, event: &NSEvent, start: bool) {
+        let owned_by_program = self.mode().intersects(TermMode::MOUSE_MODE) && !event.modifierFlags().contains(NSEventModifierFlags::Shift);
+        let session = self.ivars().session.borrow();
+        let Some(session) = session.as_ref() else { return };
+        if owned_by_program {
+            return;
+        }
+        let local = self.convertPoint_fromView(event.locationInWindow(), None);
+        let (point, side) = {
+            let term = session.term();
+            cell_at(local, self.ivars().cell, term.grid().display_offset(), term.columns(), term.screen_lines())
+        };
+        if start {
+            let ty = match event.clickCount() {
+                1 => SelectionType::Simple,
+                2 => SelectionType::Semantic,
+                _ => SelectionType::Lines,
+            };
+            session.begin_selection(ty, point, side);
+        } else {
+            session.extend_selection(point, side);
+        }
+        self.setNeedsDisplay(true);
+    }
+
     fn scroll_by(&self, delta: f64, precise: bool) {
         let lines = if precise { delta / self.ivars().cell.1 } else { delta };
         let total = self.ivars().scroll_rest.get() + lines;
@@ -392,6 +441,12 @@ impl TerminalView {
                 fill(cell.bg, NSRect::new(origin(cell.row, cell.col), NSSize::new(cw * cell.width as f64, ch)));
             }
         }
+        if !cells.selected.is_empty() {
+            NSColor::selectedTextBackgroundColor().colorWithAlphaComponent(0.5).setFill();
+            for &(row, col) in &cells.selected {
+                NSBezierPath::fillRect(NSRect::new(origin(row, col), NSSize::new(cw, ch)));
+            }
+        }
         for cell in &cells.drawn {
             let at = origin(cell.row, cell.col);
             if cell.ch != ' ' && !cell.hidden {
@@ -426,7 +481,7 @@ impl TerminalView {
 
     /// Copies what is visible out of the emulator so drawing happens without its lock.
     fn visible_cells(&self) -> Screen {
-        let mut screen = Screen { drawn: Vec::new(), cursor: None };
+        let mut screen = Screen { drawn: Vec::new(), selected: Vec::new(), cursor: None };
         let session = self.ivars().session.borrow();
         let Some(session) = session.as_ref() else { return screen };
         let term = session.term();
@@ -435,6 +490,15 @@ impl TerminalView {
         let row = content.cursor.point.line.0 + offset;
         screen.cursor = (row >= 0).then_some((row as usize, content.cursor.point.column.0));
         let shown = content.mode.contains(TermMode::SHOW_CURSOR);
+        if let Some(range) = content.selection {
+            for row in 0..term.screen_lines() {
+                for col in 0..term.columns() {
+                    if range.contains(Point::new(Line(row as i32 - offset), Column(col))) {
+                        screen.selected.push((row, col));
+                    }
+                }
+            }
+        }
         for item in content.display_iter {
             let (cell, row) = (item.cell, item.point.line.0 + offset);
             let flags = cell.flags;
@@ -488,7 +552,20 @@ struct Painted {
 struct Screen {
     /// Only cells that differ from an empty default one.
     drawn: Vec<Painted>,
+    /// Visible (row, column) cells inside the selection.
+    selected: Vec<(usize, usize)>,
     cursor: Option<(usize, usize)>,
+}
+
+/// The grid cell under a point in the view, clamped to the grid. The side says which half
+/// of the cell was hit, which decides whether a selection includes that cell's edge.
+fn cell_at(point: NSPoint, cell: (f64, f64), display_offset: usize, cols: usize, rows: usize) -> (Point, Side) {
+    let column = (point.x / cell.0).floor().clamp(0.0, (cols - 1) as f64) as usize;
+    let row = (point.y / cell.1).floor().clamp(0.0, (rows - 1) as f64) as i32;
+    let right_half = point.x >= cols as f64 * cell.0 || (point.x >= 0.0 && point.x % cell.0 >= cell.0 / 2.0);
+    let side = if right_half { Side::Right } else { Side::Left };
+    // Scrolled back by N lines, the top screen row is grid line -N.
+    (Point::new(Line(row - display_offset as i32), Column(column)), side)
 }
 
 fn resolve(color: Color, overrides: &Colors) -> Rgb {
@@ -520,5 +597,37 @@ fn text_of(string: &AnyObject) -> String {
         plain.to_string()
     } else {
         String::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CELL: (f64, f64) = (7.0, 14.0);
+
+    #[test]
+    fn point_maps_to_cell_and_half() {
+        let (point, side) = cell_at(NSPoint::new(15.0, 30.0), CELL, 0, 80, 24);
+        assert_eq!((point.line.0, point.column.0), (2, 2));
+        assert!(matches!(side, Side::Left));
+        let (_, side) = cell_at(NSPoint::new(18.0, 30.0), CELL, 0, 80, 24);
+        assert!(matches!(side, Side::Right));
+    }
+
+    #[test]
+    fn scrollback_offset_moves_the_line_up() {
+        let (point, _) = cell_at(NSPoint::new(0.0, 0.0), CELL, 10, 80, 24);
+        assert_eq!(point.line.0, -10);
+    }
+
+    #[test]
+    fn points_outside_the_view_clamp_to_the_grid() {
+        let (point, side) = cell_at(NSPoint::new(9999.0, -50.0), CELL, 0, 80, 24);
+        assert_eq!((point.line.0, point.column.0), (0, 79));
+        assert!(matches!(side, Side::Right));
+        let (point, side) = cell_at(NSPoint::new(-5.0, 9999.0), CELL, 0, 80, 24);
+        assert_eq!((point.line.0, point.column.0), (23, 0));
+        assert!(matches!(side, Side::Left));
     }
 }

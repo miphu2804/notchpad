@@ -12,6 +12,8 @@ use std::thread::JoinHandle;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, State};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Config;
 use alacritty_terminal::tty::{self, Options, Pty, Shell};
@@ -145,6 +147,24 @@ impl TerminalSession {
         self.term.lock().scroll_display(scroll);
     }
 
+    pub fn begin_selection(&self, ty: SelectionType, point: Point, side: Side) {
+        self.term.lock().selection = Some(Selection::new(ty, point, side));
+    }
+
+    pub fn extend_selection(&self, point: Point, side: Side) {
+        if let Some(selection) = self.term.lock().selection.as_mut() {
+            selection.update(point, side);
+        }
+    }
+
+    pub fn clear_selection(&self) {
+        self.term.lock().selection = None;
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        self.term.lock().selection_to_string().filter(|text| !text.is_empty())
+    }
+
     pub fn exited(&self) -> bool {
         self.exited.load(Ordering::SeqCst)
     }
@@ -158,5 +178,48 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = self.pty_input.send(Msg::Shutdown);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::index::{Column, Line};
+    use alacritty_terminal::vte::ansi::Processor;
+
+    use super::*;
+
+    fn term_with(output: &[u8]) -> Term<VoidListener> {
+        let size = Size { cols: 20, rows: 5, cell_width: 7, cell_height: 14 };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::default().advance(&mut term, output);
+        term
+    }
+
+    fn at(line: i32, column: usize) -> Point {
+        Point::new(Line(line), Column(column))
+    }
+
+    #[test]
+    fn simple_selection_yields_the_dragged_text() {
+        let mut term = term_with(b"alpha beta\r\ngamma\r\n");
+        let mut selection = Selection::new(SelectionType::Simple, at(0, 0), Side::Left);
+        selection.update(at(0, 9), Side::Right);
+        term.selection = Some(selection);
+        assert_eq!(term.selection_to_string().as_deref(), Some("alpha beta"));
+    }
+
+    #[test]
+    fn double_click_selects_the_word() {
+        let mut term = term_with(b"alpha beta\r\n");
+        term.selection = Some(Selection::new(SelectionType::Semantic, at(0, 7), Side::Left));
+        assert_eq!(term.selection_to_string().as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn triple_click_selects_the_line() {
+        let mut term = term_with(b"alpha beta\r\ngamma\r\n");
+        term.selection = Some(Selection::new(SelectionType::Lines, at(1, 2), Side::Left));
+        assert_eq!(term.selection_to_string().as_deref(), Some("gamma\n"));
     }
 }
