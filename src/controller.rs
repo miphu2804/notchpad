@@ -1480,7 +1480,7 @@ impl Controller {
             pill
         };
         let workspace = pill("Workspace", sel!(showWorkspace:));
-        let clips = pill("Clips", sel!(showClips:));
+        let clips = icon_pill("doc.on.clipboard", sel!(showClips:));
         let music = icon_pill("play.circle", sel!(showMusic:));
         let terminal = pill("Terminal", sel!(showTerminal:));
         // Settings is otherwise only reachable through ⌘, or the header's right-click menu.

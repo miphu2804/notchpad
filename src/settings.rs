@@ -18,7 +18,7 @@ pub struct Section {
 
 pub const SECTIONS: [Section; 4] = [
     Section { key: "workspace", name: "Workspace", symbol: "checklist", blurb: "Today's tasks and the focus timer" },
-    Section { key: "clips", name: "Clips", symbol: "paperclip", blurb: "Clipboard history and dropped files" },
+    Section { key: "clips", name: "Clips", symbol: "doc.on.clipboard", blurb: "Clipboard history and dropped files" },
     Section { key: "music", name: "Playing", symbol: "play.circle", blurb: "Now playing and playback controls" },
     Section { key: "terminal", name: "Terminal", symbol: "terminal", blurb: "A shell in the notch" },
 ];
