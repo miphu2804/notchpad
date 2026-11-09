@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>Notchday</string>
+	<string>NotchGo</string>
 	<key>CFBundleDisplayName</key>
-	<string>Notchday</string>
+	<string>NotchGo</string>
 	<key>CFBundleIdentifier</key>
 	<string>app.notchpad</string>
 	<key>CFBundleExecutable</key>
@@ -24,11 +24,11 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Notchday controls Music and Spotify playback from the notch.</string>
+	<string>NotchGo controls Music and Spotify playback from the notch.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>Notchday shows today's calendar events beside your tasks. It only reads them.</string>
+	<string>NotchGo shows today's calendar events beside your tasks. It only reads them.</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
-	<string>Notchday keeps your tasks in a Reminders list named Notchday, so they reach your iPhone through iCloud.</string>
+	<string>NotchGo keeps your tasks in a Reminders list named NotchGo, so they reach your iPhone through iCloud.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 </dict>

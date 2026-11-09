@@ -328,7 +328,7 @@ impl SettingsWindow {
             )
         };
         unsafe { window.setReleasedWhenClosed(false) };
-        window.setTitle(&NSString::from_str("Notchday Settings"));
+        window.setTitle(&NSString::from_str("NotchGo Settings"));
         // The sidebar runs up behind the traffic lights. The title stays set for the Window
         // menu and accessibility but is not drawn: it would straddle the sidebar's edge.
         window.setTitlebarAppearsTransparent(true);
@@ -593,7 +593,7 @@ impl SettingsWindow {
         ];
         // Access can be refused in the prompt or later in System Settings; say where to change it.
         let calendar = if self.ivars().settings.borrow().calendar && calendar::access() == Access::Denied {
-            "Allow Notchday in System Settings › Privacy › Calendars"
+            "Allow NotchGo in System Settings › Privacy › Calendars"
         } else {
             "Today's events, read-only"
         };
@@ -601,9 +601,9 @@ impl SettingsWindow {
             label.setStringValue(&NSString::from_str(calendar));
         }
         let reminders = if self.ivars().settings.borrow().reminders && reminders::access() == Access::Denied {
-            "Allow Notchday in System Settings › Privacy › Reminders"
+            "Allow NotchGo in System Settings › Privacy › Reminders"
         } else {
-            "Two-way with the Notchday list, for iPhone"
+            "Two-way with the NotchGo list, for iPhone"
         };
         if let Some(label) = pane.viewWithTag(STATUS + REMINDERS_ROW).and_then(|v| v.downcast::<NSTextField>().ok()) {
             label.setStringValue(&NSString::from_str(reminders));

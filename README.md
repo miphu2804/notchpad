@@ -1,4 +1,4 @@
-# Notchday
+# NotchGo
 
 A small native macOS app that lives in the MacBook notch: today's tasks, a focus timer and quick capture, one hover away.
 
@@ -16,15 +16,15 @@ A small native macOS app that lives in the MacBook notch: today's tasks, a focus
 ## Requirements
 
 - macOS 14 or later.
-- A MacBook with a notch. On a display without one, Notchday draws its own notch at the top of the screen.
+- A MacBook with a notch. On a display without one, NotchGo draws its own notch at the top of the screen.
 - To build from source: a Rust toolchain (edition 2024) and the Xcode command line tools.
 
 ## Install
 
-**Release.** Download the zip from the [latest release](https://github.com/miphu2804/notchday/releases/latest), unzip it, and drag **Notchday.app** into **Applications**. The app is not notarized, so macOS blocks the first launch: open **System Settings › Privacy & Security** and click **Open Anyway**, or run:
+**Release.** Download the zip from the [latest release](https://github.com/miphu2804/notchgo/releases/latest), unzip it, and drag **NotchGo.app** into **Applications**. The app is not notarized, so macOS blocks the first launch: open **System Settings › Privacy & Security** and click **Open Anyway**, or run:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/Notchday.app
+xattr -dr com.apple.quarantine /Applications/NotchGo.app
 ```
 
 **From source.**
@@ -33,7 +33,7 @@ xattr -dr com.apple.quarantine /Applications/Notchday.app
 ./macos/bundle.sh --install
 ```
 
-This builds `Notchday.app` and replaces `/Applications/Notchday.app`. It is signed with your first Apple Development identity if one exists, otherwise ad hoc; ad-hoc builds make macOS ask for permissions again after each rebuild.
+This builds `NotchGo.app` and replaces `/Applications/NotchGo.app`. It is signed with your first Apple Development identity if one exists, otherwise ad hoc; ad-hoc builds make macOS ask for permissions again after each rebuild.
 
 To start at login, turn on **Settings › General › Open at login**.
 
@@ -63,7 +63,7 @@ Tasks live in `~/Library/Application Support/notchpad/tasks.txt`, one tab-separa
 
 ### Calendar
 
-Turn on **Show calendar events** to see today's events, read-only, above your tasks. Events come from the macOS calendars (EventKit), so add Google or other accounts in System Settings › Internet Accounts. macOS asks for access only when you enable the switch; Notchday never writes to a calendar.
+Turn on **Show calendar events** to see today's events, read-only, above your tasks. Events come from the macOS calendars (EventKit), so add Google or other accounts in System Settings › Internet Accounts. macOS asks for access only when you enable the switch; NotchGo never writes to a calendar.
 
 ### Linear
 
@@ -72,16 +72,16 @@ Under **Settings › Integrations › Linear**, either:
 - **Connect** with OAuth (browser authorization), or
 - paste a personal API key from Linear › Settings › Security & access (shown when the build has no OAuth client ID).
 
-Your open assigned issues become tasks on their due date (or today), refreshed when the app opens and every 10 minutes. Completing one in Notchday moves the issue to its team's completed state. Credentials are stored in the macOS Keychain.
+Your open assigned issues become tasks on their due date (or today), refreshed when the app opens and every 10 minutes. Completing one in NotchGo moves the issue to its team's completed state. Credentials are stored in the macOS Keychain.
 
 ### Apple Reminders
 
-Opt-in: turn on **Sync tasks with Reminders** in **Settings › Integrations**. Tasks sync two-way with a Reminders list named "Notchday", so they reach iPhone and Apple Watch through iCloud.
+Opt-in: turn on **Sync tasks with Reminders** in **Settings › Integrations**. Tasks sync two-way with a Reminders list named "NotchGo", so they reach iPhone and Apple Watch through iCloud.
 
 - Title, day, time, priority and completion sync; Inbox tasks become reminders without a due date.
 - Only local tasks sync; Linear tasks keep their own sync.
-- Deleting an open task on either side deletes it on the other. Clearing completed reminders on the phone keeps the done tasks in Notchday's history.
-- When both sides changed, Notchday's edit wins, except that a completion made on the phone is kept.
+- Deleting an open task on either side deletes it on the other. Clearing completed reminders on the phone keeps the done tasks in NotchGo's history.
+- When both sides changed, NotchGo's edit wins, except that a completion made on the phone is kept.
 - macOS asks for Reminders access only when you turn the switch on. Changes on the phone arrive within about 30 seconds.
 
 ### Shortcuts and automation
@@ -89,14 +89,14 @@ Opt-in: turn on **Sync tasks with Reminders** in **Settings › Integrations**. 
 `notchpad-mcp add` adds a task from the command line using the quick-add syntax. It goes to today unless the line names another day.
 
 ```bash
-/Applications/Notchday.app/Contents/MacOS/notchpad-mcp add "Pay rent 5pm !high #home"
+/Applications/NotchGo.app/Contents/MacOS/notchpad-mcp add "Pay rent 5pm !high #home"
 ```
 
 In the Shortcuts app, turn on **Settings › Advanced › Allow Running Scripts**, then add a **Run Shell Script** action with that command, and pass your text as an argument (or build the string with a Text action first). Combined with a personal automation, this turns incoming messages into tasks. On macOS Tahoe, create an automation triggered by **Email** or **Message**, filter on the sender or subject (for example, your bank's transaction emails), then run a shell script that adds a task such as `Review transaction #finance`. macOS has no generic "any notification" trigger, so automations are limited to the triggers Shortcuts offers.
 
 ## Privacy
 
-Everything stays on your Mac, in `~/Library/Application Support/notchpad/` as plain text. Notchday makes network requests only to Linear, and only if you connect it. Calendar, Reminders and Music/Spotify access are requested from macOS only when the feature is used.
+Everything stays on your Mac, in `~/Library/Application Support/notchpad/` as plain text. NotchGo makes network requests only to Linear, and only if you connect it. Calendar, Reminders and Music/Spotify access are requested from macOS only when the feature is used.
 
 ## Development
 
