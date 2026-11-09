@@ -1,3 +1,20 @@
+### [2026-11-09 20:55 UTC+07:00] — [Feature] Task priorities, clear completed; Week and Notes removed
+
+**Done:**
+- Today's tasks sort by priority (high, medium, low, none), then by time. Right-click › Priority sets it. The coloured dots beside the input pick the priority of new tasks, and a typed `!high` still wins.
+- Check circles take the priority colour; the priority word in the metadata line is tinted. Completed tasks are struck through.
+- Completed › Clear takes today's completed tasks off the list. Their `done_on` stays, so the weekly count is unchanged.
+- The Week and Notes tabs, the calendar and reminders reading and the drag-between-days columns are gone. `notes.txt` stays on disk and in backups. Tasks without a day (Inbox) stay in `tasks.txt` and are reached through the MCP server.
+- Header icon pills are 24 pt like the text pills (`alignmentRectInsets` override). Clips is an icon.
+
+**Changed  files:**
+- `src/controller.rs`, `src/settings.rs`, `src/store.rs`, `src/list_row.rs`, `src/pill_button.rs`, `src/main.rs` — modified
+- `src/calendar.rs`, `src/drop_column.rs`, `src/note_view.rs`, `src/task_row.rs` — deleted
+- `Cargo.toml`, `macos/Info.plist`, `README.md` — modified
+
+**Flow explained:**
+`render_task_card` sorts open tasks by `(priority_rank, untimed, time)`. `setPriority:` (menu) and `pickPriority:` (dots) write the priority or the default for new tasks; `push_task` applies it when the typed line names none. `clearCompleted:` empties the `day` of today's done tasks. Verified by renders of the sort, tint, dots and strike, and by logs of the header tabs and the task menu; 59 tests pass.
+
 ### [2026-11-09 20:30 UTC+07:00] — [Feature] Phase-end bell and toast, Linear-like palette, smooth section resize
 
 **Done:**
@@ -142,20 +159,3 @@ The Today and Tomorrow columns list that day's calendar events above the tasks: 
 
 **Flow explained:**
 `reload_events` asks `Calendar::events` (empty unless access is FullAccess) for today and tomorrow, splitting multi-day events per day, then `render_week` builds rows from the pure `day_rows` (all-day first, by start time, capped). The pill's click calls `requestFullAccessToEventsWithCompletion`, whose handler posts the change notification so the main-queue observer re-fetches.
-
-### [2026-11-09 14:43 UTC+07:00] — [Feature] Live activity wings and terminal selection
-
-**Done:**
-The collapsed notch grows two 34 pt wings while something is live: the playing track's artwork on the left with a coral waveform on the right, or the focus/break countdown on the right (coral/green). They spring in and out with the notch motion and hide when expanded. The now-playing helper now starts at launch so the wings work without opening the Music tab; it blocks on notifications, idle CPU 0.0%. The Terminal tab gained mouse selection (drag, double-click word, triple-click line, Shift under mouse reporting) and ⌘C. Both built by Sonnet threads; accepted by state logs and collapsed PNGs (screen was locked, so the open animation and a real drag were not exercised). Vietnamese IME input to the PTY verified by the shell receiving `echo tiếng Việt`.
-
-**Changed  files:**
-- `src/live_activity.rs` — created
-- `src/notch_motion.rs` — modified
-- `src/controller.rs` — modified
-- `src/main.rs` — modified
-- `src/notch_motion.rs` — modified
-- `src/terminal_view.rs` — modified
-- `src/terminal_session.rs` — modified
-
-**Flow explained:**
-`sync_activity` runs on every focus render (the existing session tick), each now-playing change and each expand/collapse; it fills the wing view and tells `NotchMotion::set_wings` the extra width, which springs the collapsed frame wider. Terminal mouse events map to grid cells via the pure `cell_at`, update alacritty's `Selection`, and the draw pass highlights the selected cells; ⌘C writes `selection_to_string()` to the pasteboard.
