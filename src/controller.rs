@@ -21,12 +21,13 @@ use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 
 use crate::clip_card::{self, ClipCard};
 use crate::clips::ClipHistory;
-use crate::settings::{Settings, Size};
+use crate::settings::{self as prefs, Settings, Size};
 use crate::settings_window::SettingsWindow;
 use crate::days;
 use crate::export;
 use crate::list_row::{self, ListRow};
 use crate::live_activity::{Activity, LiveActivity};
+use crate::notch_banner::{NotchBanner, Notice};
 use crate::now_playing::{Command, NowPlaying};
 use crate::notch_motion::NotchMotion;
 use crate::quick_add;
@@ -57,18 +58,21 @@ const ARTWORK_SIZE: f64 = 120.0;
 const MAX_CARD_ROWS: usize = 5;
 /// Gap between Today rows; a hairline is drawn in its middle.
 const CARD_ROW_GAP: f64 = 15.0;
-const DURATIONS_MIN: [u64; 4] = [15, 25, 45, 60];
+const DURATIONS_MIN: [u64; 4] = prefs::FOCUS_CHOICES;
 /// One step past the presets in `duration_idx`: count up with no deadline.
 const STOPWATCH: usize = DURATIONS_MIN.len();
 const EXTRA_SECS: u64 = 5 * 60;
 const PLUS_WIDTH: f64 = 40.0;
-const SHORT_BREAK_MIN: u64 = 5;
-const LONG_BREAK_MIN: u64 = 15;
 /// A long break follows every this many focus sessions.
 const CYCLE: usize = 4;
 /// How long the focus card's task line shows what just happened to the session.
 /// How long a deleted task can be brought back with Undo.
 const UNDO_SECS: f64 = 6.0;
+/// How long a task reminder card stays without an answer; the system notification remains.
+const REMINDER_SECS: f64 = 60.0;
+/// How long a pomodoro card stays: it asks nothing.
+const SESSION_NOTICE_SECS: f64 = 8.0;
+const SNOOZE_MIN: u32 = 5;
 /// A reminder whose minute passed longer ago than this (the Mac slept through it) is dropped;
 /// the system notification at the task's time still covers it.
 const REMIND_GRACE_MIN: u32 = 5;
@@ -190,6 +194,7 @@ struct Ui {
     notch_gaps: [Retained<NSLayoutConstraint>; 2],
     motion: Retained<NotchMotion>,
     activity: LiveActivity,
+    banner: NotchBanner,
 }
 
 #[derive(Default)]
@@ -230,8 +235,12 @@ pub struct State {
     chime: RefCell<Option<Retained<NSSound>>>,
     /// What just happened to the session, shown on the focus card's task line until the panel closes.
     toast: RefCell<Option<String>>,
-    /// The task reminder that popped the notch open, shown on the task card until the panel closes.
-    task_toast: RefCell<Option<String>>,
+    /// The task the reminder card asks about, for its Snooze and Done buttons.
+    reminding: RefCell<Option<task_alerts::Reminder>>,
+    /// Snoozed reminders and the minute of the day they come back.
+    snoozed: RefCell<Vec<(task_alerts::Reminder, u32)>>,
+    /// When the card showing now goes away by itself.
+    banner_until: Cell<Option<Instant>>,
     /// `YYYY-MM-DD HH:MM` of the last reminder check; empty until the first one.
     reminded_at: RefCell<String>,
     /// What the hint strip offers for the word being typed, and which one Tab or Return takes.
@@ -383,6 +392,41 @@ define_class!(
             if stale {
                 self.ivars().undo.take();
                 self.render_task_card();
+            }
+        }
+
+        #[unsafe(method(snoozeReminder:))]
+        fn snooze_reminder(&self, _sender: &NSButton) {
+            if let (Some(reminder), Some(now)) = (self.ivars().reminding.take(), now_minutes()) {
+                self.ivars().snoozed.borrow_mut().push((reminder, now + SNOOZE_MIN));
+            }
+            self.hide_banner();
+        }
+
+        #[unsafe(method(finishReminder:))]
+        fn finish_reminder(&self, _sender: &NSButton) {
+            if let Some(reminder) = self.ivars().reminding.take() {
+                let today = days::key(0);
+                let mut tasks = self.ivars().tasks.borrow_mut();
+                let task = tasks.iter_mut().find(|t| !t.done && t.day == today && t.text == reminder.text && t.time == reminder.time);
+                if let Some(task) = task {
+                    task.set_done(true);
+                }
+            }
+            self.save_and_refresh();
+            self.hide_banner();
+        }
+
+        #[unsafe(method(dismissBanner:))]
+        fn dismiss_banner(&self, _sender: &NSButton) {
+            self.hide_banner();
+        }
+
+        /// A newer card restarts the clock, so only one that has really run out is hidden.
+        #[unsafe(method(bannerExpired:))]
+        fn banner_expired(&self, _timer: &NSTimer) {
+            if self.ivars().banner_until.get().is_some_and(|until| Instant::now() + Duration::from_millis(100) >= until) {
+                self.hide_banner();
             }
         }
 
@@ -608,21 +652,25 @@ define_class!(
                 let was_break = state.on_break.replace(false);
                 let planned_min = self.session_secs() / 60; // before stop_timer clears the +5 extras
                 self.stop_timer();
-                let (chime, toast) = if was_break {
-                    (Chime::BreakEnd, format!("Break over · ready for pomodoro {}", self.done_today() + 1))
+                let (chime, symbol, title, subtitle) = if was_break {
+                    (Chime::BreakEnd, "timer", "Break over".to_owned(), format!("Ready for pomodoro {}", self.done_today() + 1))
                 } else {
                     pomodoros::append(&days::stamp(), planned_min, true);
                     self.reload_week();
                     let done = self.done_today();
                     let long = done % CYCLE == 0;
-                    let break_min = if long { LONG_BREAK_MIN } else { SHORT_BREAK_MIN };
+                    let settings = state.settings.borrow().clone();
+                    let break_min = if long { settings.long_break } else { settings.short_break };
                     state.on_break.set(true);
                     state.break_min.set(break_min);
                     self.run_timer(self.session_secs());
-                    (Chime::FocusEnd, format!("Pomodoro {done} done · {} break {break_min} min", if long { "long" } else { "short" }))
+                    let kind = if long { "Long" } else { "Short" };
+                    (Chime::FocusEnd, "cup.and.saucer.fill", format!("Pomodoro {done} done"), format!("{kind} break · {break_min} min"))
                 };
-                *self.ivars().toast.borrow_mut() = Some(toast);
-                self.alert(chime);
+                *self.ivars().toast.borrow_mut() = Some(format!("{title} · {subtitle}"));
+                self.refresh();
+                let notice = Notice { symbol, tint: &tone(CORAL), title: &title, subtitle: &subtitle, actions: false };
+                self.notify(chime, &notice, SESSION_NOTICE_SECS);
             } else {
                 self.render_focus();
             }
@@ -712,7 +760,7 @@ impl Controller {
         let state = State {
             tasks: RefCell::new(store::load()),
             settings: RefCell::new(Settings::load()),
-            duration_idx: Cell::new(1), // 25 min
+            duration_idx: Cell::new(focus_index(&Settings::load())),
             new_priority: Cell::new(PRIORITIES.len() - 1), // no priority
             ..State::default()
         };
@@ -851,9 +899,8 @@ impl Controller {
                 self.ui().panel.makeFirstResponder(None);
             }
             // An alert has been seen once the panel closes after it.
-            if !on && (self.ivars().toast.take().is_some() | self.ivars().task_toast.take().is_some()) {
+            if !on && self.ivars().toast.take().is_some() {
                 self.render_focus();
-                self.render_task_card();
             }
         }
     }
@@ -1101,31 +1148,34 @@ impl Controller {
         }
     }
 
-    /// Rings `chime` and opens the panel on Workspace, where the cards say what happened. The
-    /// keyboard stays with the app in use, and the panel stays until the pointer visits and leaves.
-    /// While the terminal is being typed in, only the chime sounds.
-    fn alert(&self, chime: Chime) {
-        let sound = chime.sound();
-        if let Some(sound) = &sound {
-            sound.play();
+    /// Rings `chime` (unless sounds are off) and hangs `notice` from the notch for `seconds`.
+    /// The card never takes the keyboard, so it is safe while another app is being typed in.
+    fn notify(&self, chime: Chime, notice: &Notice, seconds: f64) {
+        if self.ivars().settings.borrow().sound {
+            let sound = chime.sound();
+            if let Some(sound) = &sound {
+                sound.play();
+            }
+            *self.ivars().chime.borrow_mut() = sound;
         }
-        *self.ivars().chime.borrow_mut() = sound;
-        if self.terminal_has_focus() {
-            self.refresh();
-            return;
-        }
-        self.ivars().tab.set(Tab::Workspace);
-        self.refresh();
-        self.ivars().pinned.set(true);
-        self.set_expanded(true);
-        self.ui().panel.orderFrontRegardless();
+        let (collapsed, _, _) = notch_rects(self.mtm(), self.tab_size());
+        self.ui().banner.show(collapsed, notice);
+        self.ivars().banner_until.set(Some(Instant::now() + Duration::from_secs_f64(seconds)));
+        unsafe { NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(seconds, self.target(), sel!(bannerExpired:), None, false) };
     }
 
-    /// Pops the notch open for tasks whose reminder minute passed since the last check. Called
-    /// on the 2 s reload tick; it does work only when the minute changes.
+    fn hide_banner(&self) {
+        self.ivars().banner_until.set(None);
+        self.ivars().reminding.take();
+        self.ui().banner.hide();
+    }
+
+    /// Shows a card for tasks whose reminder minute passed since the last check, and for snoozed
+    /// ones coming back. Called on the 2 s reload tick; it does work only when the minute changes.
     fn remind_tasks(&self) {
         let stamp = days::stamp();
         let last = self.ivars().reminded_at.replace(stamp.clone());
+        let Some(lead) = self.ivars().settings.borrow().remind else { return };
         if last.is_empty() || last == stamp {
             return;
         }
@@ -1136,12 +1186,23 @@ impl Controller {
             Some((day, clock)) if day == today => task_alerts::minutes(clock).unwrap_or(now).max(earliest),
             _ => earliest,
         };
-        let due = task_alerts::reminders_between(&self.ivars().tasks.borrow(), today, after, now);
-        let Some(first) = due.first() else { return };
-        let text = if due.len() > 1 { format!("{first} · +{} more", due.len() - 1) } else { first.clone() };
-        *self.ivars().task_toast.borrow_mut() = Some(text);
-        self.ivars().show_completed.set(false);
-        self.alert(Chime::Reminder);
+        let mut due = task_alerts::reminders_between(&self.ivars().tasks.borrow(), today, lead, after, now);
+        self.ivars().snoozed.borrow_mut().retain(|(reminder, back)| {
+            let back_now = after < *back && *back <= now;
+            if back_now {
+                due.push(reminder.clone());
+            }
+            !back_now
+        });
+        let Some(first) = due.first().cloned() else { return };
+        let when = if first.at > now { format!("in {} min", first.at - now) } else { "now".to_owned() };
+        let mut subtitle = format!("{} · {when}", clock_12h(&first.time).unwrap_or_default());
+        if due.len() > 1 {
+            subtitle.push_str(&format!(" · +{} more", due.len() - 1));
+        }
+        let notice = Notice { symbol: "bell.fill", tint: &rgba(255, 176, 32, 1.0), title: &first.text, subtitle: &subtitle, actions: true };
+        self.notify(Chime::Reminder, &notice, REMINDER_SECS);
+        *self.ivars().reminding.borrow_mut() = Some(first.clone());
     }
 
     fn render_focus(&self) {
@@ -1180,7 +1241,7 @@ impl Controller {
             "Stopwatch".to_owned()
         } else if !state.on_break.get() {
             format!("Focus · {} of {CYCLE}", done % CYCLE + 1)
-        } else if state.break_min.get() == LONG_BREAK_MIN {
+        } else if done % CYCLE == 0 {
             "Break · long".to_owned()
         } else {
             "Break · short".to_owned()
@@ -1247,10 +1308,8 @@ impl Controller {
         w::fit_pill(&card.done, 10.0);
         card.clear.setHidden(!show_completed || done.is_empty());
         let undo = self.ivars().undo.borrow().as_ref().map(|(_, task, _)| format!("Deleted “{}”", task.text));
-        let reminder = self.ivars().task_toast.borrow().clone();
         card.undo.setHidden(undo.is_none());
-        card.note.setStringValue(&NSString::from_str(undo.as_deref().or(reminder.as_deref()).unwrap_or_default()));
-        card.note.setTextColor(Some(&*if undo.is_some() { white(0.55) } else { tone(CORAL) }));
+        card.note.setStringValue(&NSString::from_str(undo.as_deref().unwrap_or_default()));
         self.render_priority_dots();
 
         let before = list_row::snapshot(&card.rows);
@@ -1402,6 +1461,10 @@ impl Controller {
 
     /// Live: pills, tab fallback and wings follow from a re-render.
     fn apply_settings(&self, settings: Settings) {
+        let focus_changed = self.ivars().settings.borrow().focus != settings.focus;
+        if focus_changed && !self.session_active() {
+            self.ivars().duration_idx.set(focus_index(&settings));
+        }
         *self.ivars().settings.borrow_mut() = settings;
         self.sync_now_playing();
         self.refresh();
@@ -1645,6 +1708,7 @@ impl Controller {
             notch_gaps,
             motion,
             activity,
+            banner: NotchBanner::new(self.target(), sel!(snoozeReminder:), sel!(finishReminder:), sel!(dismissBanner:), mtm),
         }
     }
 
@@ -2075,9 +2139,8 @@ fn with_meta(task: &Task, title: Retained<NSTextField>, color: &NSColor, mtm: Ma
 /// `5:00 PM · High · Home · 45 min`, skipping parts the task doesn't have.
 fn meta_line(task: &Task) -> String {
     let mut parts = Vec::new();
-    if let Some((h, m)) = task.time.split_once(':').and_then(|(h, m)| Some((h.parse::<u32>().ok()?, m))) {
-        let suffix = if h < 12 { "AM" } else { "PM" };
-        parts.push(format!("{}:{m} {suffix}", (h + 11) % 12 + 1));
+    if let Some(time) = clock_12h(&task.time) {
+        parts.push(time);
     }
     if !task.priority.is_empty() {
         parts.push(meta_priority(&task.priority));
@@ -2089,6 +2152,23 @@ fn meta_line(task: &Task) -> String {
         parts.push(format!("{} min", task.minutes));
     }
     parts.join(" · ")
+}
+
+/// `17:00` → `5:00 PM`.
+fn clock_12h(time: &str) -> Option<String> {
+    let (h, m) = time.split_once(':')?;
+    let h: u32 = h.parse().ok()?;
+    Some(format!("{}:{m} {}", (h + 11) % 12 + 1, if h < 12 { "AM" } else { "PM" }))
+}
+
+/// Minute of the day now.
+fn now_minutes() -> Option<u32> {
+    task_alerts::minutes(days::stamp().split_once(' ')?.1)
+}
+
+/// The timer preset a new session starts on.
+fn focus_index(settings: &Settings) -> usize {
+    DURATIONS_MIN.iter().position(|m| *m == settings.focus).unwrap_or(1)
 }
 
 /// `high` → `High`, as the metadata line shows it.

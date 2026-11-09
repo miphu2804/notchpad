@@ -7,6 +7,7 @@ mod export;
 mod hotkey;
 mod list_row;
 mod live_activity;
+mod notch_banner;
 mod now_playing;
 mod notch_motion;
 mod panel;

@@ -56,30 +56,32 @@ pub fn due_alerts(tasks: &[Task], now_day: &str, now_minutes: u32, days_ahead: i
         .collect()
 }
 
-/// How long before a timed task the notch first reminds of it.
-pub const LEAD_MIN: u32 = 10;
+/// A timed task the notch reminds of: the task's text and `HH:MM`, and its minute of the day.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reminder {
+    pub text: String,
+    pub time: String,
+    pub at: u32,
+}
 
-/// Open tasks of `today` whose reminder minute falls in `(after, upto]`: one [`LEAD_MIN`] before
-/// the task's time, one at it. A range rather than a minute, so a reminder whose minute passed
-/// between two checks (a busy main thread, a short sleep) still shows; the caller bounds it.
-pub fn reminders_between(tasks: &[Task], today: &str, after: u32, upto: u32) -> Vec<String> {
-    let mut due: Vec<(u32, String)> = tasks
+/// Open tasks of `today` with a reminder minute in `(after, upto]`: `lead` minutes before the
+/// task's time and at it (once when `lead` is 0). A range rather than a minute, so a reminder whose
+/// minute passed between two checks (a busy main thread, a short sleep) still shows; the caller
+/// bounds it. Sorted by the task's time.
+pub fn reminders_between(tasks: &[Task], today: &str, lead: u32, after: u32, upto: u32) -> Vec<Reminder> {
+    let mut due: Vec<Reminder> = tasks
         .iter()
         .filter(|t| !t.done && t.day == today)
         .filter_map(|t| {
             let (hour, minute) = clock(&t.time)?;
             let at = hour * 60 + minute;
-            if after < at && at <= upto {
-                Some((at, format!("{} · due now", t.text)))
-            } else if at >= LEAD_MIN && after < at - LEAD_MIN && at - LEAD_MIN <= upto {
-                Some((at, format!("{} · in {LEAD_MIN} min", t.text)))
-            } else {
-                None
-            }
+            let in_range = |minute: u32| after < minute && minute <= upto;
+            let ahead = lead > 0 && at >= lead && in_range(at - lead);
+            (in_range(at) || ahead).then(|| Reminder { text: t.text.clone(), time: t.time.clone(), at })
         })
         .collect();
-    due.sort_by_key(|(at, _)| *at);
-    due.into_iter().map(|(_, text)| text).collect()
+    due.sort_by_key(|r| r.at);
+    due
 }
 
 /// `HH:MM` as minutes past midnight; `None` for empty or malformed text.
@@ -245,6 +247,10 @@ mod tests {
         assert!(a[0].id.starts_with(ID_PREFIX));
     }
 
+    fn texts(reminders: Vec<Reminder>) -> Vec<String> {
+        reminders.into_iter().map(|r| r.text).collect()
+    }
+
     #[test]
     fn reminds_ahead_and_at_the_time_once() {
         let mut done = task("2026-11-09", "18:00", "done");
@@ -256,24 +262,30 @@ mod tests {
             task("", "18:00", "inbox"),
             done,
         ];
-        let at = |after, upto| reminders_between(&tasks, "2026-11-09", after, upto);
-        assert!(at(17 * 60 + 48, 17 * 60 + 49).is_empty());
-        assert_eq!(at(17 * 60 + 49, 17 * 60 + 50), ["gym · in 10 min"]);
-        assert!(at(17 * 60 + 50, 17 * 60 + 59).is_empty());
-        assert_eq!(at(17 * 60 + 59, 18 * 60), ["gym · due now"]);
-        assert!(at(18 * 60, 18 * 60 + 1).is_empty());
+        let at = |lead, after, upto| texts(reminders_between(&tasks, "2026-11-09", lead, after, upto));
+        assert!(at(10, 17 * 60 + 48, 17 * 60 + 49).is_empty());
+        assert_eq!(at(10, 17 * 60 + 49, 17 * 60 + 50), ["gym"]);
+        assert!(at(10, 17 * 60 + 50, 17 * 60 + 59).is_empty());
+        assert_eq!(at(10, 17 * 60 + 59, 18 * 60), ["gym"]);
+        assert!(at(10, 18 * 60, 18 * 60 + 1).is_empty());
+        // Only at the time.
+        assert!(at(0, 17 * 60 + 49, 17 * 60 + 50).is_empty());
+        assert_eq!(at(0, 17 * 60 + 59, 18 * 60), ["gym"]);
+        assert_eq!(at(5, 17 * 60 + 54, 17 * 60 + 55), ["gym"]);
     }
 
     #[test]
     fn a_gap_between_checks_keeps_only_the_latest_per_task_in_time_order() {
         let tasks = [task("2026-11-09", "09:05", "b"), task("2026-11-09", "09:00", "a")];
-        assert_eq!(reminders_between(&tasks, "2026-11-09", 8 * 60 + 49, 9 * 60), ["a · due now", "b · in 10 min"]);
+        let due = reminders_between(&tasks, "2026-11-09", 10, 8 * 60 + 49, 9 * 60);
+        assert_eq!(texts(due.clone()), ["a", "b"]);
+        assert_eq!((due[0].time.as_str(), due[0].at), ("09:00", 540));
     }
 
     #[test]
     fn early_morning_task_has_no_lead_reminder_from_yesterday() {
         let tasks = [task("2026-11-09", "00:05", "early")];
-        assert_eq!(reminders_between(&tasks, "2026-11-09", 0, 5), ["early · due now"]);
+        assert_eq!(texts(reminders_between(&tasks, "2026-11-09", 10, 0, 5)), ["early"]);
         assert_eq!(minutes("00:05"), Some(5));
         assert_eq!(minutes("bad"), None);
     }

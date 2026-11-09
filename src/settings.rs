@@ -2,7 +2,8 @@
 //! what the collapsed notch may display.
 //!
 //! Plain `key=value` lines: `hidden=clips,terminal`, `size=terminal:xtall,clips:tall`,
-//! `wing_music=1`, `wing_focus=1`.
+//! `wing_music=1`, `wing_focus=1`, `focus=25`, `short_break=5`, `long_break=15`, `sound=1`,
+//! `remind=10` (minutes ahead, `0` for only at the time, `off` for none).
 //! A missing file, a missing key, an unknown key or a garbled line leaves the default,
 //! which shows everything.
 
@@ -60,6 +61,13 @@ impl Size {
     }
 }
 
+/// Focus lengths the timer offers, in minutes; clicking the timer cycles through them.
+pub const FOCUS_CHOICES: [u64; 4] = [15, 25, 45, 60];
+pub const SHORT_BREAK_CHOICES: [u64; 3] = [3, 5, 10];
+pub const LONG_BREAK_CHOICES: [u64; 4] = [10, 15, 20, 30];
+/// How long before a timed task the notch first reminds of it; `None` turns reminders off.
+pub const REMIND_CHOICES: [Option<u32>; 5] = [None, Some(0), Some(5), Some(10), Some(15)];
+
 /// Index of Music in [`SECTIONS`].
 const MUSIC: usize = 2;
 
@@ -71,11 +79,31 @@ pub struct Settings {
     pub sizes: [Size; SECTIONS.len()],
     pub wing_music: bool,
     pub wing_focus: bool,
+    /// One of [`FOCUS_CHOICES`]: the length a new session starts with.
+    pub focus: u64,
+    /// One of [`SHORT_BREAK_CHOICES`].
+    pub short_break: u64,
+    /// One of [`LONG_BREAK_CHOICES`].
+    pub long_break: u64,
+    /// Whether alerts ring the chime.
+    pub sound: bool,
+    /// One of [`REMIND_CHOICES`].
+    pub remind: Option<u32>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { hidden: [false; SECTIONS.len()], sizes: [Size::Compact; SECTIONS.len()], wing_music: true, wing_focus: true }
+        Self {
+            hidden: [false; SECTIONS.len()],
+            sizes: [Size::Compact; SECTIONS.len()],
+            wing_music: true,
+            wing_focus: true,
+            focus: 25,
+            short_break: 5,
+            long_break: 15,
+            sound: true,
+            remind: Some(10),
+        }
     }
 }
 
@@ -150,6 +178,12 @@ fn parse(text: &str) -> Settings {
             }
             "wing_music" => settings.wing_music = flag(settings.wing_music),
             "wing_focus" => settings.wing_focus = flag(settings.wing_focus),
+            "focus" => settings.focus = choice(value, &FOCUS_CHOICES, settings.focus),
+            "short_break" => settings.short_break = choice(value, &SHORT_BREAK_CHOICES, settings.short_break),
+            "long_break" => settings.long_break = choice(value, &LONG_BREAK_CHOICES, settings.long_break),
+            "sound" => settings.sound = flag(settings.sound),
+            "remind" if value == "off" => settings.remind = None,
+            "remind" => settings.remind = value.parse().ok().filter(|m| REMIND_CHOICES.contains(&Some(*m))).map_or(settings.remind, Some),
             _ => {}
         }
     }
@@ -160,15 +194,25 @@ fn parse(text: &str) -> Settings {
     settings
 }
 
+/// `value` if it parses to one of `choices`, else `current`.
+fn choice(value: &str, choices: &[u64], current: u64) -> u64 {
+    value.parse().ok().filter(|v| choices.contains(v)).unwrap_or(current)
+}
+
 fn format(settings: &Settings) -> String {
     let hidden: Vec<&str> = SECTIONS.iter().zip(settings.hidden).filter(|(_, h)| *h).map(|(s, _)| s.key).collect();
     let sizes: Vec<String> = SECTIONS.iter().zip(settings.sizes).filter(|(_, z)| *z != Size::Compact).map(|(s, z)| format!("{}:{}", s.key, z.key())).collect();
     format!(
-        "hidden={}\nsize={}\nwing_music={}\nwing_focus={}\n",
+        "hidden={}\nsize={}\nwing_music={}\nwing_focus={}\nfocus={}\nshort_break={}\nlong_break={}\nsound={}\nremind={}\n",
         hidden.join(","),
         sizes.join(","),
         settings.wing_music as u8,
         settings.wing_focus as u8,
+        settings.focus,
+        settings.short_break,
+        settings.long_break,
+        settings.sound as u8,
+        settings.remind.map_or("off".to_owned(), |m| m.to_string()),
     )
 }
 
@@ -192,7 +236,7 @@ mod tests {
         settings.hidden[1] = true;
         settings.hidden[3] = true;
         settings.wing_music = false;
-        assert_eq!(format(&settings), "hidden=clips,terminal\nsize=\nwing_music=0\nwing_focus=1\n");
+        assert!(format(&settings).starts_with("hidden=clips,terminal\nsize=\nwing_music=0\nwing_focus=1\n"));
         assert_eq!(parse(&format(&settings)), settings);
         assert_eq!(parse(&format(&Settings::default())), Settings::default());
     }
@@ -212,6 +256,26 @@ mod tests {
         // `week` and `notes` were sections once; files that still name them load as before.
         let settings = parse("size=terminal:huge,bogus:tall,week:tall,clips:tall,notes\n");
         assert_eq!(settings.sizes, [Size::Compact, Size::Tall, Size::Compact, Size::Compact]);
+    }
+
+    #[test]
+    fn focus_options_round_trip() {
+        let mut settings = Settings::default();
+        settings.focus = 45;
+        settings.short_break = 10;
+        settings.long_break = 30;
+        settings.sound = false;
+        settings.remind = None;
+        assert!(format(&settings).ends_with("focus=45\nshort_break=10\nlong_break=30\nsound=0\nremind=off\n"));
+        assert_eq!(parse(&format(&settings)), settings);
+        settings.remind = Some(0);
+        assert_eq!(parse(&format(&settings)), settings);
+    }
+
+    #[test]
+    fn focus_options_outside_the_choices_keep_the_default() {
+        let settings = parse("focus=7\nshort_break=x\nlong_break=999\nremind=12\nsound=maybe\n");
+        assert_eq!(settings, Settings::default());
     }
 
     #[test]

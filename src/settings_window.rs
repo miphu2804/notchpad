@@ -1,11 +1,11 @@
 //! The Settings window: a sidebar of panes and, beside it, grouped rows of switches.
-//! Every switch saves the settings and reports them to the controller, which applies them live,
+//! Every switch and menu saves the settings and reports them to the controller, which applies them live,
 //! except Open at login: that is the system's login-item state, read and set through `SMAppService`.
 
 use std::cell::{OnceCell, RefCell};
 
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSButton, NSCellImagePosition,
@@ -15,7 +15,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
-use crate::settings::{SECTIONS, Settings, Size};
+use crate::settings::{FOCUS_CHOICES, LONG_BREAK_CHOICES, REMIND_CHOICES, SECTIONS, SHORT_BREAK_CHOICES, Settings, Size};
 use crate::widgets::{self as w, rgba};
 
 const WIDTH: f64 = 680.0;
@@ -24,10 +24,26 @@ const SIDEBAR: f64 = 170.0;
 const PANE: f64 = WIDTH - SIDEBAR;
 const MARGIN: f64 = 24.0;
 const ROW: f64 = 50.0;
-const SIZE_MENU_WIDTH: f64 = 96.0;
+const MENU_WIDTH: f64 = 120.0;
 
 /// Sidebar rows, top to bottom: SF Symbol and name.
-const PANES: [(&str, &str); 3] = [("square.grid.2x2", "Sections"), ("rectangle.topthird.inset.filled", "Notch"), ("gearshape", "General")];
+const PANES: [(&str, &str); 4] =
+    [("square.grid.2x2", "Sections"), ("rectangle.topthird.inset.filled", "Notch"), ("timer", "Focus"), ("gearshape", "General")];
+/// Rows of the Focus pane, in order; their tags in `setFocusOption:`.
+const FOCUS_ROW: isize = 0;
+const SHORT_BREAK_ROW: isize = 1;
+const LONG_BREAK_ROW: isize = 2;
+const REMIND_ROW: isize = 3;
+
+/// One settings row: symbol, name, optional dim description, and its controls, laid out right to
+/// left: a switch (state, action) and left of it a menu (items, selected index, action).
+struct Row<'a> {
+    symbol: &'a str,
+    name: &'a str,
+    blurb: Option<&'a str>,
+    switch: Option<(bool, Sel)>,
+    menu: Option<(Vec<String>, usize, Sel)>,
+}
 const WINGS: [(&str, &str); 2] = [("play.circle", "Show what's playing"), ("timer", "Show focus countdown")];
 
 struct Parts {
@@ -69,6 +85,27 @@ define_class!(
         fn set_size(&self, sender: &NSPopUpButton) {
             let mut settings = self.ivars().settings.borrow().clone();
             settings.sizes[sender.tag() as usize] = Size::ALL[sender.indexOfSelectedItem() as usize];
+            self.commit(settings);
+        }
+
+        #[unsafe(method(setFocusOption:))]
+        fn set_focus_option(&self, sender: &NSPopUpButton) {
+            let mut settings = self.ivars().settings.borrow().clone();
+            let index = sender.indexOfSelectedItem().max(0) as usize;
+            match sender.tag() {
+                FOCUS_ROW => settings.focus = FOCUS_CHOICES[index],
+                SHORT_BREAK_ROW => settings.short_break = SHORT_BREAK_CHOICES[index],
+                LONG_BREAK_ROW => settings.long_break = LONG_BREAK_CHOICES[index],
+                REMIND_ROW => settings.remind = REMIND_CHOICES[index],
+                _ => return,
+            }
+            self.commit(settings);
+        }
+
+        #[unsafe(method(toggleSound:))]
+        fn toggle_sound(&self, sender: &NSSwitch) {
+            let mut settings = self.ivars().settings.borrow().clone();
+            settings.sound = sender.state() == NSControlStateValueOn;
             self.commit(settings);
         }
 
@@ -175,17 +212,41 @@ impl SettingsWindow {
         }).collect();
 
         let settings = self.ivars().settings.borrow();
-        let sections: Vec<_> = SECTIONS.iter().enumerate()
-            .map(|(i, s)| (s.symbol, s.name, Some(s.blurb), !settings.hidden[i], sel!(toggleSection:)))
-            .collect();
+        let size_names = || Size::ALL.iter().map(|s| s.name().to_owned()).collect::<Vec<_>>();
+        let sections: Vec<_> = SECTIONS.iter().enumerate().map(|(i, s)| Row {
+            symbol: s.symbol,
+            name: s.name,
+            blurb: Some(s.blurb),
+            switch: Some((!settings.hidden[i], sel!(toggleSection:))),
+            menu: Some((size_names(), Size::ALL.iter().position(|z| *z == settings.sizes[i]).unwrap_or(0), sel!(setSize:))),
+        }).collect();
         let wings: Vec<_> = WINGS.iter().zip([settings.wing_music, settings.wing_focus])
-            .map(|((symbol, name), on)| (*symbol, *name, None, on, sel!(toggleWing:)))
+            .map(|((symbol, name), on)| Row { symbol, name, blurb: None, switch: Some((on, sel!(toggleWing:))), menu: None })
             .collect();
-        let general = [("power", "Open at login", None, opens_at_login(), sel!(toggleLogin:))];
+        let minutes = |choices: &[u64], current: u64| {
+            let items = choices.iter().map(|m| format!("{m} min")).collect();
+            Some((items, choices.iter().position(|m| *m == current).unwrap_or(0), sel!(setFocusOption:)))
+        };
+        let remind_items = REMIND_CHOICES.iter().map(|lead| match lead {
+            None => "Off".to_owned(),
+            Some(0) => "At the time".to_owned(),
+            Some(m) => format!("{m} min before"),
+        }).collect();
+        let remind_index = REMIND_CHOICES.iter().position(|r| *r == settings.remind).unwrap_or(0);
+        let menu_row = |symbol, name, blurb, menu| Row { symbol, name, blurb, switch: None, menu };
+        let focus = [
+            menu_row("timer", "Focus length", Some("Clicking the timer still cycles lengths"), minutes(&FOCUS_CHOICES, settings.focus)),
+            menu_row("cup.and.saucer", "Short break", None, minutes(&SHORT_BREAK_CHOICES, settings.short_break)),
+            menu_row("sofa", "Long break", Some("After every fourth pomodoro"), minutes(&LONG_BREAK_CHOICES, settings.long_break)),
+            menu_row("bell", "Task reminders", Some("A card under the notch for timed tasks"), Some((remind_items, remind_index, sel!(setFocusOption:)))),
+            Row { symbol: "speaker.wave.2", name: "Sound", blurb: Some("Chime when a session ends or a task is due"), switch: Some((settings.sound, sel!(toggleSound:))), menu: None },
+        ];
+        let general = [Row { symbol: "power", name: "Open at login", blurb: None, switch: Some((opens_at_login(), sel!(toggleLogin:))), menu: None }];
         let panes = vec![
-            self.pane("Sections", &sections, Some(settings.sizes), mtm),
-            self.pane("Collapsed notch", &wings, None, mtm),
-            self.pane("General", &general, None, mtm),
+            self.pane("Sections", &sections, mtm),
+            self.pane("Collapsed notch", &wings, mtm),
+            self.pane("Focus", &focus, mtm),
+            self.pane("General", &general, mtm),
         ];
         for pane in &panes {
             content.addSubview(pane);
@@ -193,9 +254,8 @@ impl SettingsWindow {
         Parts { window, rows, panes }
     }
 
-    /// A large title over one card of switch rows: symbol, name, optional dim description and,
-    /// when `sizes` is given, a panel-size menu left of each switch.
-    fn pane(&self, title: &str, rows: &[(&str, &str, Option<&str>, bool, objc2::runtime::Sel)], sizes: Option<[Size; SECTIONS.len()]>, mtm: MainThreadMarker) -> Retained<NSView> {
+    /// A large title over one card of rows. Each control's tag is its row's index.
+    fn pane(&self, title: &str, rows: &[Row], mtm: MainThreadMarker) -> Retained<NSView> {
         let pane = frame_view(SIDEBAR, 0.0, PANE, HEIGHT, mtm);
         let heading = w::label(title, 24.0, unsafe { NSFontWeightBold }, &rgba(255, 255, 255, 1.0), mtm);
         heading.setFrame(rect(MARGIN, from_top(HEIGHT, 36.0, 32.0), PANE - 2.0 * MARGIN, 32.0));
@@ -208,7 +268,7 @@ impl SettingsWindow {
         pane.addSubview(&card);
 
         let target: &AnyObject = self.as_ref();
-        for (i, (symbol, name, blurb, on, action)) in rows.iter().enumerate() {
+        for (i, Row { symbol, name, blurb, switch, menu }) in rows.iter().enumerate() {
             let row = frame_view(0.0, from_top(card_height, i as f64 * ROW, ROW), card_width, ROW, mtm);
             let icon = NSImageView::imageViewWithImage(&w::symbol(symbol), mtm);
             icon.setContentTintColor(Some(&rgba(255, 255, 255, 0.85)));
@@ -217,33 +277,34 @@ impl SettingsWindow {
 
             // Controls are laid out right to left from their intrinsic sizes: macOS 26 draws a
             // wider switch than the classic 38×22, and a fixed frame let it overrun the menu.
-            let switch = NSSwitch::new(mtm);
-            let switch_size = switch.intrinsicContentSize();
-            let switch_x = card_width - 14.0 - switch_size.width;
-            switch.setFrame(rect(switch_x, (ROW - switch_size.height) / 2.0, switch_size.width, switch_size.height));
-            switch.setState(if *on { NSControlStateValueOn } else { 0 });
-            switch.setTag(i as isize);
-            unsafe {
-                switch.setTarget(Some(target));
-                switch.setAction(Some(*action));
+            let mut controls_x = card_width - 2.0;
+            if let Some((on, action)) = switch {
+                let switch = NSSwitch::new(mtm);
+                let size = switch.intrinsicContentSize();
+                controls_x -= 12.0 + size.width;
+                switch.setFrame(rect(controls_x, (ROW - size.height) / 2.0, size.width, size.height));
+                switch.setState(if *on { NSControlStateValueOn } else { 0 });
+                switch.setTag(i as isize);
+                unsafe {
+                    switch.setTarget(Some(target));
+                    switch.setAction(Some(*action));
+                }
+                row.addSubview(&switch);
             }
-            row.addSubview(&switch);
-
-            let mut controls_x = switch_x;
-            if let Some(sizes) = sizes {
+            if let Some((items, selected, action)) = menu {
                 let menu = NSPopUpButton::initWithFrame_pullsDown(mtm.alloc(), NSRect::ZERO, false);
                 menu.setControlSize(NSControlSize::Small);
-                for size in Size::ALL {
-                    menu.addItemWithTitle(&NSString::from_str(size.name()));
+                for item in items {
+                    menu.addItemWithTitle(&NSString::from_str(item));
                 }
                 let menu_height = menu.intrinsicContentSize().height;
-                controls_x = switch_x - 12.0 - SIZE_MENU_WIDTH;
-                menu.setFrame(rect(controls_x, (ROW - menu_height) / 2.0, SIZE_MENU_WIDTH, menu_height));
-                menu.selectItemAtIndex(Size::ALL.iter().position(|s| *s == sizes[i]).unwrap_or(0) as isize);
+                controls_x -= 12.0 + MENU_WIDTH;
+                menu.setFrame(rect(controls_x, (ROW - menu_height) / 2.0, MENU_WIDTH, menu_height));
+                menu.selectItemAtIndex(*selected as isize);
                 menu.setTag(i as isize);
                 unsafe {
                     menu.setTarget(Some(target));
-                    menu.setAction(Some(sel!(setSize:)));
+                    menu.setAction(Some(*action));
                 }
                 row.addSubview(&menu);
             }
