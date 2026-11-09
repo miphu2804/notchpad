@@ -1743,9 +1743,12 @@ impl Controller {
         let music = icon_pill("music.note", sel!(showMusic:));
         let notes = icon_pill("note.text", sel!(showNotes:));
         let terminal = pill("Terminal", sel!(showTerminal:));
+        // Settings is otherwise only reachable through ⌘, or the header's right-click menu.
+        let settings = w::icon_button("gearshape", "", 11.0, &white(0.55), self.target(), sel!(openSettings:), mtm);
+        settings.setToolTip(Some(&NSString::from_str("Settings (⌘,)")));
         Header {
             quit: w::icon_button("xmark", "", 10.0, &white(0.55), self.target(), sel!(quit:), mtm),
-            left: w::stack(&[&workspace, &week], false, 6.0, mtm),
+            left: w::stack(&[&settings, &workspace, &week], false, 8.0, mtm),
             right: w::stack(&[&clips, &music, &notes, &terminal], false, 6.0, mtm),
             workspace,
             week,
