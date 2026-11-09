@@ -1,3 +1,16 @@
+### [2026-11-09 19:50 UTC+07:00] — [Fix] Signed builds keep permissions; block glyphs fill the cell
+
+**Done:**
+- `bundle.sh` signs with the first Apple Development identity in the keychain (ad-hoc when there is none). The designated requirement is now the identifier plus the certificate instead of the cdhash, so macOS keeps granted privacy permissions across rebuilds.
+- The terminal draws block elements (U+2580–U+259F) as rectangles snapped to the cell instead of font glyphs, which leave gaps in a cell taller than the font. Claude Code's logo now renders solid.
+
+**Changed  files:**
+- `macos/bundle.sh` — modified
+- `src/terminal_view.rs` — modified
+
+**Flow explained:**
+`paint` → `block_shape(ch)` gives cell-fraction rects and an alpha (shades) → filled in the foreground colour, edges rounded to whole points so neighbouring cells meet. Verified by a scratch render of the logo and every block group.
+
 ### [2026-11-09 19:25 UTC+07:00] — [Fix] Terminal wheel scrolls programs that track the mouse
 
 **Done:**
@@ -146,21 +159,4 @@ The Music tab now follows whatever macOS shows as Now Playing (YouTube in Chrome
 
 **Flow explained:**
 `build.rs` compiles the helper with clang; `now_playing.rs` embeds it, writes it to the app's support folder on first use of the Music tab, and runs `perl` with it. The helper registers for MediaRemote notifications and prints a JSON line per change; a reader thread queues parsed tracks and pokes the controller on the main thread, which re-renders. Controls are words written to the helper's stdin; it exits when stdin closes.
-
-### [2026-11-09 13:48 UTC+07:00] — [Feature] Pomodoro tomatoes and Terminal tab
-
-**Done:**
-The focus card is now "Today's pomodoros": 8 pixel tomatoes (ripe red when done, green while running, grey ahead), an "N / 8" chip, a "Focus · n of 4" or "Break · short/long" badge, the countdown with "ends at", and Start/Pause/Resume plus End. Sessions log to `pomodoros.txt` (`YYYY-MM-DD HH:MM <min> done|ended`); breaks are 5 min, or 15 after the 4th focus. Clicking the idle countdown cycles the length, since the timer tile was dropped at the user's request. A new "Terminal" tab runs `zsh -lc` commands in the background with streamed output, stderr in red, `[exit N]`, in-process `cd`, ↑↓ history, Escape to kill, Clear and Open in Terminal. Built by two Sonnet threads; accepted by renders of both tabs on a scratch HOME. Idle CPU 0.0%, footprint 24.9 MB.
-
-**Changed  files:**
-- `src/tomato_view.rs` — created
-- `src/pomodoros.rs` — created
-- `src/shell.rs` — created
-- `src/controller.rs` — modified
-- `src/days.rs` — modified
-- `src/main.rs` — modified
-- `src/notch_motion.rs` — modified
-
-**Flow explained:**
-The focus timer ticks only while running; on finish it appends a `done` line and starts a break, and End appends `ended`. The count re-reads the log on each refresh. Terminal: Return calls `run_command`, which handles `cd` and the interactive-program hint in `Shell::submit`, or spawns the child in its own process group; two reader threads send chunks over mpsc, and a 0.1 s timer that exists only while a command runs drains them into the output view, trimmed to 2000 lines.
 
