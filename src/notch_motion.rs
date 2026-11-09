@@ -51,6 +51,9 @@ pub struct Ivars {
     /// section with another panel size is shown.
     height: Cell<f64>,
     height_velocity: Cell<f64>,
+    /// How much taller the expanded frame is than the content, which follows the springing
+    /// height frame by frame so the cards stretch with the panel instead of jumping ahead.
+    slop: f64,
     last_frame: Cell<Option<f64>>,
     /// False while the content lives in the dashboard window: fading and hiding it would blank that window.
     drives_content: Cell<bool>,
@@ -93,6 +96,7 @@ impl NotchMotion {
     /// `content` is a fixed-size view inside the panel's content view; it stays pinned to
     /// the panel's bottom edge and centred, so it slides out from under the notch.
     pub fn new(panel: Retained<NotchPanel>, content: Retained<NSView>, collapsed: NSRect, expanded: NSRect, mtm: MainThreadMarker) -> Retained<Self> {
+        let slop = expanded.size.height - content.frame().size.height;
         let ivars = Ivars {
             panel,
             content,
@@ -110,6 +114,7 @@ impl NotchMotion {
             wing_target: Cell::new(0.0),
             height: Cell::new(expanded.size.height),
             height_velocity: Cell::new(0.0),
+            slop,
             last_frame: Cell::new(None),
             drives_content: Cell::new(true),
         };
@@ -250,17 +255,24 @@ impl NotchMotion {
     fn apply(&self) {
         let s = self.ivars();
         let frame = self.frame_at(s.progress.get());
+        if !s.drives_content.get() {
+            if s.panel.frame() != frame {
+                s.panel.setFrame_display(frame, true);
+            }
+            return;
+        }
+        // Sized before the frame is set: the frame redraws at once, and content still at the
+        // last frame's height would show for that redraw, header sunk below the top edge.
+        let mut size = s.content.frame().size;
+        let height = (s.height.get() - s.slop).round();
+        if size.height != height {
+            size.height = height;
+            s.content.setFrameSize(size);
+        }
+        s.content.setFrameOrigin(NSPoint::new(((frame.size.width - size.width) / 2.0).round(), 0.0));
         if s.panel.frame() != frame {
             s.panel.setFrame_display(frame, true);
         }
-        if !s.drives_content.get() {
-            return;
-        }
-        let size = s.content.frame().size;
-        // Stays level with the panel's top edge while the height springs to a new size, so the
-        // header never leaves the window; zero whenever the height is at rest.
-        let lag = s.height.get() - s.expanded.get().size.height;
-        s.content.setFrameOrigin(NSPoint::new(((frame.size.width - size.width) / 2.0).round(), lag.round()));
 
         let f = s.fade.get();
         let eased = f * f * (3.0 - 2.0 * f);
