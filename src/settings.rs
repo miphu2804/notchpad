@@ -2,7 +2,7 @@
 //! what the collapsed notch may display.
 //!
 //! Plain `key=value` lines: `hidden=clips,terminal`, `size=terminal:xtall,clips:tall`,
-//! `wing_music=1`, `wing_focus=1`, `focus=25`, `short_break=5`, `long_break=15`, `sound=1`,
+//! `wing_music=1`, `wing_focus=1`, `calendar=1` (show today's calendar events), `focus=25`, `short_break=5`, `long_break=15`, `sound=1`,
 //! `remind=10` (minutes ahead, `0` for only at the time, `off` for none).
 //! A missing file, a missing key, an unknown key or a garbled line leaves the default,
 //! which shows everything.
@@ -79,6 +79,9 @@ pub struct Settings {
     pub sizes: [Size; SECTIONS.len()],
     pub wing_music: bool,
     pub wing_focus: bool,
+    /// Whether today's calendar events show beside the tasks. Off until the user turns it on,
+    /// which is also when macOS is asked for calendar access.
+    pub calendar: bool,
     /// One of [`FOCUS_CHOICES`]: the length a new session starts with.
     pub focus: u64,
     /// One of [`SHORT_BREAK_CHOICES`].
@@ -98,6 +101,7 @@ impl Default for Settings {
             sizes: [Size::Compact; SECTIONS.len()],
             wing_music: true,
             wing_focus: true,
+            calendar: false,
             focus: 25,
             short_break: 5,
             long_break: 15,
@@ -178,6 +182,7 @@ fn parse(text: &str) -> Settings {
             }
             "wing_music" => settings.wing_music = flag(settings.wing_music),
             "wing_focus" => settings.wing_focus = flag(settings.wing_focus),
+            "calendar" => settings.calendar = flag(settings.calendar),
             "focus" => settings.focus = choice(value, &FOCUS_CHOICES, settings.focus),
             "short_break" => settings.short_break = choice(value, &SHORT_BREAK_CHOICES, settings.short_break),
             "long_break" => settings.long_break = choice(value, &LONG_BREAK_CHOICES, settings.long_break),
@@ -203,11 +208,12 @@ fn format(settings: &Settings) -> String {
     let hidden: Vec<&str> = SECTIONS.iter().zip(settings.hidden).filter(|(_, h)| *h).map(|(s, _)| s.key).collect();
     let sizes: Vec<String> = SECTIONS.iter().zip(settings.sizes).filter(|(_, z)| *z != Size::Compact).map(|(s, z)| format!("{}:{}", s.key, z.key())).collect();
     format!(
-        "hidden={}\nsize={}\nwing_music={}\nwing_focus={}\nfocus={}\nshort_break={}\nlong_break={}\nsound={}\nremind={}\n",
+        "hidden={}\nsize={}\nwing_music={}\nwing_focus={}\ncalendar={}\nfocus={}\nshort_break={}\nlong_break={}\nsound={}\nremind={}\n",
         hidden.join(","),
         sizes.join(","),
         settings.wing_music as u8,
         settings.wing_focus as u8,
+        settings.calendar as u8,
         settings.focus,
         settings.short_break,
         settings.long_break,
@@ -239,6 +245,17 @@ mod tests {
         assert!(format(&settings).starts_with("hidden=clips,terminal\nsize=\nwing_music=0\nwing_focus=1\n"));
         assert_eq!(parse(&format(&settings)), settings);
         assert_eq!(parse(&format(&Settings::default())), Settings::default());
+    }
+
+    #[test]
+    fn calendar_is_off_unless_the_file_says_so() {
+        assert!(!parse("").calendar);
+        assert!(!parse("calendar=maybe\n").calendar);
+        let mut settings = parse("calendar=1\n");
+        assert!(settings.calendar);
+        assert!(format(&settings).contains("calendar=1\n"));
+        settings.calendar = false;
+        assert_eq!(parse(&format(&settings)), settings);
     }
 
     #[test]

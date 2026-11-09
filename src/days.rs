@@ -25,6 +25,13 @@ pub fn clock_in(seconds: u64) -> String {
     format_at(seconds as f64, "HH:mm")
 }
 
+/// `HH:MM` of `date` on the local clock.
+pub fn clock_of(date: &NSDate) -> String {
+    let formatter = NSDateFormatter::new();
+    formatter.setDateFormat(Some(&NSString::from_str("HH:mm")));
+    formatter.stringFromDate(date).to_string()
+}
+
 fn format(offset_days: i64, pattern: &str) -> String {
     format_at(offset_days as f64 * 86_400.0, pattern)
 }

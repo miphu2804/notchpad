@@ -9,12 +9,13 @@ use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSButton, NSCellImagePosition,
-    NSControlSize, NSControlStateValueOn, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSImageView,
+    NSControlSize, NSControlStateValueOn, NSFont, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSImageView,
     NSPopUpButton, NSSwitch, NSTextAlignment, NSTextField, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
+use crate::calendar::{self, Access};
 use crate::claude_mcp;
 use crate::settings::{FOCUS_CHOICES, LONG_BREAK_CHOICES, REMIND_CHOICES, SECTIONS, SHORT_BREAK_CHOICES, Settings, Size};
 use crate::widgets::{self as w, rgba};
@@ -44,6 +45,7 @@ const REMIND_ROW: isize = 3;
 /// blurbs carry `STATUS + row` so the actions can rewrite them.
 const CLAUDE_CODE_ROW: isize = 0;
 const CLAUDE_DESKTOP_ROW: isize = 1;
+const CALENDAR_ROW: isize = 2;
 const STATUS: isize = 100;
 const BUTTON_WIDTH: f64 = 84.0;
 /// Index of the Integrations pane in [`PANES`].
@@ -148,6 +150,14 @@ define_class!(
         fn add_claude_desktop(&self, _sender: &NSButton) {
             let error = claude_mcp::add_to_desktop().err();
             self.refresh_integrations(CLAUDE_DESKTOP_ROW, error);
+        }
+
+        #[unsafe(method(toggleCalendar:))]
+        fn toggle_calendar(&self, sender: &NSSwitch) {
+            let mut settings = self.ivars().settings.borrow().clone();
+            settings.calendar = sender.state() == NSControlStateValueOn;
+            self.commit(settings);
+            self.refresh_integrations(-1, None);
         }
 
         /// Registers or removes the app as a login item. macOS refuses for a binary outside an
@@ -291,7 +301,7 @@ impl SettingsWindow {
     /// A large title over one card of rows.
     fn pane(&self, title: &str, rows: &[Row], mtm: MainThreadMarker) -> Retained<NSView> {
         let pane = titled_pane(title, mtm);
-        pane.addSubview(&self.card(rows, 84.0, mtm));
+        pane.addSubview(&self.card(rows, 84.0, 0, mtm));
         pane
     }
 
@@ -302,19 +312,38 @@ impl SettingsWindow {
             Row { symbol: "terminal", name: "Claude Code", blurb: Some(""), button: Some(("Add", sel!(addClaudeCode:))), ..Row::default() },
             Row { symbol: "bubble.left", name: "Claude Desktop", blurb: Some(""), button: Some(("Add", sel!(addClaudeDesktop:))), ..Row::default() },
         ];
-        let mut top = 80.0;
-        for (caption, rows) in [("Claude", &claude[..])] {
+        let calendars = [Row {
+            symbol: "calendar",
+            name: "Show calendar events",
+            blurb: Some(""),
+            switch: Some((self.ivars().settings.borrow().calendar, sel!(toggleCalendar:))),
+            ..Row::default()
+        }];
+        let calendar_note = "Add a Google account in System Settings › Internet Accounts. Notion Calendar events come from that same Google calendar.";
+        let (mut top, mut base) = (80.0, 0);
+        for (caption, rows, note) in [("Claude", &claude[..], None), ("Calendars", &calendars[..], Some(calendar_note))] {
             let caption = w::label(&caption.to_uppercase(), 11.0, unsafe { NSFontWeightMedium }, &rgba(255, 255, 255, 0.45), mtm);
             caption.setFrame(rect(MARGIN + 4.0, from_top(HEIGHT, top, 14.0), PANE - 2.0 * MARGIN, 14.0));
             pane.addSubview(&caption);
-            pane.addSubview(&self.card(rows, top + 18.0, mtm));
-            top += 18.0 + rows.len() as f64 * ROW + 14.0;
+            top += 18.0;
+            pane.addSubview(&self.card(rows, top, base, mtm));
+            top += rows.len() as f64 * ROW;
+            base += rows.len() as isize;
+            if let Some(note) = note {
+                let note = NSTextField::wrappingLabelWithString(&NSString::from_str(note), mtm);
+                note.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+                note.setTextColor(Some(&rgba(255, 255, 255, 0.45)));
+                note.setFrame(rect(MARGIN + 4.0, from_top(HEIGHT, top + 6.0, 30.0), PANE - 2.0 * MARGIN - 8.0, 30.0));
+                pane.addSubview(&note);
+                top += 36.0;
+            }
+            top += 14.0;
         }
         pane
     }
 
-    /// One card of rows whose top edge is `top` below the pane's. Each control's tag is its row's index.
-    fn card(&self, rows: &[Row], top: f64, mtm: MainThreadMarker) -> Retained<NSView> {
+    /// One card of rows whose top edge is `top` below the pane's. Each control's tag is `base` plus its row's index.
+    fn card(&self, rows: &[Row], top: f64, base: isize, mtm: MainThreadMarker) -> Retained<NSView> {
         let card_width = PANE - 2.0 * MARGIN;
         let card_height = rows.len() as f64 * ROW;
         let card = frame_view(MARGIN, from_top(HEIGHT, top, card_height), card_width, card_height, mtm);
@@ -322,6 +351,7 @@ impl SettingsWindow {
 
         let target: &AnyObject = self.as_ref();
         for (i, Row { symbol, name, blurb, switch, menu, button }) in rows.iter().enumerate() {
+            let tag = base + i as isize;
             let row = frame_view(0.0, from_top(card_height, i as f64 * ROW, ROW), card_width, ROW, mtm);
             let icon = NSImageView::imageViewWithImage(&w::symbol(symbol), mtm);
             icon.setContentTintColor(Some(&rgba(255, 255, 255, 0.85)));
@@ -337,7 +367,7 @@ impl SettingsWindow {
                 let height = button.intrinsicContentSize().height;
                 controls_x -= 12.0 + BUTTON_WIDTH;
                 button.setFrame(rect(controls_x, (ROW - height) / 2.0, BUTTON_WIDTH, height));
-                button.setTag(i as isize);
+                button.setTag(tag);
                 row.addSubview(&button);
             }
             if let Some((on, action)) = switch {
@@ -346,7 +376,7 @@ impl SettingsWindow {
                 controls_x -= 12.0 + size.width;
                 switch.setFrame(rect(controls_x, (ROW - size.height) / 2.0, size.width, size.height));
                 switch.setState(if *on { NSControlStateValueOn } else { 0 });
-                switch.setTag(i as isize);
+                switch.setTag(tag);
                 unsafe {
                     switch.setTarget(Some(target));
                     switch.setAction(Some(*action));
@@ -363,7 +393,7 @@ impl SettingsWindow {
                 controls_x -= 12.0 + MENU_WIDTH;
                 menu.setFrame(rect(controls_x, (ROW - menu_height) / 2.0, MENU_WIDTH, menu_height));
                 menu.selectItemAtIndex(*selected as isize);
-                menu.setTag(i as isize);
+                menu.setTag(tag);
                 unsafe {
                     menu.setTarget(Some(target));
                     menu.setAction(Some(*action));
@@ -377,7 +407,7 @@ impl SettingsWindow {
                 Some(blurb) => {
                     name.setFrame(rect(48.0, ROW - 9.0 - 16.0, text_width, 16.0));
                     let blurb = w::label(blurb, 11.0, unsafe { NSFontWeightRegular }, &rgba(255, 255, 255, 0.5), mtm);
-                    blurb.setTag(STATUS + i as isize);
+                    blurb.setTag(STATUS + tag);
                     blurb.setFrame(rect(48.0, 9.0, text_width, 14.0));
                     row.addSubview(&blurb);
                 }
@@ -395,13 +425,22 @@ impl SettingsWindow {
         card
     }
 
-    /// Rewrites the Claude rows from what is on disk; `error` is shown on row `failed` instead of its blurb.
+    /// Rewrites the Integrations rows from what is on disk and in macOS; `error` is shown on row `failed` instead of its blurb.
     fn refresh_integrations(&self, failed: isize, error: Option<String>) {
         let pane = &self.ivars().parts.get().expect("built in new()").panes[INTEGRATIONS_PANE];
         let rows = [
             (CLAUDE_CODE_ROW, claude_mcp::code_added(), "Gives Claude Code your tasks", "Claude Code can use your tasks"),
             (CLAUDE_DESKTOP_ROW, claude_mcp::desktop_added(), "Gives Claude Desktop your tasks", "Added. Restart Claude Desktop"),
         ];
+        // Access can be refused in the prompt or later in System Settings; say where to change it.
+        let calendar = if self.ivars().settings.borrow().calendar && calendar::access() == Access::Denied {
+            "Allow Notchpad in System Settings › Privacy › Calendars"
+        } else {
+            "Today's events, read-only"
+        };
+        if let Some(label) = pane.viewWithTag(STATUS + CALENDAR_ROW).and_then(|v| v.downcast::<NSTextField>().ok()) {
+            label.setStringValue(&NSString::from_str(calendar));
+        }
         for (row, added, idle, done) in rows {
             let blurb = match &error {
                 Some(error) if row == failed => error,

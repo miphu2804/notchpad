@@ -1,3 +1,4 @@
+mod calendar;
 mod chime;
 mod claude_mcp;
 mod clip_card;

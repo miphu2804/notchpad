@@ -25,6 +25,8 @@
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Notchpad controls Music and Spotify playback from the notch.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Notchpad shows today's calendar events beside your tasks. It only reads them.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 </dict>
