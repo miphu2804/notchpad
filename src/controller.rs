@@ -1195,13 +1195,16 @@ impl Controller {
         let stopwatch = self.stopwatch();
         let remaining = self.shown_secs();
         let done = self.done_today();
+        // The stopwatch has no end to ripen towards, so its tomato stays green.
+        let total = self.session_secs();
+        let ripeness = if stopwatch || total == 0 { 0.0 } else { 1.0 - remaining as f64 / total as f64 };
 
         set(&card.count, &format!("{done} / {DAILY_GOAL}"));
         for (i, tomato) in card.tomatoes.iter().enumerate() {
             tomato.set(if i < done {
                 Tomato::Ripe
             } else if i == done && active && !state.on_break.get() {
-                Tomato::Growing
+                Tomato::Growing(ripeness)
             } else {
                 Tomato::Empty
             });
