@@ -43,6 +43,10 @@ pub struct Ivars {
     /// Content opacity before easing, 0..=1.
     fade: Cell<f64>,
     reduce_motion: Cell<bool>,
+    /// Extra width of the collapsed frame while a live activity shows; springs like the frame.
+    wing: Cell<f64>,
+    wing_velocity: Cell<f64>,
+    wing_target: Cell<f64>,
     last_frame: Cell<Option<f64>>,
 }
 
@@ -95,6 +99,9 @@ impl NotchMotion {
             target: Cell::new(0.0),
             fade: Cell::new(0.0),
             reduce_motion: Cell::new(false),
+            wing: Cell::new(0.0),
+            wing_velocity: Cell::new(0.0),
+            wing_target: Cell::new(0.0),
             last_frame: Cell::new(None),
         };
         let this = mtm.alloc::<Self>().set_ivars(ivars);
@@ -119,6 +126,18 @@ impl NotchMotion {
         if open {
             s.content.setHidden(false);
         }
+        self.wake();
+    }
+
+    /// Grows (or shrinks) the collapsed frame by `width` in total, evenly on both sides.
+    pub fn set_wings(&self, width: f64) {
+        self.ivars().wing_target.set(width);
+        self.ivars().reduce_motion.set(w::reduce_motion());
+        self.wake();
+    }
+
+    fn wake(&self) {
+        let s = self.ivars();
         // Made on first use, once the panel is on screen. The link retains its target;
         // both live as long as the app. While the display sleeps it doesn't fire, and the
         // motion resumes when the display wakes.
@@ -133,6 +152,14 @@ impl NotchMotion {
     fn advance(&self, dt: f64) {
         let s = self.ivars();
         let reduce = s.reduce_motion.get();
+        // Critically damped, like closing: shrinking must never dip below the hardware notch.
+        let (wing, wing_velocity) = if reduce {
+            (s.wing_target.get(), 0.0)
+        } else {
+            integrate(&CLOSE, (s.wing.get(), s.wing_velocity.get()), s.wing_target.get(), dt)
+        };
+        s.wing.set(wing);
+        s.wing_velocity.set(wing_velocity);
         let mut fade = s.fade.get();
         if s.open.get() {
             s.target.set(1.0);
@@ -155,16 +182,7 @@ impl NotchMotion {
             return;
         }
         let spring = if target > 0.5 { &OPEN } else { &CLOSE };
-        let omega = std::f64::consts::TAU / spring.response;
-        let (stiffness, friction) = (omega * omega, 2.0 * spring.damping * omega);
-        // Small fixed sub-steps keep the integration stable at any display rate.
-        let steps = (dt * 480.0).ceil().max(1.0);
-        let h = dt / steps;
-        let (mut x, mut v) = (s.progress.get(), s.velocity.get());
-        for _ in 0..steps as usize {
-            v += (-stiffness * (x - target) - friction * v) * h;
-            x += v * h;
-        }
+        let (x, v) = integrate(spring, (s.progress.get(), s.velocity.get()), target, dt);
         s.progress.set(x);
         s.velocity.set(v);
     }
@@ -176,8 +194,12 @@ impl NotchMotion {
         let at_rest = s.target.get() == goal
             && s.fade.get() == goal
             && (s.progress.get() - goal).abs() < 1e-3
-            && s.velocity.get().abs() < 1e-2;
+            && s.velocity.get().abs() < 1e-2
+            && (s.wing.get() - s.wing_target.get()).abs() < 1e-2
+            && s.wing_velocity.get().abs() < 1e-2;
         if at_rest {
+            s.wing.set(s.wing_target.get());
+            s.wing_velocity.set(0.0);
             s.progress.set(goal);
             s.velocity.set(0.0);
         }
@@ -206,7 +228,7 @@ impl NotchMotion {
     fn frame_at(&self, progress: f64) -> NSRect {
         let (a, b) = (self.ivars().collapsed.get(), self.ivars().expanded.get());
         let lerp = |from: f64, to: f64| from + (to - from) * progress;
-        let width = lerp(a.size.width, b.size.width).round();
+        let width = lerp(a.size.width + self.ivars().wing.get(), b.size.width).round();
         let height = lerp(a.size.height, b.size.height).round();
         let mid = a.origin.x + a.size.width / 2.0;
         let top = a.origin.y + a.size.height;
@@ -214,9 +236,38 @@ impl NotchMotion {
     }
 }
 
+/// One frame of the spring towards `target`, from `(position, velocity)`.
+fn integrate(spring: &Spring, (mut x, mut v): (f64, f64), target: f64, dt: f64) -> (f64, f64) {
+    let omega = std::f64::consts::TAU / spring.response;
+    let (stiffness, friction) = (omega * omega, 2.0 * spring.damping * omega);
+    // Small fixed sub-steps keep the integration stable at any display rate.
+    let steps = (dt * 480.0).ceil().max(1.0);
+    let h = dt / steps;
+    for _ in 0..steps as usize {
+        v += (-stiffness * (x - target) - friction * v) * h;
+        x += v * h;
+    }
+    (x, v)
+}
+
 /// Uniform scale about (`x`, `y`) in the layer's coordinates (AppKit layers anchor at 0,0).
 fn scale_about(scale: f64, x: f64, y: f64) -> CATransform3D {
     let t = CATransform3D::new_translation(x, y, 0.0);
     let t = t.scale(scale, scale, 1.0);
     t.translate(-x, -y, 0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn critically_damped_spring_settles_without_overshoot() {
+        let (mut x, mut v) = (0.0, 0.0);
+        for _ in 0..180 {
+            (x, v) = integrate(&CLOSE, (x, v), 68.0, 1.0 / 60.0);
+            assert!(x <= 68.0 + 1e-6, "overshot to {x}");
+        }
+        assert!((x - 68.0).abs() < 0.01 && v.abs() < 0.1);
+    }
 }
