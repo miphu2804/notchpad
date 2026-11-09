@@ -1,5 +1,5 @@
 //! The numbers behind the Insights view: per-day totals from the pomodoro log and the completed
-//! tasks, streaks, the month's active days, the best day and heatmap intensity buckets.
+//! tasks, streaks, the month's active days, the best day and intensity buckets for the moon calendar.
 //!
 //! Pure: days are numbered (days since 1970-01-01) so ranges, streaks and month borders are plain
 //! arithmetic, and nothing here touches AppKit or the disk.
@@ -8,12 +8,11 @@ use std::collections::HashMap;
 
 use crate::store::Task;
 
-/// A day counts for the heatmaps and rings by this many of its pomodoros-and-tasks points.
+/// A day counts for the moon calendar by this many of its pomodoros-and-tasks points.
 const POMODORO_POINTS: u32 = 2;
 /// Intensity buckets above empty: a day is 0 (nothing) to `LEVELS`.
 pub const LEVELS: u8 = 4;
-/// The heatmap and the rings look back this many days, today included: five weeks and a day, so
-/// the grid always spans 6 week columns.
+/// The rings look back this many days, today included: five weeks and a day.
 pub const SPAN: i64 = 36;
 
 /// What one calendar day held.
@@ -22,15 +21,6 @@ pub struct Day {
     pub focus_min: u32,
     pub pomodoros: u32,
     pub tasks: u32,
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Metric {
-    Focus,
-    Pomodoros,
-    Tasks,
-    /// Pomodoros and tasks together, for views that show effort of any kind.
-    Score,
 }
 
 impl Day {
@@ -42,28 +32,12 @@ impl Day {
         self.pomodoros * POMODORO_POINTS + self.tasks
     }
 
-    pub fn value(&self, metric: Metric) -> u32 {
-        match metric {
-            Metric::Focus => self.focus_min,
-            Metric::Pomodoros => self.pomodoros,
-            Metric::Tasks => self.tasks,
-            Metric::Score => self.score(),
-        }
-    }
-
     /// Estimated contribution weights in [`KINDS`] order, not measured task durations.
     /// Daily focus up to session count × [`POMODORO_MIN`] is pomodoro effort; the remainder is
     /// deep focus. Each finished task contributes [`TASK_MIN`] equivalent minutes.
     pub fn effort(&self) -> [u32; 3] {
         let pomodoro = self.focus_min.min(self.pomodoros * POMODORO_MIN);
         [self.focus_min - pomodoro, pomodoro, self.tasks * TASK_MIN]
-    }
-
-    /// Each kind's share of the day's effort, summing to 1; all zero for an idle day.
-    pub fn shares(&self) -> [f64; 3] {
-        let effort = self.effort();
-        let total: u32 = effort.iter().sum();
-        effort.map(|e| if total == 0 { 0.0 } else { f64::from(e) / f64::from(total) })
     }
 
     /// The kind with the most effort, the earlier one in [`KINDS`] on a tie; none for an idle day.
@@ -174,9 +148,9 @@ impl Insights {
         (self.today - count + 1..=self.today).map(|n| self.day(n)).collect()
     }
 
-    /// The largest value of `metric` in the last [`SPAN`] days: the top of the intensity scale.
-    pub fn peak(&self, metric: Metric) -> u32 {
-        self.recent(SPAN).iter().map(|d| d.value(metric)).max().unwrap_or(0)
+    /// The best score in the last [`SPAN`] days: the top of the intensity scale.
+    pub fn peak(&self) -> u32 {
+        self.recent(SPAN).iter().map(Day::score).max().unwrap_or(0)
     }
 }
 
@@ -233,33 +207,6 @@ pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 }
 
 pub const MONTH_NAMES: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-/// Columns of the heatmap: [`SPAN`] days that end on any weekday touch 6 weeks.
-pub const HEAT_COLS: usize = 6;
-
-/// Column (week) and row (weekday, Monday on top) of day `n` in a heatmap of the [`SPAN`] days
-/// ending `today`. Column 0 starts on the Monday on or before the first day shown.
-pub fn heat_cell(today: i64, n: i64) -> (usize, u32) {
-    let first = today - (SPAN - 1);
-    let first_monday = first - i64::from(weekday(first));
-    (((n - first_monday) / 7) as usize, weekday(n))
-}
-
-/// A label for every week shown, as (the Monday's day number, text): the day of the month,
-/// with the month name in front of the first and of each week that starts in a new month.
-pub fn week_labels(today: i64) -> Vec<(i64, String)> {
-    let first_monday = today - (SPAN - 1) - i64::from(weekday(today - (SPAN - 1)));
-    let mut previous = 0;
-    (0..HEAT_COLS as i64)
-        .map(|col| {
-            let monday = first_monday + col * 7;
-            let (_, month, day) = civil(monday);
-            let text = if month == previous { day.to_string() } else { format!("{} {day}", MONTH_NAMES[month as usize - 1]) };
-            previous = month;
-            (monday, text)
-        })
-        .collect()
-}
-
 /// Monday is 0, Sunday 6.
 pub fn weekday(n: i64) -> u32 {
     (n + 3).rem_euclid(7) as u32
@@ -289,7 +236,7 @@ mod tests {
         assert_eq!(data.longest_streak(), 0);
         assert_eq!(data.active_this_month(), (0, 9));
         assert!(data.best_day().is_none());
-        assert_eq!(data.peak(Metric::Score), 0);
+        assert_eq!(data.peak(), 0);
         assert_eq!(level(0, 0), 0);
     }
 
@@ -384,8 +331,8 @@ mod tests {
     fn peak_looks_back_one_span_only() {
         let log = "2024-01-01 09:00 90 done\n2026-11-01 09:00 25 done\n2026-11-02 09:00 50 done\n";
         let data = build(log, &[], "2026-11-09");
-        assert_eq!(data.peak(Metric::Focus), 50);
-        assert_eq!(data.peak(Metric::Pomodoros), 1);
+        // Two 1-pomodoro days in the span; the 2024 one is outside it.
+        assert_eq!(data.peak(), POMODORO_POINTS);
         assert_eq!(data.recent(7).len(), 7);
         assert_eq!(data.recent(7)[6], Day::default());
     }
@@ -395,37 +342,12 @@ mod tests {
         // Daily approximation: 60 focus minutes, a 50-minute session allowance and 20 task points.
         let day = Day { focus_min: 60, pomodoros: 2, tasks: 2 };
         assert_eq!(day.effort(), [10, 50, 20]);
-        assert_eq!(day.shares(), [0.125, 0.625, 0.25]);
         assert_eq!(day.dominant(), Some(Kind::Pomodoros));
         assert_eq!(Day { focus_min: 90, pomodoros: 1, tasks: 1 }.dominant(), Some(Kind::Focus));
-        assert_eq!(Day { focus_min: 0, pomodoros: 0, tasks: 1 }.shares(), [0.0, 0.0, 1.0]);
-        // A tie goes to the earlier kind; an idle day has no shares and no dominant kind.
+        assert_eq!(Day { focus_min: 0, pomodoros: 0, tasks: 1 }.dominant(), Some(Kind::Tasks));
+        // A tie goes to the earlier kind; an idle day has no dominant kind.
         assert_eq!(Day { focus_min: 50, pomodoros: 1, tasks: 0 }.dominant(), Some(Kind::Focus));
-        assert_eq!(Day::default().shares(), [0.0; 3]);
         assert_eq!(Day::default().dominant(), None);
-    }
-
-    #[test]
-    fn heatmap_puts_today_in_the_last_column_on_its_weekday() {
-        for today in ["2026-11-09", "2026-11-15", "2027-01-01"] {
-            let today = at(today);
-            assert_eq!(heat_cell(today, today), (HEAT_COLS - 1, weekday(today)));
-            assert_eq!(heat_cell(today, today - 6).0, HEAT_COLS - 2 + usize::from(weekday(today) == 6));
-            assert_eq!(heat_cell(today, today - (SPAN - 1)).0, 0);
-        }
-        // A Monday is the top of its column and Sunday the bottom of the same one.
-        let today = at("2026-11-09");
-        assert_eq!(heat_cell(today, today).1, 0);
-        assert_eq!(heat_cell(today, today - 1), (HEAT_COLS - 2, 6));
-    }
-
-    #[test]
-    fn week_labels_name_the_month_when_it_changes() {
-        let labels = week_labels(at("2026-11-09"));
-        let text: Vec<_> = labels.iter().map(|(_, t)| t.as_str()).collect();
-        assert_eq!(text, ["Oct 5", "12", "19", "26", "Nov 2", "9"]);
-        // Each label sits on the Monday that starts its column.
-        assert!(labels.iter().enumerate().all(|(col, (monday, _))| heat_cell(at("2026-11-09"), *monday).0 == col && weekday(*monday) == 0));
     }
 
     #[test]

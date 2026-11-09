@@ -104,6 +104,15 @@ pub fn start_oauth() -> Result<OAuthAttempt, String> {
     Ok(OAuthAttempt { receiver, cancel })
 }
 
+/// Connects with a personal API key, the way in when no OAuth client is configured. The key is
+/// checked against Linear first, so a typo is caught on the spot, then kept only in the Keychain.
+pub fn connect_key(key: &str) -> Result<(), String> {
+    reserve_oauth_start()?;
+    request_with(key, ASSIGNED, json!({})).and_then(|reply| data(&reply))?;
+    let _guard = auth_lock().lock().map_err(|_| "Linear credential lock failed".to_owned())?;
+    set_generic_password(SERVICE, API_KEY_ACCOUNT, key.as_bytes()).map_err(|err| format!("Keychain: {err}"))
+}
+
 fn oauth_flow(client_id: &str, generation: u64, cancel: &AtomicBool) -> Result<(), String> {
     let listener = TcpListener::bind(CALLBACK_ADDR)
         .map_err(|_| format!("Could not listen for Linear's callback on {CALLBACK_ADDR}; close another OAuth attempt and try again"))?;

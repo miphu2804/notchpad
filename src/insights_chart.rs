@@ -13,7 +13,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSAttributedStringKey, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
-use crate::insights::{KINDS, Kind, LEVELS};
+use crate::insights::{Kind, LEVELS};
 use crate::widgets::rgba;
 
 pub type Rgb = (u8, u8, u8);
@@ -31,14 +31,9 @@ pub enum Plot {
     Blank,
     /// Active days this month out of the days so far, as a ring with `active/total` inside.
     Ring { active: u32, total: u32 },
-    /// `(column, row, level)` per day; the week labels as `(column, text)`.
-    Heatmap { cells: Vec<(usize, u32, u8)>, weeks: Vec<(usize, String)>, hue: Rgb },
     /// One petal per day, oldest first: its effort as a fraction of the busiest day's and the
     /// kind that led it (none when idle); a few dates around the ring as `(day index, text)`.
     Petals { days: Vec<(f64, Option<Kind>)>, labels: Vec<(usize, String)>, active: u32 },
-    /// Each day's share of effort per kind, in `KINDS` order, oldest first, with x labels as
-    /// `(index, text)`.
-    Pulse { days: Vec<[f64; 3]>, labels: Vec<(usize, String)> },
     /// The month as a calendar: weekday of the 1st (Monday 0), a level per day (`None` once the
     /// day has not come), and the index of today.
     Moon { lead: u32, days: Vec<Option<u8>>, today: usize },
@@ -63,9 +58,7 @@ define_class!(
             match &*self.ivars().borrow() {
                 Plot::Blank => {}
                 Plot::Ring { active, total } => draw_ring(size, *active, *total),
-                Plot::Heatmap { cells, weeks, hue } => draw_heatmap(size, cells, weeks, *hue),
                 Plot::Petals { days, labels, active } => draw_petals(size, days, labels, *active),
-                Plot::Pulse { days, labels } => draw_pulse(size, days, labels),
                 Plot::Moon { lead, days, today } => draw_moon(size, *lead, days, *today),
             }
         }
@@ -98,19 +91,6 @@ fn white(alpha: f64) -> Retained<NSColor> {
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
-}
-
-/// Empty cells are a faint white; higher levels are the hue at rising strength.
-fn ramp(hue: Rgb, level: u8) -> Retained<NSColor> {
-    match level {
-        0 => white(0.07),
-        l => color(hue, [0.28, 0.5, 0.75, 1.0][(l.min(LEVELS) - 1) as usize]),
-    }
-}
-
-fn fill_round(r: NSRect, radius: f64, color: &NSColor) {
-    color.setFill();
-    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(r, radius, radius).fill();
 }
 
 /// Draws `s` and returns its width. `align` is 0 for text starting at `x`, 0.5 centred on it,
@@ -166,46 +146,6 @@ fn draw_ring(size: NSSize, active: u32, total: u32) {
     text(&format!("{active}/{total}"), cx, cy - 8.0, 0.5, 14.0, true, &white(0.95));
 }
 
-fn draw_heatmap(size: NSSize, cells: &[(usize, u32, u8)], weeks: &[(usize, String)], hue: Rgb) {
-    const LABELS: f64 = 30.0;
-    const TOP: f64 = 18.0;
-    const LEGEND: f64 = 22.0;
-    const GAP: f64 = 4.0;
-    const SWATCH: f64 = 10.0;
-    let cols = crate::insights::HEAT_COLS as f64;
-    let pitch = ((size.width - LABELS) / cols).min((size.height - TOP - LEGEND) / 7.0).min(46.0);
-    let cell = pitch - GAP;
-    // Few columns leave the grid narrow; it sits in the middle of the card.
-    let left = LABELS + (size.width - LABELS - cols * pitch) / 2.0;
-    for (col, row, level) in cells {
-        fill_round(rect(left + *col as f64 * pitch, TOP + *row as f64 * pitch, cell, cell), 5.0, &ramp(hue, *level));
-    }
-    if let Some((col, row, _)) = cells.last() {
-        let today = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect(left + *col as f64 * pitch - 1.5, TOP + *row as f64 * pitch - 1.5, cell + 3.0, cell + 3.0), 6.0, 6.0);
-        today.setLineWidth(1.2);
-        white(0.75).setStroke();
-        today.stroke();
-    }
-    let dim = white(0.4);
-    for (col, label) in weeks {
-        text(label, left + *col as f64 * pitch + cell / 2.0, 0.0, 0.5, 10.0, false, &dim);
-    }
-    for (row, name) in [(0, "Mon"), (2, "Wed"), (4, "Fri")] {
-        text(name, left - 8.0, TOP + row as f64 * pitch + (cell - 12.0) / 2.0, 1.0, 9.0, false, &dim);
-    }
-    // Legend, right-aligned under the grid: Less ▢▢▢▢▢ More.
-    let y = size.height - LEGEND + 7.0;
-    let right = left + cols * pitch - GAP;
-    let swatches = f64::from(LEVELS + 1) * (SWATCH + 3.0);
-    text("More", right, y, 1.0, 10.0, false, &dim);
-    let mut x = right - 30.0 - swatches;
-    for level in 0..=LEVELS {
-        fill_round(rect(x, y + 1.0, SWATCH, SWATCH), 3.0, &ramp(hue, level));
-        x += SWATCH + 3.0;
-    }
-    text("Less", right - 30.0 - swatches - 6.0, y, 1.0, 10.0, false, &dim);
-}
-
 fn draw_petals(size: NSSize, days: &[(f64, Option<Kind>)], labels: &[(usize, String)], active: u32) {
     const FOOTER: f64 = 40.0;
     const LABELS: f64 = 22.0;
@@ -249,38 +189,6 @@ fn draw_petals(size: NSSize, days: &[(f64, Option<Kind>)], labels: &[(usize, Str
     let y = size.height - FOOTER + 4.0;
     legend(&[("mostly deep focus", Kind::Focus), ("mostly pomodoros", Kind::Pomodoros), ("mostly tasks", Kind::Tasks)], cx, y, 0.5);
     text("petal length = that day's contribution", cx, y + 20.0, 0.5, 10.0, false, &white(0.3));
-}
-
-/// One full-height column per day, split into each kind's share of it, so the row reads as a
-/// steady rhythm and the colours tell what kind of day it was.
-fn draw_pulse(size: NSSize, days: &[[f64; 3]], labels: &[(usize, String)]) {
-    const TOP: f64 = 26.0;
-    const BOTTOM: f64 = 20.0;
-    const GAP: f64 = 2.0;
-    let area = size.height - TOP - BOTTOM;
-    let base = TOP + area;
-    let pitch = size.width / days.len().max(1) as f64;
-    let width = (pitch * 0.62).min(18.0);
-    let radius = (width / 2.0).min(4.0);
-    for (i, shares) in days.iter().enumerate() {
-        let x = i as f64 * pitch + (pitch - width) / 2.0;
-        let parts = shares.iter().filter(|s| **s > 0.0).count();
-        if parts == 0 {
-            fill_round(rect(x, TOP, width, area), radius, &white(0.045));
-            continue;
-        }
-        let room = area - GAP * (parts - 1) as f64;
-        let mut y = base;
-        for (share, kind) in shares.iter().zip(KINDS).filter(|(s, _)| **s > 0.0) {
-            let height = room * share;
-            fill_round(rect(x, y - height, width, height), radius.min(height / 2.0), &color(hue(kind), 0.9));
-            y -= height + GAP;
-        }
-    }
-    for (i, label) in labels {
-        text(label, *i as f64 * pitch + pitch / 2.0, base + 6.0, 0.5, 10.0, false, &white(0.38));
-    }
-    legend(&[("Deep focus", Kind::Focus), ("Pomodoros", Kind::Pomodoros), ("Tasks", Kind::Tasks)], size.width, 0.0, 1.0);
 }
 
 fn hue(kind: Kind) -> Rgb {

@@ -1,3 +1,18 @@
+### [2026-11-10 00:51 UTC+07:00] — [Fix] Verify the integrations, alerts and Insights pass
+
+**Done:**
+- Linear connects with a personal API key when no OAuth client ID is built in; the key is checked against Linear before it is stored.
+- A timed task no longer gets both a system notification and the notch card in the same minute; the scheduler leaves the next minute to the card.
+- Integration logos share one rounded tile; Claude Desktop shows the installed app's icon.
+- Insights keeps the stat cards, month rings and moon calendar; the heatmap and the 30-day pulse with PNG export are gone.
+
+**Changed  files:**
+- `src/linear.rs`, `src/settings_window.rs`, `src/task_alerts.rs`, `src/controller.rs`, `src/brand_logos.rs` — modified
+- `src/insights.rs`, `src/insights_chart.rs`, `src/insights_view.rs`, `README.md` — modified
+
+**Flow explained:**
+- `remind_tasks` withdraws pending system requests for tasks due next minute, and `task_alerts::sync` schedules from the minute after; the notch card covers the gap.
+
 ### [2026-11-10 00:20 UTC+07:00] — [Integration] Linear browser authorization with PKCE
 
 **Done:**
@@ -107,18 +122,3 @@ The Settings window receives an `on_insights` callback backed by a weak controll
 - Switch on → `apply_settings` asks EventKit once, then `reloadEvents:` reads today's events (also on `EKEventStoreChanged` and at midnight); `render_task_card` prepends up to 3 event rows.
 - The reload tick starts a Linear fetch on a thread when due; the thread sends the parsed issues over a channel and pings `linearSynced:`, which dedupes by `ext` and saves. Ticking a `linear:` task done spawns a thread that looks up the team's completed state and updates the issue.
 - Verified: 89 tests (JSON merge, command args, claude lookup, GraphQL parsing, dedupe, curl request against a loopback server), pane rendered with a scratch HOME, 0.0% idle CPU. Not verified: a real Linear sync, a real calendar prompt and events, clicking Add.
-
-### [2026-11-09 21:55 UTC+07:00] — [Feature] Notch alert cards, focus settings, quick-add hints
-
-**Done:**
-- Alerts now drop a small card out of the notch (`NotchBanner`, its own non-activating panel) instead of opening the whole panel. Task reminders carry Snooze 5 min and Done; pomodoro and break ends show for 8 s.
-- Settings › Focus: focus length, short/long break, reminder lead (off, at the time, 5/10/15 min) and chime on/off, saved in `settings.txt`.
-- Typing `!`, `#` or `/` in the add-task field shows completion pills (↑↓, Tab/Return, Esc). ▶ has a tooltip.
-
-**Changed  files:**
-- `src/notch_banner.rs` — created
-- `src/controller.rs`, `src/settings.rs`, `src/settings_window.rs`, `src/task_alerts.rs`, `src/quick_add.rs`, `src/main.rs`, `README.md` — modified
-
-**Flow explained:**
-- The 2 s reload tick calls `remind_tasks`, which collects `reminders_between(lead)` plus snoozed reminders due, then `notify` rings the chime (if enabled) and shows the card under the collapsed notch; `bannerExpired:` hides it after 60 s (8 s for sessions).
-- Snooze stores the reminder with now + 5 min; Done marks the matching task done and saves.
