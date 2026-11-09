@@ -2192,8 +2192,8 @@ impl Controller {
             layer.setMasksToBounds(true);
         }
 
-        let title = Marquee::new(w::label("", 17.0, unsafe { NSFontWeightBold }, &white(0.95), mtm), MUSIC_PROGRESS_WIDTH, mtm);
-        let subtitle = Marquee::new(w::label("", 12.0, unsafe { NSFontWeightRegular }, &white(0.6), mtm), MUSIC_PROGRESS_WIDTH, mtm);
+        let title = Marquee::new(NSFont::systemFontOfSize_weight(17.0, unsafe { NSFontWeightBold }), white(0.95), MUSIC_PROGRESS_WIDTH, mtm);
+        let subtitle = Marquee::new(NSFont::systemFontOfSize_weight(12.0, unsafe { NSFontWeightRegular }), white(0.6), MUSIC_PROGRESS_WIDTH, mtm);
 
         let track = w::filled(&white(0.15), 1.5, mtm);
         fixed_size(&track, MUSIC_PROGRESS_WIDTH, 3.0);

@@ -1,15 +1,18 @@
-//! A one-line label that scrolls a text too long for its width, the way music players show a long
-//! track title: a rest at the start, one smooth pass to the left, then the text comes round again.
-//! Core Animation runs the pass in the window server, so the app stays idle while it scrolls.
+//! A one-line text that scrolls when it is too long for its width, the way music players show a
+//! long track title: a rest at the start, one smooth pass to the left, then the text comes round
+//! again. Core Animation runs the pass in the window server, so the app stays idle while it scrolls.
+//!
+//! The text is a `CATextLayer`, not a label: AppKit draws a layer-backed view only where it is
+//! visible, so the part of a label still waiting outside the clip would scroll in blank.
 
 use std::cell::RefCell;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSLineBreakMode, NSTextField, NSView};
-use objc2_foundation::{NSArray, NSNumber, NSPoint, NSRect, NSSize, NSString};
-use objc2_quartz_core::{CAKeyframeAnimation, CAMediaTiming};
+use objc2_app_kit::{NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSAttributedStringNSStringDrawing, NSScreen, NSView};
+use objc2_foundation::{NSArray, NSAttributedString, NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString};
+use objc2_quartz_core::{CAKeyframeAnimation, CAMediaTiming, CATextLayer, kCATruncationEnd, kCATruncationNone};
 
 use crate::widgets as w;
 
@@ -19,33 +22,33 @@ const GAP: &str = "        ";
 const SPEED: f64 = 28.0;
 /// Seconds the start rests before each pass.
 const REST: f64 = 2.5;
+const SCROLL_KEY: &str = "marquee";
 
 pub struct Marquee {
-    /// Fixed-size box that clips the label; put this in the layout.
+    /// Fixed-size box that clips the text; put this in the layout.
     pub view: Retained<NSView>,
-    label: Retained<NSTextField>,
+    text_layer: Retained<CATextLayer>,
+    font: Retained<NSFont>,
+    color: Retained<NSColor>,
     size: NSSize,
     text: RefCell<String>,
 }
 
 impl Marquee {
-    /// Wraps `label` (font and colour already set) in a `width`-wide box.
-    pub fn new(label: Retained<NSTextField>, width: f64, mtm: MainThreadMarker) -> Self {
-        label.setStringValue(&NSString::from_str("Ag"));
-        label.sizeToFit();
-        let size = NSSize::new(width, label.frame().size.height);
+    pub fn new(font: Retained<NSFont>, color: Retained<NSColor>, width: f64, mtm: MainThreadMarker) -> Self {
+        let height = (font.ascender() - font.descender() + font.leading()).ceil();
+        let size = NSSize::new(width, height);
         let view = NSView::initWithFrame(mtm.alloc(), NSRect::new(NSPoint::ZERO, size));
         view.setWantsLayer(true);
-        if let Some(layer) = view.layer() {
-            layer.setMasksToBounds(true);
-        }
         view.setTranslatesAutoresizingMaskIntoConstraints(false);
         view.widthAnchor().constraintEqualToConstant(size.width).setActive(true);
         view.heightAnchor().constraintEqualToConstant(size.height).setActive(true);
-        label.setTranslatesAutoresizingMaskIntoConstraints(true);
-        label.setWantsLayer(true);
-        view.addSubview(&label);
-        Self { view, label, size, text: RefCell::new(String::new()) }
+        let host = view.layer().expect("layer-backed view");
+        host.setMasksToBounds(true);
+        let text_layer = CATextLayer::new();
+        text_layer.setContentsScale(NSScreen::mainScreen(mtm).map_or(2.0, |s| s.backingScaleFactor()));
+        host.addSublayer(&text_layer);
+        Self { view, text_layer, font, color, size, text: RefCell::new(String::new()) }
     }
 
     /// Shows `text`, scrolling it only when it does not fit (and Reduce Motion is off). The same
@@ -54,21 +57,25 @@ impl Marquee {
         if self.text.replace(text.to_owned()) == text {
             return;
         }
-        let Some(layer) = self.label.layer() else { return };
-        layer.removeAllAnimations();
-        if self.measure(text) <= self.size.width || w::reduce_motion() {
-            self.label.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-            self.label.setStringValue(&NSString::from_str(text));
-            self.label.setFrame(NSRect::new(NSPoint::ZERO, self.size));
+        let layer = &self.text_layer;
+        layer.removeAnimationForKey(&NSString::from_str(SCROLL_KEY));
+        if self.styled(text).size().width <= self.size.width || w::reduce_motion() {
+            unsafe {
+                layer.setString(Some(&self.styled(text)));
+                layer.setTruncationMode(kCATruncationEnd);
+            }
+            layer.setFrame(NSRect::new(NSPoint::ZERO, self.size));
             return;
         }
         // Two copies, so the second one is where the first started when the pass ends: the loop
         // back to the start is then invisible.
-        let pass = self.measure(&format!("{text}{GAP}"));
-        self.label.setLineBreakMode(NSLineBreakMode::ByClipping);
-        self.label.setStringValue(&NSString::from_str(&format!("{text}{GAP}{text}")));
-        self.label.sizeToFit();
-        self.label.setFrameOrigin(NSPoint::ZERO);
+        let pass = self.styled(&format!("{text}{GAP}")).size().width;
+        let doubled = self.styled(&format!("{text}{GAP}{text}"));
+        layer.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(doubled.size().width.ceil(), self.size.height)));
+        unsafe {
+            layer.setTruncationMode(kCATruncationNone);
+            layer.setString(Some(&doubled));
+        }
 
         let duration = REST + pass / SPEED;
         let numbers = |values: [f64; 3]| NSArray::from_retained_slice(&values.map(NSNumber::new_f64));
@@ -80,13 +87,17 @@ impl Marquee {
         }
         scroll.setDuration(duration);
         scroll.setRepeatCount(f32::INFINITY);
-        layer.addAnimation_forKey(&scroll, None);
+        // Keyed, so a new text replaces this pass instead of stacking a second one.
+        layer.addAnimation_forKey(&scroll, Some(&NSString::from_str(SCROLL_KEY)));
     }
 
-    /// Width of `text` in the label's font.
-    fn measure(&self, text: &str) -> f64 {
-        self.label.setStringValue(&NSString::from_str(text));
-        self.label.sizeToFit();
-        self.label.frame().size.width
+    fn styled(&self, text: &str) -> Retained<NSAttributedString> {
+        let attributes = unsafe {
+            NSDictionary::<NSString, AnyObject>::from_slices(
+                &[NSFontAttributeName, NSForegroundColorAttributeName],
+                &[self.font.as_ref() as &AnyObject, self.color.as_ref() as &AnyObject],
+            )
+        };
+        unsafe { NSAttributedString::new_with_attributes(&NSString::from_str(text), &attributes) }
     }
 }
