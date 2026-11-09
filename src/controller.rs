@@ -764,6 +764,11 @@ define_class!(
             self.set_expanded(false);
         }
 
+        #[unsafe(method(openInsights:))]
+        fn open_insights(&self, _sender: &AnyObject) {
+            self.show_insights_dashboard();
+        }
+
         #[unsafe(method(openDashboard:))]
         fn open_dashboard(&self, _sender: &AnyObject) {
             self.show_dashboard();
@@ -1526,6 +1531,7 @@ impl Controller {
         let menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::new());
         menu.setAutoenablesItems(false);
         let items = [
+            ("Open Insights", sel!(openInsights:), ""),
             ("Open dashboard window", sel!(openDashboard:), ""),
             ("Export backup (JSON)…", sel!(exportBackup:), ""),
             ("Copy today as Markdown", sel!(copyMarkdown:), ""),
@@ -1547,7 +1553,13 @@ impl Controller {
                     controller.apply_settings(settings.clone());
                 }
             });
-            SettingsWindow::new(self.ivars().settings.borrow().clone(), on_change, self.mtm())
+            let me = Weak::new(self);
+            let on_insights = Box::new(move || {
+                if let Some(controller) = me.load() {
+                    controller.show_insights_dashboard();
+                }
+            });
+            SettingsWindow::new(self.ivars().settings.borrow().clone(), on_change, on_insights, self.mtm())
         });
         window.show();
     }
@@ -1583,6 +1595,12 @@ impl Controller {
         } else {
             now_playing.stop();
         }
+    }
+
+    fn show_insights_dashboard(&self) {
+        self.show_dashboard();
+        self.ivars().tab.set(Tab::Insights);
+        self.refresh();
     }
 
     /// Hosts the notch's content view in a normal window for when the panel feels too tight.

@@ -81,6 +81,7 @@ struct Parts {
 pub struct Ivars {
     settings: RefCell<Settings>,
     on_change: Box<dyn Fn(&Settings)>,
+    on_insights: Box<dyn Fn()>,
     parts: OnceCell<Parts>,
 }
 
@@ -91,6 +92,12 @@ define_class!(
     pub struct SettingsWindow;
 
     impl SettingsWindow {
+        #[unsafe(method(openInsights:))]
+        fn open_insights(&self, _sender: &NSButton) {
+            self.window().orderOut(None);
+            (self.ivars().on_insights)();
+        }
+
         #[unsafe(method(selectPane:))]
         fn select_pane(&self, sender: &NSButton) {
             self.show_pane(sender.tag() as usize);
@@ -210,8 +217,8 @@ define_class!(
 );
 
 impl SettingsWindow {
-    pub fn new(settings: Settings, on_change: Box<dyn Fn(&Settings)>, mtm: MainThreadMarker) -> Retained<Self> {
-        let ivars = Ivars { settings: RefCell::new(settings), on_change, parts: OnceCell::new() };
+    pub fn new(settings: Settings, on_change: Box<dyn Fn(&Settings)>, on_insights: Box<dyn Fn()>, mtm: MainThreadMarker) -> Retained<Self> {
+        let ivars = Ivars { settings: RefCell::new(settings), on_change, on_insights, parts: OnceCell::new() };
         let this = mtm.alloc::<Self>().set_ivars(ivars);
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         let parts = this.build(mtm);
@@ -316,8 +323,14 @@ impl SettingsWindow {
             Row { symbol: "speaker.wave.2", name: "Sound", blurb: Some("Chime when a session ends or a task is due"), switch: Some((settings.sound, sel!(toggleSound:))), ..Row::default() },
         ];
         let general = [Row { symbol: "power", name: "Open at login", switch: Some((opens_at_login(), sel!(toggleLogin:))), ..Row::default() }];
+        let sections_pane = self.pane("Sections", &sections, mtm);
+        let insights = [Row {
+            symbol: "chart.bar.xaxis", name: "Insights", blurb: Some("Activity, focus and streaks in the dashboard"),
+            button: Some(("Open", sel!(openInsights:))), ..Row::default()
+        }];
+        sections_pane.addSubview(&self.card(&insights, 100.0 + SECTIONS.len() as f64 * ROW, 0, mtm));
         let panes = vec![
-            self.pane("Sections", &sections, mtm),
+            sections_pane,
             self.pane("Collapsed notch", &wings, mtm),
             self.pane("Focus", &focus, mtm),
             self.integrations_pane(mtm),

@@ -1,3 +1,14 @@
+### [2026-11-09 23:47 UTC+07:00] — [Fix] Direct entry points for Insights
+
+**Done:**
+- Settings › Sections now includes an Insights row with Open, and the notch header menu includes Open Insights. Both open the dashboard and select Insights directly; Settings closes out of the way.
+
+**Changed  files:**
+- `src/controller.rs`, `src/settings_window.rs`, `README.md` — modified
+
+**Flow explained:**
+The Settings window receives an `on_insights` callback backed by a weak controller reference. Both entry points use `show_insights_dashboard`, which opens the host window before selecting the dashboard-only tab. Verified: 99 tests pass; a temporary scratch-HOME hook clicked the actual Settings Open button and invoked the header action, asserting dashboard visibility and the Insights tab. Real window screenshots checked at `/tmp/notchpad-entry/shots/`; hooks removed.
+
 ### [2026-11-09 23:09 UTC+07:00] — [UI] Rounded Insights petals and stacked Pulse
 
 **Done:**
@@ -124,15 +135,3 @@ The 2 s `reload:` tick calls `remind_tasks`, which works only when the minute ch
 
 **Flow explained:**
 `tick:` at the deadline → `announce(chime, toast)` → `Chime::sound()` builds a WAV in memory for `NSSound` → `render_focus` shows the toast until `toastExpired:`. For a resize, `NotchMotion::apply` sizes the content to the spring height before it sets the panel frame. Only the new body crossfades. `setFrameSize:` on the terminal debounces `fitGrid` by 0.12 s. Verified with frame captures of both directions and 73 passing tests.
-
-### [2026-11-09 19:45 UTC+07:00] — [Feature] Current pomodoro tomato ripens as the session runs
-
-**Done:**
-- The tomato for the running focus session blends from green through orange to red with the time elapsed, instead of jumping from green to red at the end. The stopwatch has no end, so its tomato stays green.
-
-**Changed  files:**
-- `src/tomato_view.rs` — modified
-- `src/controller.rs` — modified
-
-**Flow explained:**
-`render_focus` (every timer tick) → ripeness = 1 − remaining ÷ session length → `Tomato::Growing(ripeness)` → `ripen` blends body, highlight and shade between the green, orange and red stops. Verified by a scratch render at 0, ¼, ½, ¾ and 1.
