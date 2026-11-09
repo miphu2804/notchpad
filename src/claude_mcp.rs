@@ -116,7 +116,7 @@ fn merge_server(config: &str, command: &str) -> Result<Option<String>, String> {
 mod tests {
     use super::*;
 
-    const SERVER: &str = "/Applications/Notchpad.app/Contents/MacOS/notchpad-mcp";
+    const SERVER: &str = "/Applications/Overhang.app/Contents/MacOS/notchpad-mcp";
 
     fn parsed(text: &str) -> Value {
         serde_json::from_str(text).unwrap()

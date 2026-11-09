@@ -1,4 +1,4 @@
-//! Two-way matching between Notchpad's tasks and the reminders of its own Reminders list, so the
+//! Two-way matching between Overhang's tasks and the reminders of its own Reminders list, so the
 //! tasks reach iPhone and Apple Watch through iCloud. Pure: [`crate::reminders`] fetches and
 //! writes the reminders; this decides what changes.
 //!
@@ -11,7 +11,7 @@
 //! - the task changed: the reminder takes the task's fields (the task wins when both changed,
 //!   except that a completion on the phone is kept);
 //! - a linked reminder disappeared: an open task is deleted, a done one only loses its link (so
-//!   "Clear Completed" on the phone keeps Notchpad's history); a linked task deleted in Notchpad
+//!   "Clear Completed" on the phone keeps Overhang's history); a linked task deleted in Overhang
 //!   deletes its reminder;
 //! - a new, open reminder becomes a task.
 //!
@@ -48,7 +48,7 @@ pub type Snapshot = HashMap<String, Reminder>;
 pub struct Changes {
     /// Linked reminders to overwrite with these fields.
     pub update: Vec<Reminder>,
-    /// Reminders whose task was deleted in Notchpad.
+    /// Reminders whose task was deleted in Overhang.
     pub delete: Vec<String>,
     /// Whether `tasks` changed and needs saving.
     pub tasks_changed: bool,
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn deletions_cross_over_both_ways() {
-        let (gone, kept) = (reminder("a", "Deleted on phone"), reminder("b", "Deleted in Notchpad"));
+        let (gone, kept) = (reminder("a", "Deleted on phone"), reminder("b", "Deleted in Overhang"));
         let mut tasks = vec![task("Deleted on phone", "rem:a"), task("Stays", "")];
         let changes = reconcile(&mut tasks, &[kept.clone()], &snapshot(&[gone, kept]), false);
         assert_eq!(tasks.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), ["Stays"]);

@@ -1,4 +1,4 @@
-//! EventKit side of the Reminders sync: the "Notchpad" list, fetching its reminders and writing
+//! EventKit side of the Reminders sync: the "Overhang" list, fetching its reminders and writing
 //! back what [`crate::reminders_sync`] decided. The fetch completes on an EventKit queue, so the
 //! result waits here until the controller takes it on the main thread.
 //!
@@ -19,7 +19,7 @@ use crate::calendar::{self, Access};
 use crate::reminders_sync::{self, Changes, PREFIX, Reminder};
 use crate::store::Task;
 
-const LIST: &str = "Notchpad";
+const LIST: &str = "Overhang";
 /// How often the phone's edits are picked up when nothing changed here.
 const SYNC_EVERY: Duration = Duration::from_secs(30);
 /// `NSDateComponentUndefined`: a component the reminder does not set.
@@ -132,7 +132,7 @@ impl Reminders {
         self.synced = tasks_modified;
     }
 
-    /// The list named "Notchpad", made in the account that holds new reminders if it is missing.
+    /// The list named "Overhang", made in the account that holds new reminders if it is missing.
     fn list(&mut self) -> Result<Retained<EKCalendar>, String> {
         let store = self.store().clone();
         let lists = unsafe { store.calendarsForEntityType(EKEntityType::Reminder) };

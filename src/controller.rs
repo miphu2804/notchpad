@@ -896,7 +896,7 @@ impl Controller {
         this
     }
 
-    /// A task just done in Notchpad that mirrors a Linear issue is completed there too.
+    /// A task just done in Overhang that mirrors a Linear issue is completed there too.
     fn complete_remote(&self, task: &Task) {
         if task.done && self.ivars().settings.borrow().linear {
             Linear::complete(&task.ext);
@@ -1669,7 +1669,7 @@ impl Controller {
                 )
             };
             unsafe { window.setReleasedWhenClosed(false) };
-            window.setTitle(&NSString::from_str("Notchpad"));
+            window.setTitle(&NSString::from_str("Overhang"));
             window.setContentMinSize(NSSize::new(WIDTH, HEIGHT));
             // The content is drawn for the notch's black and dark appearance.
             window.setBackgroundColor(Some(&NSColor::blackColor()));
