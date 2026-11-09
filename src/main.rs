@@ -8,6 +8,7 @@ mod list_row;
 mod notch_motion;
 mod panel;
 mod pill_button;
+mod quick_add;
 mod store;
 mod task_row;
 mod widgets;
