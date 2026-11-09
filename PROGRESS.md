@@ -1,3 +1,16 @@
+### [2026-11-10 00:06 UTC+07:00] — [UI] Pomodoro ring and four pixel tomatoes
+
+**Done:**
+- Large elapsed-progress ring around the timer, four unchanged pixel sprites for the current cycle, separate daily count and focus minutes. The current tomato ripens green → orange → red; completed cycles stay fully red during the long break.
+- The ring uses the existing controller timer, changes to green on breaks, and stays neutral in the unbounded stopwatch. Its preferred 164 pt size fits the compact card.
+
+**Changed  files:**
+- `src/focus_ring.rs` — created
+- `src/controller.rs`, `src/main.rs`, `src/tomato_view.rs`, `README.md` — modified
+
+**Flow explained:**
+`render_focus` updates the ring from elapsed/session time and builds four cycle states; daily focus minutes are read with the existing log refresh, not every tick. Verified: 100 tests pass, cycle rollover regression test, scratch-HOME AppKit Start/tick/Pause/+5/End assertions, and real-window renders for idle, quarter, half, near-end, long break, stopwatch and tall. Screenshots inspected under `/tmp/notchpad-pomo/shots/`; temporary hooks removed.
+
 ### [2026-11-09 23:47 UTC+07:00] — [Fix] Direct entry points for Insights
 
 **Done:**
@@ -116,22 +129,3 @@ The 2 s `reload:` tick calls `remind_tasks`, which works only when the minute ch
 
 **Flow explained:**
 `render_task_card` sorts open tasks by `(priority_rank, untimed, time)`. `setPriority:` (menu) and `pickPriority:` (dots) write the priority or the default for new tasks; `push_task` applies it when the typed line names none. `clearCompleted:` empties the `day` of today's done tasks. Verified by renders of the sort, tint, dots and strike, and by logs of the header tabs and the task menu; 59 tests pass.
-
-### [2026-11-09 20:30 UTC+07:00] — [Feature] Phase-end bell and toast, Linear-like palette, smooth section resize
-
-**Done:**
-- When a focus or break phase ends, a short synthesised two-note bell plays and the task line shows a toast for 6 s, e.g. "Pomodoro 1 done · short break 5 min". This replaces the Glass system sound.
-- The cards use one dark surface (24,25,27) with raised controls (40,41,45). The tasks card is no longer sage.
-- The Music section is now "Playing", with the `play.circle` icon.
-- Switching between a compact and an extra-tall section no longer strands a ghost of the old tab or sinks the header. The content grows with the panel each frame. The terminal grid is resized only once the panel settles.
-
-**Changed  files:**
-- `src/chime.rs` — created
-- `src/main.rs` — modified
-- `src/controller.rs` — modified
-- `src/notch_motion.rs` — modified
-- `src/terminal_view.rs` — modified
-- `src/settings.rs`, `src/settings_window.rs`, `README.md` — modified
-
-**Flow explained:**
-`tick:` at the deadline → `announce(chime, toast)` → `Chime::sound()` builds a WAV in memory for `NSSound` → `render_focus` shows the toast until `toastExpired:`. For a resize, `NotchMotion::apply` sizes the content to the spring height before it sets the panel frame. Only the new body crossfades. `setFrameSize:` on the terminal debounces `fitGrid` by 0.12 s. Verified with frame captures of both directions and 73 passing tests.

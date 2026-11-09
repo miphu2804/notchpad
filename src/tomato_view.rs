@@ -24,7 +24,7 @@ const SPRITE: [&str; 11] = [
     "....ddd....",
 ];
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Tomato {
     Ripe,
     /// The current session, ripening from green (0.0) to red (1.0) as it runs.

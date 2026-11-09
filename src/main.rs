@@ -8,6 +8,7 @@ mod controller;
 mod days;
 mod export;
 mod hotkey;
+mod focus_ring;
 mod insights;
 mod insights_chart;
 mod insights_view;

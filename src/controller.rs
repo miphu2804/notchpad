@@ -11,7 +11,7 @@ use objc2_app_kit::{NSClickGestureRecognizer, NSControl, NSControlTextEditingDel
     NSAppearance, NSImageScaling, NSAppearanceCustomization, NSAppearanceNameDarkAqua,
     NSApplication, NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
-    NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
+    NSImageView, NSLayoutAttribute, NSLayoutConstraint,
     NSLayoutConstraintOrientation, NSMainMenuWindowLevel, NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel, NSAutoresizingMaskOptions, NSScreen, NSScrollView, NSWindow, NSWindowDelegate, NSStackView,
     NSStackViewDistribution, NSTextAlignment, NSTextField, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
@@ -27,6 +27,7 @@ use crate::settings::{self as prefs, Settings, Size};
 use crate::settings_window::SettingsWindow;
 use crate::days;
 use crate::export;
+use crate::focus_ring::FocusRing;
 use crate::insights::Insights;
 use crate::insights_view::InsightsView;
 use crate::linear::{self, Linear};
@@ -96,6 +97,9 @@ fn white(alpha: f64) -> Retained<NSColor> {
 }
 
 struct FocusCard {
+    ring: Retained<FocusRing>,
+    round: Retained<NSTextField>,
+    daily_focus: Retained<NSTextField>,
     count: Retained<NSTextField>,
     tomatoes: Vec<Retained<TomatoView>>,
     task: Retained<NSTextField>,
@@ -263,6 +267,7 @@ pub struct State {
     undo: RefCell<Option<(usize, Task, Instant)>>,
     /// Sessions finished today, read from `pomodoros.txt` once per refresh.
     done_today: Cell<usize>,
+    focus_today: Cell<u32>,
     ticker: RefCell<Option<Retained<NSTimer>>>,
     /// Modification time of `tasks.txt` as last loaded or saved by this process.
     seen_mtime: Cell<Option<std::time::SystemTime>>,
@@ -1010,7 +1015,9 @@ impl Controller {
 
     fn reload_done_today(&self) {
         let data = Insights::build(&pomodoros::load_log(), &[], &days::key(0));
-        self.ivars().done_today.set(data.day(data.today()).pomodoros as usize);
+        let today = data.day(data.today());
+        self.ivars().done_today.set(today.pomodoros as usize);
+        self.ivars().focus_today.set(today.focus_min);
     }
 
     /// Focus sessions completed today.
@@ -1303,15 +1310,13 @@ impl Controller {
         let total = self.session_secs();
         let ripeness = if stopwatch || total == 0 { 0.0 } else { 1.0 - remaining as f64 / total as f64 };
 
-        set(&card.count, &format!("{done} / {DAILY_GOAL}"));
-        for (i, tomato) in card.tomatoes.iter().enumerate() {
-            tomato.set(if i < done {
-                Tomato::Ripe
-            } else if i == done && active && !state.on_break.get() {
-                Tomato::Growing(ripeness)
-            } else {
-                Tomato::Empty
-            });
+        card.ring.set(ripeness, state.on_break.get());
+        set(&card.count, &format!("{done} / {DAILY_GOAL} today"));
+        set(&card.daily_focus, &format!("{} min focus", state.focus_today.get()));
+        let cycle_done = completed_in_cycle(done, state.on_break.get());
+        set(&card.round, &format!("{} / {CYCLE}", (cycle_done + usize::from(!state.on_break.get())).min(CYCLE)));
+        for (tomato, state) in card.tomatoes.iter().zip(cycle_tomatoes(done, state.on_break.get(), active, ripeness)) {
+            tomato.set(state);
         }
         let toast = state.toast.borrow().clone();
         if let Some(toast) = toast {
@@ -1325,7 +1330,7 @@ impl Controller {
         set(&card.badge, &if stopwatch {
             "Stopwatch".to_owned()
         } else if !state.on_break.get() {
-            format!("Focus · {} of {CYCLE}", done % CYCLE + 1)
+            "Focus".to_owned()
         } else if done % CYCLE == 0 {
             "Break · long".to_owned()
         } else {
@@ -1880,33 +1885,43 @@ impl Controller {
         let inner = FOCUS_CARD_WIDTH - 28.0;
         let coral = rgba(CORAL.0, CORAL.1, CORAL.2, 1.0);
 
-        let heading = w::label("Today's pomodoros", 12.0, unsafe { NSFontWeightSemibold }, &white(0.92), mtm);
         let (count, count_chip) = chip(&white(0.9), &rgba(0, 0, 0, 0.4), 7.0, 3.0, mtm);
-        // Too long for the card, so it lives here instead.
         count_chip.setToolTip(Some(&NSString::from_str("Completed pomodoros count toward today; ended early are logged, not counted.")));
         count.setContentCompressionResistancePriority_forOrientation(751.0, NSLayoutConstraintOrientation::Horizontal);
         count.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(11.0, unsafe { NSFontWeightMedium })));
-        let header = w::stack(&[&heading, &w::spacer(mtm), &count_chip], false, 8.0, mtm);
+        let daily_focus = w::label("", 10.0, unsafe { NSFontWeightMedium }, &white(0.5), mtm);
+        let footer = w::stack(&[&count_chip, &w::spacer(mtm), &daily_focus], false, 4.0, mtm);
 
-        let tomatoes: Vec<_> = (0..DAILY_GOAL).map(|_| TomatoView::new(mtm)).collect();
-        // One row: two rows of larger tomatoes pushed the card's content past its edges.
+        let tomatoes: Vec<_> = (0..CYCLE).map(|_| TomatoView::new(mtm)).collect();
         let views: Vec<&NSView> = tomatoes.iter().map(|t| &***t).collect();
         for view in &views {
             fixed_size(view, TOMATO_SIZE, TOMATO_SIZE);
         }
-        let grid = w::stack(&views, false, 0.0, mtm);
-        grid.setDistribution(NSStackViewDistribution::EqualSpacing);
+        let grid = w::stack(&views, false, 10.0, mtm);
 
         let task = w::label("", 11.0, unsafe { NSFontWeightRegular }, &white(0.55), mtm);
         task.setAlignment(NSTextAlignment::Center);
         let (badge, badge_pill) = chip(&rgba(CORAL.0, CORAL.1, CORAL.2, 1.0), &rgba(CORAL.0, CORAL.1, CORAL.2, 0.22), 6.0, 3.0, mtm);
         badge.setFont(Some(&NSFont::systemFontOfSize_weight(11.0, unsafe { NSFontWeightMedium })));
-        let time = w::label("", 32.0, unsafe { NSFontWeightLight }, &white(0.95), mtm);
-        time.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(32.0, unsafe { NSFontWeightLight })));
-        // With the timer tile gone, the idle countdown itself is the length control.
+        let round = w::label("", 11.0, unsafe { NSFontWeightMedium }, &white(0.55), mtm);
+        let header = w::stack(&[&badge_pill, &w::spacer(mtm), &round], false, 8.0, mtm);
+        let time = w::label("", 36.0, unsafe { NSFontWeightLight }, &white(0.95), mtm);
+        time.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(36.0, unsafe { NSFontWeightLight })));
+        // Clicking the idle countdown cycles focus length, including the stopwatch.
         let cycle = unsafe { NSClickGestureRecognizer::initWithTarget_action(mtm.alloc(), Some(self.target()), Some(sel!(cycleDuration:))) };
         time.addGestureRecognizer(&cycle);
-        let ends = w::label("", 11.0, unsafe { NSFontWeightRegular }, &white(0.55), mtm);
+        let ends = w::label("", 10.0, unsafe { NSFontWeightRegular }, &white(0.55), mtm);
+        let ring = FocusRing::new(mtm);
+        ring.heightAnchor().constraintEqualToAnchor(&ring.widthAnchor()).setActive(true);
+        ring.widthAnchor().constraintGreaterThanOrEqualToConstant(124.0).setActive(true);
+        let preferred = ring.widthAnchor().constraintEqualToConstant(164.0);
+        preferred.setPriority(750.0);
+        preferred.setActive(true);
+        let clock = w::stack(&[&time, &ends], true, 0.0, mtm);
+        clock.setAlignment(NSLayoutAttribute::CenterX);
+        ring.addSubview(&clock);
+        clock.centerXAnchor().constraintEqualToAnchor(&ring.centerXAnchor()).setActive(true);
+        clock.centerYAnchor().constraintEqualToAnchor(&ring.centerYAnchor()).setActive(true);
 
         let pause = w::pill("Pause", 28.0, self.target(), sel!(toggleTimer:), mtm);
         w::style_pill(&pause, &coral, &white(1.0), 14.0);
@@ -1920,21 +1935,21 @@ impl Controller {
         plus.widthAnchor().constraintEqualToConstant(PLUS_WIDTH).setActive(true);
         let buttons = w::stack(&[&pause, &end, &plus], false, 8.0, mtm);
 
-        let column = w::stack(&[&header, &grid, &task, &badge_pill, &time, &ends, &buttons], true, 2.0, mtm);
+        let rule = w::filled(&white(0.08), 0.0, mtm);
+        rule.heightAnchor().constraintEqualToConstant(1.0).setActive(true);
+        let column = w::stack(&[&header, &task, &ring, &grid, &buttons, &rule, &footer], true, 4.0, mtm);
         column.setAlignment(NSLayoutAttribute::CenterX);
-        column.setCustomSpacing_afterView(7.0, &header);
-        column.setCustomSpacing_afterView(7.0, &task);
-        column.setCustomSpacing_afterView(0.0, &time);
-        column.setCustomSpacing_afterView(7.0, &ends);
-        column.setCustomSpacing_afterView(8.0, &buttons);
         card.addSubview(&column);
         column.centerXAnchor().constraintEqualToAnchor(&card.centerXAnchor()).setActive(true);
         column.centerYAnchor().constraintEqualToAnchor(&card.centerYAnchor()).setActive(true);
-        for view in [&**header, &**grid, &**buttons, &**task] {
+        column.topAnchor().constraintGreaterThanOrEqualToAnchor_constant(&card.topAnchor(), 10.0).setActive(true);
+        column.bottomAnchor().constraintLessThanOrEqualToAnchor_constant(&card.bottomAnchor(), -10.0).setActive(true);
+        let full_width: [&NSView; 5] = [&header, &buttons, &task, &rule, &footer];
+        for view in full_width {
             view.widthAnchor().constraintEqualToConstant(inner).setActive(true);
         }
 
-        (card, FocusCard { count, tomatoes, task, badge, time, ends, pause, end, plus })
+        (card, FocusCard { ring, round, daily_focus, count, tomatoes, task, badge, time, ends, pause, end, plus })
     }
 
     fn build_task_card(&self, mtm: MainThreadMarker) -> (Retained<NSView>, TaskCard) {
@@ -2156,6 +2171,19 @@ fn chip(color: &NSColor, fill: &NSColor, h_pad: f64, v_pad: f64, mtm: MainThread
 }
 
 /// `23:57`, for the focus card and the collapsed notch.
+fn completed_in_cycle(done: usize, on_break: bool) -> usize {
+    if on_break && done > 0 && done % CYCLE == 0 { CYCLE } else { done % CYCLE }
+}
+
+fn cycle_tomatoes(done: usize, on_break: bool, active: bool, ripeness: f64) -> [Tomato; CYCLE] {
+    let completed = completed_in_cycle(done, on_break);
+    std::array::from_fn(|i| {
+        if i < completed { Tomato::Ripe }
+        else if i == completed && active && !on_break { Tomato::Growing(ripeness) }
+        else { Tomato::Empty }
+    })
+}
+
 /// The preset after `idx`, then the stopwatch, then back to the first.
 fn next_duration(idx: usize) -> usize {
     (idx + 1) % (STOPWATCH + 1)
@@ -2408,6 +2436,16 @@ fn frames_at_top(frame: NSRect, width: f64, height: f64, body: f64) -> (NSRect, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn four_tomatoes_follow_the_current_cycle() {
+        assert_eq!(cycle_tomatoes(0, false, false, 0.0), [Tomato::Empty; CYCLE]);
+        assert_eq!(cycle_tomatoes(1, false, true, 0.5), [Tomato::Ripe, Tomato::Growing(0.5), Tomato::Empty, Tomato::Empty]);
+        assert_eq!(cycle_tomatoes(1, true, true, 0.5), [Tomato::Ripe, Tomato::Empty, Tomato::Empty, Tomato::Empty]);
+        assert_eq!(cycle_tomatoes(4, true, true, 0.5), [Tomato::Ripe; CYCLE]);
+        assert_eq!(cycle_tomatoes(4, false, true, 0.0), [Tomato::Growing(0.0), Tomato::Empty, Tomato::Empty, Tomato::Empty]);
+        assert_eq!(cycle_tomatoes(9, false, false, 0.0), [Tomato::Ripe, Tomato::Empty, Tomato::Empty, Tomato::Empty]);
+    }
 
     #[test]
     fn checklist_keeps_time_priority_and_project() {
