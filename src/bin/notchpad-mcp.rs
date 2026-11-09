@@ -3,10 +3,16 @@
 //! Speaks newline-delimited JSON-RPC 2.0. Tasks are addressed by `ref`: the task's `ext`
 //! id when it has one (`linear:ENG-12`), otherwise its 1-based line number (`line:3`).
 //! The running app notices file changes within ~2s and reloads.
+//!
+//! `notchpad-mcp add <words…>` instead adds one task written like the notch's quick add
+//! (`pay rent 5pm !high #home`) and exits, for a Shortcuts "Run Shell Script" action.
 
 #[path = "../days.rs"]
 #[allow(dead_code)] // `label` is only used by the app
 mod days;
+#[path = "../quick_add.rs"]
+#[allow(dead_code)] // the completion helpers are only used by the app
+mod quick_add;
 #[path = "../store.rs"]
 #[allow(dead_code)] // `modified` is only used by the app
 mod store;
@@ -17,6 +23,36 @@ use serde_json::{Value, json};
 use store::Task;
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "add") {
+        std::process::exit(match add_from_shortcut(&args[1..].join(" ")) {
+            Ok(text) => {
+                println!("added: {text}");
+                0
+            }
+            Err(err) => {
+                eprintln!("notchpad-mcp: {err}");
+                1
+            }
+        });
+    }
+    serve();
+}
+
+/// Adds `line`, parsed like the notch's quick add, to today unless it names another day.
+fn add_from_shortcut(line: &str) -> Result<String, String> {
+    let task = quick_add::parse(line, &days::key(0), &days::key(0), &days::key(1));
+    if task.text.is_empty() {
+        return Err("usage: notchpad-mcp add <task words>".to_owned());
+    }
+    let mut tasks = store::load();
+    let text = task.text.clone();
+    tasks.push(task);
+    store::save(&tasks).map_err(|err| err.to_string())?;
+    Ok(text)
+}
+
+fn serve() {
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
     for line in stdin.lock().lines().map_while(Result::ok) {
