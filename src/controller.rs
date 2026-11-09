@@ -769,8 +769,8 @@ impl Controller {
 
     /// The timer exists only while a command runs, so an idle panel costs no wakeups.
     fn set_shell_running(&self, running: bool) {
+        // The prompt stays enabled so Escape can reach it; run_command ignores Return meanwhile.
         let input = &self.ui().terminal.input;
-        input.setEnabled(!running);
         let mut timer = self.ivars().shell_timer.borrow_mut();
         if running {
             *timer = Some(unsafe {
