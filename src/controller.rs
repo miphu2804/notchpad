@@ -17,7 +17,7 @@ use objc2_app_kit::{NSClickGestureRecognizer, NSSound,
     NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
     NSLayoutConstraintOrientation, NSMainMenuWindowLevel, NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel, NSAutoresizingMaskOptions, NSScreen, NSScrollView, NSWindow, NSWindowDelegate, NSStackView,
     NSStackViewDistribution, NSTextAlignment, NSTextDidChangeNotification, NSTextDidEndEditingNotification, NSTextField, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
+    NSTrackingAreaOptions, NSView, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_event_kit::EKEventStoreChangedNotification;
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSOperationQueue, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
@@ -227,6 +227,9 @@ pub struct State {
     expanded: Cell<bool>,
     /// Opened by hotkey: stays open until the pointer has visited and left.
     pinned: Cell<bool>,
+    /// Set when a Space change folded the panel: a pointer resting over the notch must not
+    /// reopen it until it has left and come back.
+    space_collapsed: Cell<bool>,
     tab: Cell<Tab>,
     clips: RefCell<ClipHistory>,
     calendar: Calendar,
@@ -287,12 +290,16 @@ define_class!(
         #[unsafe(method(mouseEntered:))]
         fn mouse_entered(&self, _event: &NSEvent) {
             self.cancel_recheck();
+            if self.ivars().space_collapsed.get() {
+                return;
+            }
             self.ivars().pinned.set(false);
             self.set_expanded(true);
         }
 
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _event: &NSEvent) {
+            self.ivars().space_collapsed.set(false);
             if !self.ivars().pinned.get() {
                 self.collapse_when_left();
             }
@@ -636,6 +643,19 @@ define_class!(
             self.collapse_when_left();
         }
 
+        /// The screen slides under the stationary panel during a Space switch, so fold it
+        /// into the notch instead. Notes are saved by `set_expanded`; focus is dropped.
+        #[unsafe(method(activeSpaceChanged:))]
+        fn active_space_changed(&self, _notification: &NSNotification) {
+            if !self.ivars().expanded.get() {
+                return;
+            }
+            self.cancel_recheck();
+            self.ivars().pinned.set(false);
+            self.ivars().space_collapsed.set(true);
+            self.set_expanded(false);
+        }
+
         #[unsafe(method(redraw:))]
         fn redraw(&self, _arg: Option<&AnyObject>) {
             self.refresh();
@@ -733,6 +753,9 @@ impl Controller {
                 this.target(), sel!(screenParametersChanged:),
                 Some(NSApplicationDidChangeScreenParametersNotification), None,
             );
+            NSWorkspace::sharedWorkspace().notificationCenter().addObserver_selector_name_object(
+                this.target(), sel!(activeSpaceChanged:), Some(NSWorkspaceActiveSpaceDidChangeNotification), None,
+            );
             // Both live for the whole process. The tolerance lets macOS fire them together
             // with other wakeups instead of waking the CPU on their own.
             let reload = NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(2.0, this.target(), sel!(reload:), None, true);
@@ -745,6 +768,7 @@ impl Controller {
         this.reload_events();
         this.refresh();
         this.render_clips();
+
         this.ui().panel.orderFrontRegardless();
         this
     }
@@ -1139,6 +1163,7 @@ impl Controller {
         match event {
             FileDrag::Entered => {
                 self.cancel_recheck();
+                self.ivars().space_collapsed.set(false);
                 self.ivars().tab.set(Tab::Clips);
                 self.render_tabs();
                 self.set_expanded(true);
