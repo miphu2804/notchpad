@@ -13,7 +13,8 @@ Apple Silicon, macOS 14 or later. It is written in Rust with AppKit, runs at 0% 
 - **Playing.** Now playing from any app (Spotify, Music, YouTube in a browser), with playback controls.
 - **Clips.** A short clipboard history.
 - **Terminal.** A real shell in the notch.
-- **Alerts.** When a focus session or a break ends, and 10 minutes before and at a timed task's time, the notch chimes and opens with the news. It does not take the keyboard from the app you're in, and it stays open until you hover it and leave. Timed tasks also get a system notification.
+- **Alerts.** When a focus session or a break ends, and before and at a timed task's time, a small card drops out of the notch with a chime. A task reminder has **Snooze 5 min** and **Done**; clicking the card dismisses it. The card never takes the keyboard from the app you're in. Timed tasks also get a system notification.
+- **Focus settings.** Settings › Focus sets the focus length, short and long breaks, how early task reminders come (or turns them off) and whether alerts chime.
 - **More.** A JSON backup export, a dashboard window, and today's tasks copied as a Markdown checklist. Right-click the header for these.
 
 ## Install
