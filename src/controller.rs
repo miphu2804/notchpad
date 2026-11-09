@@ -15,7 +15,7 @@ use objc2_app_kit::{NSClickGestureRecognizer, NSSound,
     NSApplication, NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
     NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
-    NSLayoutConstraintOrientation, NSMainMenuWindowLevel, NSMenu, NSMenuItem, NSScreen, NSScrollView, NSStackView,
+    NSLayoutConstraintOrientation, NSMainMenuWindowLevel, NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel, NSScreen, NSScrollView, NSStackView,
     NSStackViewDistribution, NSTextAlignment, NSTextDidChangeNotification, NSTextDidEndEditingNotification, NSTextField, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
@@ -28,6 +28,7 @@ use crate::clip_card::{self, ClipCard};
 use crate::clips::ClipHistory;
 use crate::days;
 use crate::drop_column::DropColumn;
+use crate::export;
 use crate::list_row::{self, ListRow};
 use crate::live_activity::{Activity, LiveActivity, WING};
 use crate::now_playing::{Command, NowPlaying};
@@ -300,7 +301,7 @@ define_class!(
         #[unsafe(method(toggleTask:))]
         fn toggle_task(&self, sender: &NSButton) {
             if let Some(task) = self.ivars().tasks.borrow_mut().get_mut(sender.tag() as usize) {
-                task.done = !task.done;
+                task.set_done(!task.done);
             }
             self.save_and_refresh();
         }
@@ -624,6 +625,23 @@ define_class!(
             self.ivars().now_playing.borrow_mut().stop();
             NSApplication::sharedApplication(self.mtm()).terminate(None);
         }
+
+        #[unsafe(method(exportBackup:))]
+        fn export_backup(&self, _sender: &AnyObject) {
+            // The panel is non-activating; without this the save sheet opens behind other windows.
+            #[allow(deprecated)] // `activate()` needs macOS 14
+            NSApplication::sharedApplication(self.mtm()).activateIgnoringOtherApps(true);
+            let panel = NSSavePanel::savePanel(self.mtm());
+            panel.setNameFieldStringValue(&NSString::from_str(&format!("notchpad-backup-{}.json", days::key(0))));
+            if panel.runModal() != NSModalResponseOK {
+                return;
+            }
+            self.save_notes_now(); // so the backup has what is on screen
+            let Some(path) = panel.URL().and_then(|url| url.path()) else { return };
+            if let Err(err) = export::write(&path.to_string()) {
+                eprintln!("notchpad: could not export backup: {err}");
+            }
+        }
     }
 );
 
@@ -863,7 +881,7 @@ impl Controller {
 
     fn reload_week(&self) {
         let week_days = std::array::from_fn(|i| days::key(i as i64 - 6));
-        self.ivars().week.set(pomodoros::week(&week_days));
+        self.ivars().week.set(pomodoros::week(&week_days, &self.ivars().tasks.borrow()));
     }
 
     /// Focus sessions completed today.
@@ -1115,7 +1133,8 @@ impl Controller {
         card.time.setToolTip(hint.as_deref());
         let week = state.week.get();
         card.bars.set(week.done, std::array::from_fn(|i| days::initial(i as i64 - 6)));
-        set(&card.focused, &format!("{} focused", focus_time(week.minutes)));
+        let tasks = if week.tasks_done == 1 { "task" } else { "tasks" };
+        set(&card.focused, &format!("{} · {} {tasks}", focus_time(week.minutes), week.tasks_done));
         set(&card.streak, &format!("{} day streak", week.streak));
         self.sync_activity();
     }
@@ -1289,6 +1308,23 @@ impl Controller {
         TaskRow::new(index, &content, mtm).into_super()
     }
 
+    /// Right-click menu of the header's empty area.
+    fn header_menu(&self) -> Retained<NSMenu> {
+        let mtm = self.mtm();
+        let menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::new());
+        let export = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                &NSString::from_str("Export backup (JSON)…"),
+                Some(sel!(exportBackup:)),
+                &NSString::new(),
+            )
+        };
+        unsafe { export.setTarget(Some(self.target())) };
+        menu.addItem(&export);
+        menu
+    }
+
     /// Right-click menu for the task at `index`; each item carries the index in its tag.
     fn task_menu(&self, index: usize) -> Retained<NSMenu> {
         let mtm = self.mtm();
@@ -1434,6 +1470,7 @@ impl Controller {
         let head = self.build_header(mtm);
         let header = NSView::new(mtm);
         header.setTranslatesAutoresizingMaskIntoConstraints(false);
+        unsafe { header.setMenu(Some(&self.header_menu())) };
         content.addSubview(&header);
         header.leadingAnchor().constraintEqualToAnchor(&content.leadingAnchor()).setActive(true);
         header.trailingAnchor().constraintEqualToAnchor(&content.trailingAnchor()).setActive(true);

@@ -4,6 +4,7 @@ mod clips;
 mod controller;
 mod days;
 mod drop_column;
+mod export;
 mod hotkey;
 mod list_row;
 mod live_activity;
