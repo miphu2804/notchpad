@@ -4,7 +4,7 @@ use alacritty_terminal::vte::ansi::Rgb;
 
 pub const FOREGROUND: Rgb = Rgb { r: 224, g: 224, b: 226 };
 /// Equals the Terminal card's fill, so default-background cells need no painting.
-pub const BACKGROUND: Rgb = Rgb { r: 42, g: 42, b: 45 };
+pub const BACKGROUND: Rgb = Rgb { r: 24, g: 25, b: 27 };
 pub const CURSOR: Rgb = Rgb { r: 230, g: 230, b: 232 };
 
 const fn c(r: u8, g: u8, b: u8) -> Rgb {

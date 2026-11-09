@@ -11,7 +11,7 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSClickGestureRecognizer, NSSound, 
-    NSAppearance, NSImageScaling, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+    NSAppearance, NSImageScaling, NSAppearanceCustomization, NSAppearanceNameDarkAqua,
     NSApplication, NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
     NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
@@ -84,16 +84,18 @@ const LONG_BREAK_MIN: u64 = 15;
 const CYCLE: usize = 4;
 const TOMATO_SIZE: f64 = 22.0;
 const CORAL: (u8, u8, u8) = (217, 112, 90);
+/// Cards and the controls on them, in the near-black, faintly cool greys of Linear's dark theme.
+const SURFACE: (u8, u8, u8) = (24, 25, 27);
+const SURFACE_RAISED: (u8, u8, u8) = (40, 41, 45);
+
+fn tone((r, g, b): (u8, u8, u8)) -> Retained<NSColor> {
+    rgba(r, g, b, 1.0)
+}
 
 /// Week columns, also used as the add-field tag that picks the new task's day.
 const INBOX: isize = 0;
 const TODAY: isize = 1;
 const TOMORROW: isize = 2;
-
-/// Dark text on the pastel cards.
-fn ink(alpha: f64) -> Retained<NSColor> {
-    rgba(26, 30, 26, alpha)
-}
 
 fn white(alpha: f64) -> Retained<NSColor> {
     rgba(255, 255, 255, alpha)
@@ -1280,8 +1282,8 @@ impl Controller {
         card.todo.setTitle(&NSString::from_str(&format!("To do  {}", todo.len())));
         card.done.setTitle(&NSString::from_str(&format!("Completed  {}", done.len())));
         let (on, off) = if show_completed { (&card.done, &card.todo) } else { (&card.todo, &card.done) };
-        w::style_pill(on, &white(0.45), &ink(0.9), 7.0);
-        w::style_pill(off, &white(0.0), &ink(0.55), 7.0);
+        w::style_pill(on, &white(0.1), &white(0.95), 7.0);
+        w::style_pill(off, &white(0.0), &white(0.55), 7.0);
         w::fit_pill(&card.todo, 10.0);
         w::fit_pill(&card.done, 10.0);
 
@@ -1290,26 +1292,26 @@ impl Controller {
         let shown = if show_completed { &done } else { &todo };
         let fit = rows_that_fit(&tasks, shown, MAX_CARD_ROWS);
         for (k, &i) in shown.iter().take(fit).enumerate() {
-            let row = ListRow::new(&tasks[i].text, &self.card_row(i, &tasks[i]), &ink(0.07), self.mtm());
+            let row = ListRow::new(&tasks[i].text, &self.card_row(i, &tasks[i]), &white(0.07), self.mtm());
             unsafe { row.setMenu(Some(&self.task_menu(i))) };
             if k > 0 {
-                row.add_rule(&ink(0.08), CARD_ROW_GAP, self.mtm());
+                row.add_rule(&white(0.08), CARD_ROW_GAP, self.mtm());
             }
             add_full_width(&card.rows, &row, None);
         }
         let empty = if show_completed { "Nothing completed yet today" } else { "All clear. Add a task below." };
-        self.add_overflow_note(&card.rows, shown.len(), fit, empty, &ink(0.5));
+        self.add_overflow_note(&card.rows, shown.len(), fit, empty, &white(0.5));
         list_row::animate_changes(&card.rows, before);
     }
 
     fn card_row(&self, index: usize, task: &Task) -> Retained<NSView> {
         let mtm = self.mtm();
         let circle = if task.done { "checkmark.circle.fill" } else { "circle" };
-        let check = w::icon_button(circle, "", 15.0, &ink(0.7), self.target(), sel!(toggleTask:), mtm);
+        let check = w::icon_button(circle, "", 15.0, &white(0.7), self.target(), sel!(toggleTask:), mtm);
         check.setTag(index as isize);
         let alpha = if task.done { 0.45 } else { 0.9 };
-        let title = with_meta(task, w::label(&task.text, 13.0, unsafe { NSFontWeightRegular }, &ink(alpha), mtm), &ink(0.5), mtm);
-        let play = w::icon_button("play.fill", "", 10.0, &ink(0.45), self.target(), sel!(focusTask:), mtm);
+        let title = with_meta(task, w::label(&task.text, 13.0, unsafe { NSFontWeightRegular }, &white(alpha), mtm), &white(0.5), mtm);
+        let play = w::icon_button("play.fill", "", 10.0, &white(0.45), self.target(), sel!(focusTask:), mtm);
         play.setTag(index as isize);
         play.setHidden(task.done);
         w::stack(&[&check, &title, &play], false, 10.0, mtm).into_super()
@@ -1773,7 +1775,7 @@ impl Controller {
     }
 
     fn build_focus_card(&self, mtm: MainThreadMarker) -> (Retained<NSView>, FocusCard) {
-        let card = w::filled(&rgba(34, 33, 38, 1.0), 18.0, mtm);
+        let card = w::filled(&tone(SURFACE), 18.0, mtm);
         card.setAppearance(unsafe { NSAppearance::appearanceNamed(NSAppearanceNameDarkAqua) }.as_deref());
         card.widthAnchor().constraintEqualToConstant(FOCUS_CARD_WIDTH).setActive(true);
         let inner = FOCUS_CARD_WIDTH - 28.0;
@@ -1812,10 +1814,10 @@ impl Controller {
         let button_width = (inner - 16.0 - PLUS_WIDTH) / 2.0;
         pause.widthAnchor().constraintEqualToConstant(button_width).setActive(true);
         let end = w::pill("End", 28.0, self.target(), sel!(endTimer:), mtm);
-        w::style_pill(&end, &rgba(62, 60, 68, 1.0), &white(0.85), 14.0);
+        w::style_pill(&end, &tone(SURFACE_RAISED), &white(0.85), 14.0);
         end.widthAnchor().constraintEqualToConstant(button_width).setActive(true);
         let plus = w::pill("+5", 28.0, self.target(), sel!(addFive:), mtm);
-        w::style_pill(&plus, &rgba(62, 60, 68, 1.0), &white(0.85), 14.0);
+        w::style_pill(&plus, &tone(SURFACE_RAISED), &white(0.85), 14.0);
         plus.widthAnchor().constraintEqualToConstant(PLUS_WIDTH).setActive(true);
         let buttons = w::stack(&[&pause, &end, &plus], false, 8.0, mtm);
 
@@ -1848,11 +1850,10 @@ impl Controller {
     }
 
     fn build_task_card(&self, mtm: MainThreadMarker) -> (Retained<NSView>, TaskCard) {
-        let card = w::filled(&rgba(148, 168, 143, 1.0), 18.0, mtm);
-        card.setAppearance(unsafe { NSAppearance::appearanceNamed(NSAppearanceNameAqua) }.as_deref());
+        let card = w::filled(&tone(SURFACE), 18.0, mtm);
 
-        let title = w::label("Today’s tasks", 15.0, unsafe { NSFontWeightBold }, &ink(0.9), mtm);
-        let date = w::label(&days::label(0), 12.0, unsafe { NSFontWeightMedium }, &ink(0.55), mtm);
+        let title = w::label("Today’s tasks", 15.0, unsafe { NSFontWeightBold }, &white(0.9), mtm);
+        let date = w::label(&days::label(0), 12.0, unsafe { NSFontWeightMedium }, &white(0.55), mtm);
         let head = w::stack(&[&title, &w::spacer(mtm), &date], false, 8.0, mtm);
         let todo = w::pill("To do", 22.0, self.target(), sel!(showTodo:), mtm);
         let done = w::pill("Completed", 22.0, self.target(), sel!(showCompleted:), mtm);
@@ -1865,9 +1866,9 @@ impl Controller {
             view.widthAnchor().constraintEqualToAnchor(&top.widthAnchor()).setActive(true);
         }
 
-        let input = w::input("Add a task · try 6pm !high #work 30m", &ink(0.9), TODAY, self.target(), sel!(addTask:), mtm);
-        let bottom = self.add_row(&input, &ink(0.5), mtm);
-        let line = w::filled(&ink(0.1), 0.0, mtm);
+        let input = w::input("Add a task · try 6pm !high #work 30m", &white(0.9), TODAY, self.target(), sel!(addTask:), mtm);
+        let bottom = self.add_row(&input, &white(0.5), mtm);
+        let line = w::filled(&white(0.1), 0.0, mtm);
         card.addSubview(&line);
         card.addSubview(&bottom);
         for view in [&*line, &*bottom] {
@@ -1892,7 +1893,7 @@ impl Controller {
                     controller.drop_task(index, tag, at);
                 }
             });
-            let card = DropColumn::new(rgba(42, 42, 45, 1.0), rgba(62, 62, 68, 1.0), on_drop, mtm);
+            let card = DropColumn::new(tone(SURFACE), tone(SURFACE_RAISED), on_drop, mtm);
             let title: Retained<NSView> = match tag {
                 INBOX => {
                     let tray = NSImageView::imageViewWithImage(&w::symbol("tray"), mtm);
@@ -2039,7 +2040,7 @@ impl Controller {
     /// One dark card holding the scrolling text view, with the placeholder and the ⌘↩
     /// confirmation laid over it.
     fn build_notes(&self, mtm: MainThreadMarker) -> NotesView {
-        let card = w::filled(&rgba(42, 42, 45, 1.0), 18.0, mtm);
+        let card = w::filled(&tone(SURFACE), 18.0, mtm);
         let me = Weak::new(self);
         let text = NoteView::new(
             Box::new(move || {
@@ -2091,7 +2092,7 @@ impl Controller {
 
     /// A card holding the terminal view.
     fn build_terminal(&self, mtm: MainThreadMarker) -> TerminalPane {
-        let body = w::filled(&rgba(42, 42, 45, 1.0), 18.0, mtm);
+        let body = w::filled(&tone(SURFACE), 18.0, mtm);
         let view = TerminalView::new(mtm);
         view.setTranslatesAutoresizingMaskIntoConstraints(false);
         body.addSubview(&view);
