@@ -17,11 +17,12 @@ pub fn logo(name: &str) -> Option<Retained<NSImage>> {
             let google = image(GOOGLE_CALENDAR);
             let notion = image(NOTION);
             let draw = RcBlock::new(move |_: NSRect| -> Bool {
-                google.drawInRect(NSRect::new(NSPoint::new(0.0, 2.0), NSSize::new(18.0, 18.0)));
-                notion.drawInRect(NSRect::new(NSPoint::new(20.0, 2.0), NSSize::new(18.0, 18.0)));
+                // Two smaller icons, so the pair stays clear of the row's text column.
+                google.drawInRect(NSRect::new(NSPoint::new(0.0, 3.0), NSSize::new(16.0, 16.0)));
+                notion.drawInRect(NSRect::new(NSPoint::new(18.0, 3.0), NSSize::new(16.0, 16.0)));
                 Bool::YES
             });
-            Some(NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(38.0, 22.0), false, &draw))
+            Some(NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(34.0, 22.0), false, &draw))
         }
         _ => None,
     }
