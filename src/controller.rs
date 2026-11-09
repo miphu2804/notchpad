@@ -31,6 +31,8 @@ use crate::focus_ring::FocusRing;
 use crate::insights::Insights;
 use crate::insights_view::InsightsView;
 use crate::linear::{self, Linear};
+use crate::reminders::{self, Reminders};
+use crate::reminders_sync;
 use crate::list_row::{self, ListRow};
 use crate::live_activity::{Activity, LiveActivity};
 use crate::notch_banner::{NotchBanner, Notice};
@@ -217,6 +219,7 @@ pub struct State {
     events: RefCell<Vec<Event>>,
     events_day: RefCell<String>,
     calendar: RefCell<Calendar>,
+    reminders: RefCell<Reminders>,
     linear: RefCell<Linear>,
     expanded: Cell<bool>,
     /// Opened by hotkey: stays open until the pointer has visited and left.
@@ -577,6 +580,37 @@ define_class!(
             }
         }
 
+        /// A Reminders fetch finished: both sides are brought in line. Skipped when `tasks.txt`
+        /// changed on disk since it was read (the MCP server wrote it), so that edit is never
+        /// overwritten; the reload picks it up and the next pass runs on it.
+        #[unsafe(method(remindersFetched:))]
+        fn reminders_fetched(&self, _arg: Option<&AnyObject>) {
+            let Some((found, list_created)) = self.ivars().reminders.borrow_mut().take() else { return };
+            if store::modified() != self.ivars().seen_mtime.get() {
+                return;
+            }
+            let changed = {
+                let mut tasks = self.ivars().tasks.borrow_mut();
+                let changes = reminders_sync::reconcile(&mut tasks, &found, &reminders_sync::load_snapshot(), list_created);
+                let linked = self.ivars().reminders.borrow_mut().apply(&changes, &mut tasks);
+                if let Err(err) = reminders_sync::save_snapshot(&reminders_sync::snapshot_of(&tasks)) {
+                    eprintln!("notchpad: could not save the Reminders snapshot: {err}");
+                }
+                changes.tasks_changed || linked
+            };
+            if changed {
+                self.ivars().focus.set(None);
+                self.save_and_refresh();
+            }
+            self.ivars().reminders.borrow_mut().synced(store::modified());
+        }
+
+        /// The user answered the Reminders prompt.
+        #[unsafe(method(remindersAllowed:))]
+        fn reminders_allowed(&self, _arg: Option<&AnyObject>) {
+            self.sync_reminders();
+        }
+
         /// Called when the user answers the calendar prompt and whenever the calendars change.
         #[unsafe(method(reloadEvents:))]
         fn reload_events(&self, _arg: Option<&AnyObject>) {
@@ -735,6 +769,7 @@ define_class!(
             if self.ivars().settings.borrow().linear && self.ivars().linear.borrow().due() {
                 self.ivars().linear.borrow_mut().fetch(self.target(), sel!(linearSynced:));
             }
+            self.sync_reminders();
             let mtime = store::modified();
             if mtime != self.ivars().seen_mtime.get() {
                 self.ivars().seen_mtime.set(mtime);
@@ -1003,6 +1038,14 @@ impl Controller {
     fn save_and_refresh(&self) {
         self.save();
         self.refresh();
+    }
+
+    /// Starts a Reminders pass when the sync is on, allowed, and due.
+    fn sync_reminders(&self) {
+        let on = self.ivars().settings.borrow().reminders && reminders::access() == Access::Granted;
+        if on && self.ivars().reminders.borrow().due(store::modified()) {
+            self.ivars().reminders.borrow_mut().fetch(self.target(), sel!(remindersFetched:));
+        }
     }
 
     fn save(&self) {
@@ -1575,6 +1618,7 @@ impl Controller {
         let focus_changed = self.ivars().settings.borrow().focus != settings.focus;
         // The one place macOS is asked for calendar access: the user just turned the switch on.
         let calendar_turned_on = settings.calendar && !self.ivars().settings.borrow().calendar;
+        let reminders_turned_on = settings.reminders && !self.ivars().settings.borrow().reminders;
         let linear_changed = settings.linear != self.ivars().settings.borrow().linear;
         if focus_changed && !self.session_active() {
             self.ivars().duration_idx.set(focus_index(&settings));
@@ -1585,6 +1629,10 @@ impl Controller {
         }
         if calendar_turned_on && calendar::access() == Access::Undecided {
             self.ivars().calendar.borrow_mut().request_access(self.target(), sel!(reloadEvents:));
+        }
+        // Likewise the one place macOS is asked for Reminders access.
+        if reminders_turned_on && reminders::access() == Access::Undecided {
+            self.ivars().reminders.borrow_mut().request_access(self.target(), sel!(remindersAllowed:));
         }
         self.load_events();
         self.sync_now_playing();

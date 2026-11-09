@@ -27,6 +27,8 @@
 	<string>Notchpad controls Music and Spotify playback from the notch.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>Notchpad shows today's calendar events beside your tasks. It only reads them.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Notchpad keeps your tasks in a Reminders list named Notchpad, so they reach your iPhone through iCloud.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 </dict>

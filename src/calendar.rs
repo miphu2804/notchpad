@@ -33,7 +33,12 @@ pub enum Access {
 }
 
 pub fn access() -> Access {
-    let status = unsafe { EKEventStore::authorizationStatusForEntityType(EKEntityType::Event) };
+    access_for(EKEntityType::Event)
+}
+
+/// The same for events or reminders, which macOS asks about separately.
+pub fn access_for(entity: EKEntityType) -> Access {
+    let status = unsafe { EKEventStore::authorizationStatusForEntityType(entity) };
     if status == EKAuthorizationStatus::NotDetermined {
         Access::Undecided
     } else if status == EKAuthorizationStatus::FullAccess {
