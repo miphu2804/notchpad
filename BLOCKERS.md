@@ -1,3 +1,13 @@
+### [2026-11-10 00:17 UTC+07:00] — [Integration] Real Linear OAuth acceptance
+
+**Status:** Open
+
+**Blocked by:** A registered public Linear OAuth client ID, with exact redirect URI `http://127.0.0.1:53682/oauth/callback`, has not been supplied.
+
+**Impact:** The PKCE, callback/state validation, cancellation and refresh/disconnect synchronization are locally tested. This does not verify Linear's real authorization or token exchange. The unconfigured build reports the missing setup instead of starting a browser flow. Existing connected personal keys remain supported.
+
+**Next action:** Register a public application in Linear, supply its public client ID (not a secret), rebuild with `NOTCHPAD_LINEAR_CLIENT_ID`, then authorize and verify assigned-issue import/completion with the user's consent.
+
 ### [2026-11-09 15:24 UTC+07:00] — [Feature] Live acceptance of the new features
 
 **Status:** Open (narrowed 2026-11-09 18:37 UTC+07:00)

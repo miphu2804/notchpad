@@ -7,7 +7,7 @@ set -eu
 cd "$(dirname "$0")/.."
 
 # To embed the registered public Linear OAuth client ID in the app binary:
-#   NOTCHPAD_LINEAR_CLIENT_ID=lin_api_... macos/bundle.sh
+#   NOTCHPAD_LINEAR_CLIENT_ID='<registered-client-id>' macos/bundle.sh
 # The redirect URI must be registered exactly as http://127.0.0.1:53682/oauth/callback.
 cargo build --release
 app=target/release/Notchpad.app

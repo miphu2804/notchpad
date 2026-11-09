@@ -1,3 +1,16 @@
+### [2026-11-10 00:20 UTC+07:00] — [Integration] Linear browser authorization with PKCE
+
+**Done:**
+- Replaced the new-key form with browser OAuth, cancellable callback handling, Keychain token storage and serialized refresh. Disconnect prevents late writes and blocks reconnect until pending credential deletion finishes.
+- Preserved existing personal-key reads, stable `linear:<identifier>` tasks and the direct Insights callback. Removed unused key-entry code and made config-escaping tests exercise the production helper.
+- Documented the registered public client ID and exact loopback redirect. No client secret is embedded; an unconfigured Connect reports setup missing without opening a browser.
+
+**Changed  files:**
+- `src/linear.rs`, `src/settings_window.rs`, `macos/bundle.sh`, `README.md`, `BLOCKERS.md` — modified
+
+**Flow explained:**
+Settings starts a worker and polls its result on the main thread; PKCE/state-validated callbacks exchange tokens, then enable the existing sync. Refresh and disconnect use generation/transition guards to prevent stale credential writes. Verified: 110 tests pass (including callback rejection, timeout/cancel, PKCE, token rotation and disconnect/reconnect gating), release build without warnings, shell syntax and diff checks. Actual scratch-HOME Connect action stays disconnected with the explicit configuration error; `/tmp/notchpad-oauth/unconfigured.png` inspected. Temporary hooks removed. Real provider authorization remains unverified and blocked on registration; see `BLOCKERS.md`.
+
 ### [2026-11-10 00:12 UTC+07:00] — [Fix] Preserve text height in the compact focus card
 
 **Done:**
@@ -109,17 +122,3 @@ The Settings window receives an `on_insights` callback backed by a weak controll
 **Flow explained:**
 - The 2 s reload tick calls `remind_tasks`, which collects `reminders_between(lead)` plus snoozed reminders due, then `notify` rings the chime (if enabled) and shows the card under the collapsed notch; `bannerExpired:` hides it after 60 s (8 s for sessions).
 - Snooze stores the reminder with now + 5 min; Done marks the matching task done and saves.
-
-### [2026-11-09 21:35 UTC+07:00] — [Feature] Notch alerts, task reminders, undo delete, open at login
-
-**Done:**
-- Pomodoro and break endings and timed tasks (10 min before, and at the time) chime and open the notch on Workspace without taking keyboard focus. The message stays on the card until the panel closes; before, a pomodoro ending focused the task input.
-- Deleting a task shows "Deleted …" with Undo for 6 s; Undo puts it back where it was.
-- Header menu › Copy today as Markdown: a checklist in the quick-add syntax.
-- Settings › General › Open at login (`SMAppService`).
-
-**Changed  files:**
-- `src/controller.rs`, `src/task_alerts.rs`, `src/chime.rs`, `src/settings_window.rs`, `Cargo.toml`, `Cargo.lock`, `README.md` — modified
-
-**Flow explained:**
-The 2 s `reload:` tick calls `remind_tasks`, which works only when the minute changes: `task_alerts::reminders_between` returns today's open timed tasks whose reminder minute fell since the last check, at most 5 min back. `alert` rings the chime and pins the panel open with `orderFrontRegardless`, not as key window. Collapsing clears the toasts. Verified by hook logs (reminder opens the panel with `key=false`; delete, Undo and collapse states), renders of the reminder, Undo and General pane, 64 tests, and 0.0% idle CPU.

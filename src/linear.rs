@@ -35,7 +35,6 @@ const CALLBACK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const SYNC_EVERY: Duration = Duration::from_secs(10 * 60);
 const EXT_PREFIX: &str = "linear:";
 
-const VIEWER: &str = "query { viewer { id } }";
 const ASSIGNED: &str = r#"query { viewer { assignedIssues(filter: {state: {type: {nin: ["completed", "canceled"]}}}) { nodes { id identifier title dueDate } } } }"#;
 const COMPLETED_STATE: &str = r#"query($id: String!) { issue(id: $id) { id team { states(filter: {type: {eq: "completed"}}) { nodes { id } } } } }"#;
 const SET_STATE: &str = "mutation($id: String!, $state: String!) { issueUpdate(id: $id, input: {stateId: $state}) { success } }";
@@ -436,13 +435,6 @@ fn sha256(input: &[u8]) -> [u8; 32] {
 
 // ---- Keychain ----------------------------------------------------------------------------
 
-/// Saves a legacy personal key after checking that Linear accepts it, preserving compatibility
-/// with installations that connected before OAuth was available.
-pub fn connect(key: &str) -> Result<(), String> {
-    request_with(key, VIEWER, json!({})).and_then(|text| data(&text))?;
-    set_generic_password(SERVICE, API_KEY_ACCOUNT, key.as_bytes()).map_err(|err| format!("Keychain: {err}"))
-}
-
 pub fn disconnect() {
     let Ok(_gate) = auth_transition_lock().lock() else { return };
     AUTH_GENERATION.fetch_add(1, Ordering::AcqRel);
@@ -575,9 +567,7 @@ fn curl(url: &str, headers: &[&str], body: &str) -> Result<String, String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| format!("curl: {err}"))?;
-    let mut config = format!("url = {}\nrequest = \"POST\"\n", quote(url));
-    for header in headers { config.push_str(&format!("header = {}\n", quote(header))); }
-    config.push_str(&format!("data = {}\n", quote(body)));
+    let config = curl_config(url, headers, body);
     curl.stdin.take().ok_or("curl has no stdin")?.write_all(config.as_bytes()).map_err(|err| err.to_string())?;
     let output = curl.wait_with_output().map_err(|err| err.to_string())?;
     if !output.status.success() {
@@ -587,9 +577,12 @@ fn curl(url: &str, headers: &[&str], body: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// A curl config that POSTs `body` to `url`; credentials are passed in `auth` only in stdin.
-fn curl_config(url: &str, auth: &str, body: &str) -> String {
-    format!("url = {}\nrequest = \"POST\"\nheader = {}\nheader = \"Content-Type: application/json\"\ndata = {}\n", quote(url), quote(&format!("Authorization: {auth}")), quote(body))
+/// A POST config passed on stdin so credentials never appear in process arguments.
+fn curl_config(url: &str, headers: &[&str], body: &str) -> String {
+    let mut config = format!("url = {}\nrequest = \"POST\"\n", quote(url));
+    for header in headers { config.push_str(&format!("header = {}\n", quote(header))); }
+    config.push_str(&format!("data = {}\n", quote(body)));
+    config
 }
 
 /// `text` as a curl config string: double-quoted, with `\\`, `"` and line breaks escaped.
@@ -851,7 +844,7 @@ mod tests {
     #[test]
     fn curl_config_carries_the_key_and_escapes_the_body() {
         let body = json!({"query": "q \"x\"", "variables": {"t": "a\nb\\c"}}).to_string();
-        let config = curl_config(ENDPOINT, "test-key", &body);
+        let config = curl_config(ENDPOINT, &["Authorization: test-key", "Content-Type: application/json"], &body);
         assert!(config.contains("header = \"Authorization: test-key\"\n"));
         assert!(config.contains("url = \"https://api.linear.app/graphql\"\n"));
         assert!(config.lines().all(|line| line.starts_with("url") || line.starts_with("request") || line.starts_with("header") || line.starts_with("data")));

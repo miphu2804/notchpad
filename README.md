@@ -18,7 +18,7 @@ Apple Silicon, macOS 14 or later. It is written in Rust with AppKit, runs at 0% 
 - **Insights.** Open directly from Settings › Sections › Insights › Open, or right-click the notch header › Open Insights. A dashboard tab (not in the notch) for the last weeks: active days, streaks, focus time with the week's tasks and daily bars, a five-week heatmap with Focus, Pomodoros and Tasks tabs, rounded month petals (idle days stay dots), a full-height stacked 30-day pulse you can export as PNG, and a moon calendar for the month.
 - **Claude.** Settings › Integrations › Claude adds the `notchpad` MCP server to Claude Code (runs `claude mcp add --scope user`) or to Claude Desktop (merges into `claude_desktop_config.json`, keeping a `.bak`; restart Claude Desktop afterwards). A config that is not valid JSON is never overwritten.
 - **Calendars.** Turn on **Show calendar events** and today's events appear read-only above your tasks. They come from the macOS calendars through EventKit, so add a Google account in System Settings › Internet Accounts; Notion Calendar events arrive through that same Google calendar. macOS asks for calendar access only when you turn the switch on, and nothing is ever written to a calendar.
-- **Linear.** Paste a personal API key under Settings › Integrations › Linear and click **Connect**. Your open assigned issues become tasks (`linear:<identifier>`) when the app opens and every 10 minutes, placed on their due date or today; completing one in Notchpad moves the issue to its team's completed state. The key is kept only in the macOS Keychain; requests go through `curl` with the key on stdin.
+- **Linear.** Click **Connect** under Settings › Integrations › Linear to authorize in your browser using OAuth PKCE (requires the app's registered public client ID; see below). Your open assigned issues become tasks (`linear:<identifier>`) when the app opens and every 10 minutes, placed on their due date or today; completing one in Notchpad moves the issue to its team's completed state. Tokens are kept only in the macOS Keychain and refreshed in the background; credentials go to `curl` on stdin. Cancel stops a pending authorization; Disconnect removes credentials. Existing personal API keys remain readable until you disconnect.
 - **More.** A JSON backup export, a dashboard window, and today's tasks copied as a Markdown checklist. Right-click the header for these.
 
 ## Install
@@ -43,6 +43,16 @@ Building needs Rust and the Xcode command line tools.
 ```
 
 This builds `Notchpad.app` (ad-hoc signed) and copies it to `/Applications`. `cargo build --release` alone produces `notchpad` (the app) and `notchpad-mcp` (a stdio MCP server over the same task file).
+
+### Linear OAuth configuration
+
+Register a public OAuth application in Linear with the exact redirect URI `http://127.0.0.1:53682/oauth/callback`, then build with its public client ID:
+
+```bash
+NOTCHPAD_LINEAR_CLIENT_ID='<registered-client-id>' ./macos/bundle.sh --install
+```
+
+Do not embed a client secret. Without a client ID, Settings reports that OAuth is not configured; Connect cannot start authentication. Local callback, cancellation, PKCE and refresh tests do not prove a real provider login. A registered client and an end-to-end login are still required.
 
 ## Task sync (Notion, Linear, Google Calendar)
 
