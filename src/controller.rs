@@ -27,6 +27,7 @@ use crate::settings::{self as prefs, Settings, Size};
 use crate::settings_window::SettingsWindow;
 use crate::days;
 use crate::export;
+use crate::linear::{self, Linear};
 use crate::list_row::{self, ListRow};
 use crate::live_activity::{Activity, LiveActivity};
 use crate::notch_banner::{NotchBanner, Notice};
@@ -210,6 +211,7 @@ pub struct State {
     events: RefCell<Vec<Event>>,
     events_day: RefCell<String>,
     calendar: RefCell<Calendar>,
+    linear: RefCell<Linear>,
     expanded: Cell<bool>,
     /// Opened by hotkey: stays open until the pointer has visited and left.
     pinned: Cell<bool>,
@@ -354,6 +356,7 @@ define_class!(
         fn toggle_task(&self, sender: &NSButton) {
             if let Some(task) = self.ivars().tasks.borrow_mut().get_mut(sender.tag() as usize) {
                 task.set_done(!task.done);
+                self.complete_remote(task);
             }
             self.save_and_refresh();
         }
@@ -420,6 +423,7 @@ define_class!(
                 let task = tasks.iter_mut().find(|t| !t.done && t.day == today && t.text == reminder.text && t.time == reminder.time);
                 if let Some(task) = task {
                     task.set_done(true);
+                    self.complete_remote(task);
                 }
             }
             self.save_and_refresh();
@@ -543,6 +547,21 @@ define_class!(
             self.ivars().now_playing.borrow_mut().drain();
             self.render_music();
             self.sync_activity();
+        }
+
+        /// A Linear fetch finished: new assigned issues become tasks.
+        #[unsafe(method(linearSynced:))]
+        fn linear_synced(&self, _arg: Option<&AnyObject>) {
+            let Some(result) = self.ivars().linear.borrow_mut().take() else { return };
+            match result {
+                Ok(issues) => {
+                    let added = linear::import(&mut self.ivars().tasks.borrow_mut(), &issues, &days::key(0));
+                    if added > 0 {
+                        self.save_and_refresh();
+                    }
+                }
+                Err(err) => eprintln!("notchpad: Linear sync failed: {err}"),
+            }
         }
 
         /// Called when the user answers the calendar prompt and whenever the calendars change.
@@ -700,6 +719,9 @@ define_class!(
                 self.load_events();
                 self.render_task_card();
             }
+            if self.ivars().settings.borrow().linear && self.ivars().linear.borrow().due() {
+                self.ivars().linear.borrow_mut().fetch(self.target(), sel!(linearSynced:));
+            }
             let mtime = store::modified();
             if mtime != self.ivars().seen_mtime.get() {
                 self.ivars().seen_mtime.set(mtime);
@@ -819,6 +841,13 @@ impl Controller {
         this.render_clips();
         this.ui().panel.orderFrontRegardless();
         this
+    }
+
+    /// A task just done in Notchpad that mirrors a Linear issue is completed there too.
+    fn complete_remote(&self, task: &Task) {
+        if task.done && self.ivars().settings.borrow().linear {
+            Linear::complete(&task.ext);
+        }
     }
 
     /// Reads today's events; empty unless the setting is on and macOS has allowed access.
@@ -1511,10 +1540,14 @@ impl Controller {
         let focus_changed = self.ivars().settings.borrow().focus != settings.focus;
         // The one place macOS is asked for calendar access: the user just turned the switch on.
         let calendar_turned_on = settings.calendar && !self.ivars().settings.borrow().calendar;
+        let linear_changed = settings.linear != self.ivars().settings.borrow().linear;
         if focus_changed && !self.session_active() {
             self.ivars().duration_idx.set(focus_index(&settings));
         }
         *self.ivars().settings.borrow_mut() = settings;
+        if linear_changed {
+            self.ivars().linear.borrow_mut().reset();
+        }
         if calendar_turned_on && calendar::access() == Access::Undecided {
             self.ivars().calendar.borrow_mut().request_access(self.target(), sel!(reloadEvents:));
         }

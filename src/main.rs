@@ -8,6 +8,7 @@ mod days;
 mod export;
 mod hotkey;
 mod list_row;
+mod linear;
 mod live_activity;
 mod notch_banner;
 mod now_playing;

@@ -10,13 +10,14 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSButton, NSCellImagePosition,
     NSControlSize, NSControlStateValueOn, NSFont, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSImageView,
-    NSPopUpButton, NSSwitch, NSTextAlignment, NSTextField, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSPopUpButton, NSSecureTextField, NSSwitch, NSTextAlignment, NSTextField, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
 use crate::calendar::{self, Access};
 use crate::claude_mcp;
+use crate::linear;
 use crate::settings::{FOCUS_CHOICES, LONG_BREAK_CHOICES, REMIND_CHOICES, SECTIONS, SHORT_BREAK_CHOICES, Settings, Size};
 use crate::widgets::{self as w, rgba};
 
@@ -41,13 +42,17 @@ const FOCUS_ROW: isize = 0;
 const SHORT_BREAK_ROW: isize = 1;
 const LONG_BREAK_ROW: isize = 2;
 const REMIND_ROW: isize = 3;
-/// Rows of the Integrations pane, in order; they are the tags of their buttons, and their
-/// blurbs carry `STATUS + row` so the actions can rewrite them.
-const CLAUDE_CODE_ROW: isize = 0;
-const CLAUDE_DESKTOP_ROW: isize = 1;
-const CALENDAR_ROW: isize = 2;
+/// Rows of the Integrations pane, in order; they are the tags of their controls (not below 10: labels and
+/// image views default to tag 0), and their blurbs carry `STATUS + row` so the actions can rewrite them.
+const CLAUDE_CODE_ROW: isize = 10;
+const CLAUDE_DESKTOP_ROW: isize = 11;
+const CALENDAR_ROW: isize = 12;
+const LINEAR_ROW: isize = 13;
+/// The Linear key field carries `FIELD + row`.
+const FIELD: isize = 200;
 const STATUS: isize = 100;
-const BUTTON_WIDTH: f64 = 84.0;
+const BUTTON_WIDTH: f64 = 90.0;
+const FIELD_WIDTH: f64 = 120.0;
 /// Index of the Integrations pane in [`PANES`].
 const INTEGRATIONS_PANE: usize = 3;
 
@@ -62,6 +67,8 @@ struct Row<'a> {
     switch: Option<(bool, Sel)>,
     menu: Option<(Vec<String>, usize, Sel)>,
     button: Option<(&'a str, Sel)>,
+    /// Placeholder of a secure text field, left of the button.
+    field: Option<&'a str>,
 }
 const WINGS: [(&str, &str); 2] = [("play.circle", "Show what's playing"), ("timer", "Show focus countdown")];
 
@@ -150,6 +157,30 @@ define_class!(
         fn add_claude_desktop(&self, _sender: &NSButton) {
             let error = claude_mcp::add_to_desktop().err();
             self.refresh_integrations(CLAUDE_DESKTOP_ROW, error);
+        }
+
+        /// Connects with the key typed into the field, or disconnects. The key goes to the Keychain
+        /// and nowhere else; the field is emptied once it has been used.
+        #[unsafe(method(toggleLinear:))]
+        fn toggle_linear(&self, _sender: &NSButton) {
+            let mut settings = self.ivars().settings.borrow().clone();
+            let field = self.integrations_view(FIELD + LINEAR_ROW).and_then(|v| v.downcast::<NSTextField>().ok());
+            let result = if settings.linear {
+                linear::disconnect();
+                Ok(())
+            } else {
+                let key = field.as_ref().map(|f| f.stringValue().to_string()).unwrap_or_default();
+                if key.trim().is_empty() { Err("Paste a personal API key first".to_owned()) } else { linear::connect(key.trim()) }
+            };
+            if let Err(error) = result {
+                return self.refresh_integrations(LINEAR_ROW, Some(error));
+            }
+            if let Some(field) = field {
+                field.setStringValue(&NSString::new());
+            }
+            settings.linear = !settings.linear;
+            self.commit(settings);
+            self.refresh_integrations(-1, None);
         }
 
         #[unsafe(method(toggleCalendar:))]
@@ -319,9 +350,17 @@ impl SettingsWindow {
             switch: Some((self.ivars().settings.borrow().calendar, sel!(toggleCalendar:))),
             ..Row::default()
         }];
+        let linear = [Row {
+            symbol: "arrow.triangle.branch",
+            name: "Linear",
+            blurb: Some(""),
+            button: Some(("Connect", sel!(toggleLinear:))),
+            field: Some("Personal API key"),
+            ..Row::default()
+        }];
         let calendar_note = "Add a Google account in System Settings › Internet Accounts. Notion Calendar events come from that same Google calendar.";
-        let (mut top, mut base) = (80.0, 0);
-        for (caption, rows, note) in [("Claude", &claude[..], None), ("Calendars", &calendars[..], Some(calendar_note))] {
+        let (mut top, mut base) = (80.0, CLAUDE_CODE_ROW);
+        for (caption, rows, note) in [("Claude", &claude[..], None), ("Calendars", &calendars[..], Some(calendar_note)), ("Linear", &linear[..], None)] {
             let caption = w::label(&caption.to_uppercase(), 11.0, unsafe { NSFontWeightMedium }, &rgba(255, 255, 255, 0.45), mtm);
             caption.setFrame(rect(MARGIN + 4.0, from_top(HEIGHT, top, 14.0), PANE - 2.0 * MARGIN, 14.0));
             pane.addSubview(&caption);
@@ -350,7 +389,7 @@ impl SettingsWindow {
         w::paint(&card, &rgba(255, 255, 255, 0.06), 10.0);
 
         let target: &AnyObject = self.as_ref();
-        for (i, Row { symbol, name, blurb, switch, menu, button }) in rows.iter().enumerate() {
+        for (i, Row { symbol, name, blurb, switch, menu, button, field }) in rows.iter().enumerate() {
             let tag = base + i as isize;
             let row = frame_view(0.0, from_top(card_height, i as f64 * ROW, ROW), card_width, ROW, mtm);
             let icon = NSImageView::imageViewWithImage(&w::symbol(symbol), mtm);
@@ -369,6 +408,17 @@ impl SettingsWindow {
                 button.setFrame(rect(controls_x, (ROW - height) / 2.0, BUTTON_WIDTH, height));
                 button.setTag(tag);
                 row.addSubview(&button);
+            }
+            if let Some(placeholder) = field {
+                let field = NSSecureTextField::initWithFrame(mtm.alloc(), NSRect::ZERO);
+                field.setControlSize(NSControlSize::Small);
+                field.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+                field.setPlaceholderString(Some(&NSString::from_str(placeholder)));
+                let height = field.intrinsicContentSize().height;
+                controls_x -= 12.0 + FIELD_WIDTH;
+                field.setFrame(rect(controls_x, (ROW - height) / 2.0, FIELD_WIDTH, height));
+                field.setTag(FIELD + tag);
+                row.addSubview(&field);
             }
             if let Some((on, action)) = switch {
                 let switch = NSSwitch::new(mtm);
@@ -425,9 +475,28 @@ impl SettingsWindow {
         card
     }
 
+    fn integrations_view(&self, tag: isize) -> Option<Retained<NSView>> {
+        self.ivars().parts.get()?.panes[INTEGRATIONS_PANE].viewWithTag(tag)
+    }
+
     /// Rewrites the Integrations rows from what is on disk and in macOS; `error` is shown on row `failed` instead of its blurb.
     fn refresh_integrations(&self, failed: isize, error: Option<String>) {
         let pane = &self.ivars().parts.get().expect("built in new()").panes[INTEGRATIONS_PANE];
+        let linear_on = self.ivars().settings.borrow().linear;
+        let linear_blurb = match &error {
+            Some(error) if failed == LINEAR_ROW => error,
+            _ if linear_on => "Syncing your assigned issues",
+            _ => "Imports your assigned issues",
+        };
+        if let Some(label) = pane.viewWithTag(STATUS + LINEAR_ROW).and_then(|v| v.downcast::<NSTextField>().ok()) {
+            label.setStringValue(&NSString::from_str(linear_blurb));
+        }
+        if let Some(button) = pane.viewWithTag(LINEAR_ROW).and_then(|v| v.downcast::<NSButton>().ok()) {
+            button.setTitle(&NSString::from_str(if linear_on { "Disconnect" } else { "Connect" }));
+        }
+        if let Some(field) = pane.viewWithTag(FIELD + LINEAR_ROW) {
+            field.setHidden(linear_on);
+        }
         let rows = [
             (CLAUDE_CODE_ROW, claude_mcp::code_added(), "Gives Claude Code your tasks", "Claude Code can use your tasks"),
             (CLAUDE_DESKTOP_ROW, claude_mcp::desktop_added(), "Gives Claude Desktop your tasks", "Added. Restart Claude Desktop"),
