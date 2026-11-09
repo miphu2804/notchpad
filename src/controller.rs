@@ -1010,7 +1010,7 @@ impl Controller {
             eprintln!("notchpad: could not save tasks: {err}");
         }
         self.ivars().seen_mtime.set(store::modified());
-        task_alerts::sync(&self.ivars().tasks.borrow());
+        task_alerts::sync(&self.ivars().tasks.borrow(), self.ivars().settings.borrow().remind.is_some());
     }
 
     fn reload_done_today(&self) {

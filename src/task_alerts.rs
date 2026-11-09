@@ -89,18 +89,21 @@ pub fn minutes(text: &str) -> Option<u32> {
     clock(text).map(|(h, m)| h * 60 + m)
 }
 
-/// Replaces the pending task notifications with those `tasks` need. Silently does nothing in an
+/// Replaces the pending task notifications with those `tasks` need. `notch_cards` says the notch
+/// shows its own reminder card, which then owns the next minute. Silently does nothing in an
 /// unbundled binary, where `UNUserNotificationCenter` would throw.
-pub fn sync(tasks: &[Task]) {
+pub fn sync(tasks: &[Task], notch_cards: bool) {
     if NSBundle::mainBundle().bundleIdentifier().is_none() {
         return;
     }
     let now = days::stamp();
     let (now_day, clock_now) = now.split_once(' ').unwrap_or_default();
     let now_minutes = clock(clock_now).map_or(0, |(h, m)| h * 60 + m);
-    // The next minute belongs to the notch card (see `withdraw_next_minute`), so a save in it
-    // does not put back the notification just withdrawn.
-    let alerts = due_alerts(tasks, now_day, now_minutes + 1, DAYS_AHEAD);
+    // With notch cards on, the next minute belongs to the card (see `withdraw_next_minute`), so a
+    // save in it does not put back the notification just withdrawn. Without them the system
+    // notification is the only reminder and must stay.
+    let from = now_minutes + u32::from(notch_cards);
+    let alerts = due_alerts(tasks, now_day, from, DAYS_AHEAD);
 
     let center = UNUserNotificationCenter::currentNotificationCenter();
     let handler = RcBlock::new({
