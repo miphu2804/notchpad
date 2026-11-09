@@ -1,3 +1,18 @@
+### [2026-11-09 18:35 UTC+07:00] — [Feature] Per-section panel size and collapse on Space change
+
+**Done:**
+- Each section has a size in Settings › Sections: Compact, Tall (1.6×) or Extra tall (2.5×). It is clamped to the screen's visible height minus 40 pt. Switching tabs springs the panel to that tab's height, and the content stays level with the panel top while it moves. The terminal is told its new size once per switch.
+- Switching Spaces or full-screen apps folds the expanded panel into the notch. A latch stops a pointer resting on the notch from reopening it until the pointer leaves and comes back.
+
+**Changed  files:**
+- `src/settings.rs` — modified
+- `src/settings_window.rs` — modified
+- `src/controller.rs` — modified
+- `src/notch_motion.rs` — modified
+
+**Flow explained:**
+`render_tabs` calls `fit_panel`, which computes `body_height(size, visible_height)` and hands the new rects to `NotchMotion::set_rects`. `apply` offsets the content by the height still to travel. `activeSpaceChanged:` comes from the NSWorkspace notification centre: it sets `space_collapsed` and collapses the panel. `mouseExited:` clears the latch.
+
 ### [2026-11-09 18:25 UTC+07:00] — [Feature] Settings window, live waveform, countdown wing, install README
 
 **Done:**
@@ -151,17 +166,3 @@ A Notes tab (note icon) holds a free-text notepad that saves to `notes.txt` half
 
 **Flow explained:**
 `NoteView` reports edits and ⌘↩ to the controller. Edits reschedule a debounced `saveNotes:`; ⌘↩ calls `note_line_to_task`, which splits the text with `take_line` and passes the line to `push_task` (quick-add, save, refresh). In the header, one constraint keeps the left group's trailing edge clear of the notch and another keeps the right group's leading edge clear; `screenParametersChanged:` updates both.
-
-### [2026-11-09 14:20 UTC+07:00] — [Feature] Now Playing music tab
-
-**Done:**
-A ♪ tab shows what Apple Music or Spotify is playing: artwork (Music cover via AppleScript, else the app icon), title, artist · album, a progress bar with elapsed/total, and ⏮ ⏯ ⏭ controls that send AppleScript to the player. With nothing playing it says "Nothing playing. Start Music or Spotify." The 1 s progress timer runs only while the panel is open on the Music tab and a track plays. The private MediaRemote framework isn't used. Built by the np-music thread; accepted by renders of the empty and playing states, plus a real `com.apple.Music.playerInfo` notification posted from another process, which updated the tab.
-
-**Changed  files:**
-- `src/now_playing.rs` — created (`NowPlaying`, `parse`, `info_map`, AppleScript `send`, 4 tests)
-- `src/controller.rs` — modified (Music tab, `musicChanged:`/`spotifyChanged:` observers, `render_music`, progress timer)
-- `macos/Info.plist` — modified (`NSAppleEventsUsageDescription`)
-- `src/main.rs` — modified (module)
-
-**Flow explained:**
-`NSDistributedNotificationCenter` delivers the players' state notifications. `info_map` turns userInfo into strings, `parse` builds a `Track` (Stopped means none), and `apply` keeps the artwork when the track is unchanged. AppleScript runs only when the player app is already running, so a closed app is never launched.
