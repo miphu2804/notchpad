@@ -1,7 +1,8 @@
 //! User preferences in `settings.txt` beside `tasks.txt`: which notch sections are shown and
 //! what the collapsed notch may display.
 //!
-//! Plain `key=value` lines: `hidden=clips,terminal`, `wing_music=1`, `wing_focus=1`.
+//! Plain `key=value` lines: `hidden=clips,terminal`, `size=terminal:xtall,week:tall`,
+//! `wing_music=1`, `wing_focus=1`.
 //! A missing file, a missing key, an unknown key or a garbled line leaves the default,
 //! which shows everything.
 
@@ -17,12 +18,49 @@ pub struct Section {
 
 pub const SECTIONS: [Section; 6] = [
     Section { key: "workspace", name: "Workspace", symbol: "checklist", blurb: "Today's tasks and the focus timer" },
-    Section { key: "week", name: "Week", symbol: "calendar", blurb: "Events, reminders and the week's tasks" },
+    Section { key: "week", name: "Week", symbol: "calendar", blurb: "Events, reminders and tasks" },
     Section { key: "clips", name: "Clips", symbol: "paperclip", blurb: "Clipboard history and dropped files" },
     Section { key: "music", name: "Music", symbol: "music.note", blurb: "Now playing and playback controls" },
     Section { key: "notes", name: "Notes", symbol: "note.text", blurb: "A scratch note" },
     Section { key: "terminal", name: "Terminal", symbol: "terminal", blurb: "A shell in the notch" },
 ];
+
+/// How tall the expanded notch is for a section, as a multiple of the compact body height.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Size {
+    #[default]
+    Compact,
+    Tall,
+    ExtraTall,
+}
+
+impl Size {
+    pub const ALL: [Size; 3] = [Size::Compact, Size::Tall, Size::ExtraTall];
+
+    pub fn scale(self) -> f64 {
+        match self {
+            Size::Compact => 1.0,
+            Size::Tall => 1.6,
+            Size::ExtraTall => 2.5,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Size::Compact => "Compact",
+            Size::Tall => "Tall",
+            Size::ExtraTall => "Extra tall",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Size::Compact => "compact",
+            Size::Tall => "tall",
+            Size::ExtraTall => "xtall",
+        }
+    }
+}
 
 /// Index of Music in [`SECTIONS`].
 const MUSIC: usize = 3;
@@ -31,13 +69,15 @@ const MUSIC: usize = 3;
 pub struct Settings {
     /// Indexed like [`SECTIONS`]. Never all true: one section always stays on.
     pub hidden: [bool; SECTIONS.len()],
+    /// Indexed like [`SECTIONS`].
+    pub sizes: [Size; SECTIONS.len()],
     pub wing_music: bool,
     pub wing_focus: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { hidden: [false; SECTIONS.len()], wing_music: true, wing_focus: true }
+        Self { hidden: [false; SECTIONS.len()], sizes: [Size::Compact; SECTIONS.len()], wing_music: true, wing_focus: true }
     }
 }
 
@@ -101,6 +141,15 @@ fn parse(text: &str) -> Settings {
                     }
                 }
             }
+            "size" => {
+                for entry in value.split(',') {
+                    let Some((name, word)) = entry.split_once(':') else { continue };
+                    let size = Size::ALL.into_iter().find(|s| s.key() == word.trim());
+                    if let (Some(i), Some(size)) = (SECTIONS.iter().position(|s| s.key == name.trim()), size) {
+                        settings.sizes[i] = size;
+                    }
+                }
+            }
             "wing_music" => settings.wing_music = flag(settings.wing_music),
             "wing_focus" => settings.wing_focus = flag(settings.wing_focus),
             _ => {}
@@ -115,9 +164,11 @@ fn parse(text: &str) -> Settings {
 
 fn format(settings: &Settings) -> String {
     let hidden: Vec<&str> = SECTIONS.iter().zip(settings.hidden).filter(|(_, h)| *h).map(|(s, _)| s.key).collect();
+    let sizes: Vec<String> = SECTIONS.iter().zip(settings.sizes).filter(|(_, z)| *z != Size::Compact).map(|(s, z)| format!("{}:{}", s.key, z.key())).collect();
     format!(
-        "hidden={}\nwing_music={}\nwing_focus={}\n",
+        "hidden={}\nsize={}\nwing_music={}\nwing_focus={}\n",
         hidden.join(","),
+        sizes.join(","),
         settings.wing_music as u8,
         settings.wing_focus as u8,
     )
@@ -143,9 +194,25 @@ mod tests {
         settings.hidden[2] = true;
         settings.hidden[5] = true;
         settings.wing_music = false;
-        assert_eq!(format(&settings), "hidden=clips,terminal\nwing_music=0\nwing_focus=1\n");
+        assert_eq!(format(&settings), "hidden=clips,terminal\nsize=\nwing_music=0\nwing_focus=1\n");
         assert_eq!(parse(&format(&settings)), settings);
         assert_eq!(parse(&format(&Settings::default())), Settings::default());
+    }
+
+    #[test]
+    fn sizes_round_trip_listing_only_non_compact() {
+        let mut settings = Settings::default();
+        settings.sizes[1] = Size::Tall;
+        settings.sizes[5] = Size::ExtraTall;
+        assert!(format(&settings).contains("size=week:tall,terminal:xtall\n"));
+        assert_eq!(parse(&format(&settings)), settings);
+        assert_eq!(parse("hidden=clips\n").sizes, [Size::Compact; SECTIONS.len()]);
+    }
+
+    #[test]
+    fn unknown_size_words_and_sections_are_ignored() {
+        let settings = parse("size=terminal:huge,bogus:tall,week:tall,notes\n");
+        assert_eq!(settings.sizes, [Size::Compact, Size::Tall, Size::Compact, Size::Compact, Size::Compact, Size::Compact]);
     }
 
     #[test]

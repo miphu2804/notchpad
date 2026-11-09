@@ -26,7 +26,7 @@ use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 use crate::calendar::{self, Access, Calendar, Event, Reminder};
 use crate::clip_card::{self, ClipCard};
 use crate::clips::ClipHistory;
-use crate::settings::Settings;
+use crate::settings::{Settings, Size};
 use crate::settings_window::SettingsWindow;
 use crate::days;
 use crate::drop_column::DropColumn;
@@ -52,6 +52,8 @@ const HEIGHT: f64 = 330.0;
 /// The window extends this far above the screen. The pointer pressed against the top
 /// edge sits at exactly the screen's max Y, which would otherwise count as outside the
 /// window and make the panel close and reopen in a loop.
+/// The expanded panel keeps this much of the screen's visible height free.
+const SCREEN_MARGIN: f64 = 40.0;
 pub const TOP_SLOP: f64 = 1.0;
 /// MacBook Pro 14" (M4 Pro) notch, used on displays without one.
 const DEFAULT_NOTCH: (f64, f64) = (185.0, 32.0);
@@ -624,14 +626,13 @@ define_class!(
 
         #[unsafe(method(screenParametersChanged:))]
         fn screen_parameters_changed(&self, _notification: &NSNotification) {
-            let (collapsed, expanded, safe_top) = notch_rects(self.mtm());
+            let (collapsed, expanded, safe_top) = notch_rects(self.mtm(), self.tab_size());
             let ui = self.ui();
-            ui.expanded.set(expanded);
             ui.header_height.setConstant(header_band(safe_top));
             for constraint in &ui.notch_gaps {
                 constraint.setConstant(notch_gap(collapsed, safe_top));
             }
-            ui.motion.set_rects(collapsed, expanded);
+            self.place(collapsed, expanded);
             self.collapse_when_left();
         }
 
@@ -766,6 +767,29 @@ impl Controller {
         let ui = self.ui();
         ui.panel.makeKeyAndOrderFront(None);
         ui.panel.makeFirstResponder(Some(&ui.tasks.input));
+    }
+
+    /// Panel size of the section being shown.
+    fn tab_size(&self) -> Size {
+        self.ivars().settings.borrow().sizes[self.ivars().tab.get() as usize]
+    }
+
+    /// Springs the panel to the current section's height; the content follows at once.
+    fn fit_panel(&self) {
+        let (collapsed, expanded, _) = notch_rects(self.mtm(), self.tab_size());
+        if expanded != self.ui().expanded.get() {
+            self.place(collapsed, expanded);
+        }
+    }
+
+    fn place(&self, collapsed: NSRect, expanded: NSRect) {
+        let ui = self.ui();
+        ui.expanded.set(expanded);
+        ui.motion.set_rects(collapsed, expanded);
+        // In the dashboard window the content follows that window instead.
+        if !self.ivars().dashboard_open.get() {
+            ui.content.setFrameSize(NSSize::new(WIDTH, expanded.size.height - TOP_SLOP));
+        }
     }
 
     fn ui(&self) -> &Ui {
@@ -1072,6 +1096,7 @@ impl Controller {
                 w::style_pill(pill, &white(0.1), &white(0.8), 12.0);
             }
         }
+        self.fit_panel();
     }
 
     fn render_music(&self) {
@@ -1448,7 +1473,7 @@ impl Controller {
     /// Puts the content view back in the notch exactly as `build_ui` left it.
     fn hide_dashboard(&self) {
         let ui = self.ui();
-        attach_to_notch(&ui.content, &ui.panel.contentView().expect("panel has a content view"));
+        attach_to_notch(&ui.content, &ui.panel.contentView().expect("panel has a content view"), ui.expanded.get().size.height - TOP_SLOP);
         self.ivars().dashboard_open.set(false);
         ui.motion.drive_content(true);
     }
@@ -1541,7 +1566,7 @@ impl Controller {
     // ---- building ------------------------------------------------------------------
 
     fn build_ui(&self, mtm: MainThreadMarker) -> Ui {
-        let (collapsed, expanded, safe_top) = notch_rects(mtm);
+        let (collapsed, expanded, safe_top) = notch_rects(mtm, self.tab_size());
 
         let panel_alloc = mtm.alloc::<NotchPanel>().set_ivars(());
         let panel: Retained<NotchPanel> = unsafe {
@@ -1592,7 +1617,7 @@ impl Controller {
         // Fixed-size content laid out once at full size; hidden while collapsed.
         let content = NSView::new(mtm);
         content.setHidden(true);
-        attach_to_notch(&content, &background);
+        attach_to_notch(&content, &background, expanded.size.height - TOP_SLOP);
 
         // The header sits in the menu-bar band: close top-left as on macOS windows, then two
         // tab groups, one each side of the hardware notch.
@@ -2048,10 +2073,10 @@ impl Controller {
 
 /// Rounded label on a tinted fill, returned with the pill that holds it.
 /// The content view sits at its fixed size inside the notch shape; `NotchMotion` centres it.
-fn attach_to_notch(content: &NSView, background: &NSView) {
-    let ear = panel::ear(HEIGHT + TOP_SLOP);
+fn attach_to_notch(content: &NSView, background: &NSView, height: f64) {
+    let ear = panel::ear(height + TOP_SLOP);
     content.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
-    content.setFrame(NSRect::new(NSPoint::new(ear, 0.0), NSSize::new(WIDTH, HEIGHT)));
+    content.setFrame(NSRect::new(NSPoint::new(ear, 0.0), NSSize::new(WIDTH, height)));
     background.addSubview(content);
 }
 
@@ -2197,8 +2222,8 @@ fn fixed_size(view: &NSView, width: f64, height: f64) {
     view.heightAnchor().constraintEqualToConstant(height).setActive(true);
 }
 
-/// Returns (collapsed rect over the notch, expanded rect, hardware safe-area height).
-fn notch_rects(mtm: MainThreadMarker) -> (NSRect, NSRect, f64) {
+/// Returns (collapsed rect over the notch, expanded rect for `size`, hardware safe-area height).
+fn notch_rects(mtm: MainThreadMarker, size: Size) -> (NSRect, NSRect, f64) {
     let screens = NSScreen::screens(mtm);
     let screen = screens
         .iter()
@@ -2215,7 +2240,8 @@ fn notch_rects(mtm: MainThreadMarker) -> (NSRect, NSRect, f64) {
         // No hardware notch (external display): draw one of our own.
         DEFAULT_NOTCH
     };
-    let (collapsed, expanded) = frames_at_top(frame, width, height);
+    let body = body_height(size, screen.visibleFrame().size.height);
+    let (collapsed, expanded) = frames_at_top(frame, width, height, body);
     (collapsed, expanded, inset)
 }
 
@@ -2230,7 +2256,12 @@ fn notch_gap(collapsed: NSRect, safe_top: f64) -> f64 {
     if safe_top > 0.0 { collapsed.size.width / 2.0 + 8.0 } else { 0.0 }
 }
 
-fn frames_at_top(frame: NSRect, width: f64, height: f64) -> (NSRect, NSRect) {
+/// Height of the expanded body for `size`, kept clear of the screen's edges.
+fn body_height(size: Size, visible_height: f64) -> f64 {
+    (HEIGHT * size.scale()).min(visible_height - SCREEN_MARGIN)
+}
+
+fn frames_at_top(frame: NSRect, width: f64, height: f64, body: f64) -> (NSRect, NSRect) {
     let top = frame.origin.y + frame.size.height;
     let mid = frame.origin.x + frame.size.width / 2.0;
     // Body plus an ear on each side, extended TOP_SLOP above the screen.
@@ -2238,7 +2269,7 @@ fn frames_at_top(frame: NSRect, width: f64, height: f64) -> (NSRect, NSRect) {
         let ear = panel::ear(h + TOP_SLOP);
         NSRect::new(NSPoint::new(mid - w / 2.0 - ear, top - h), NSSize::new(w + 2.0 * ear, h + TOP_SLOP))
     };
-    (rect(width, height), rect(WIDTH, HEIGHT))
+    (rect(width, height), rect(WIDTH, body))
 }
 
 #[cfg(test)]
@@ -2268,6 +2299,14 @@ mod tests {
     }
 
     #[test]
+    fn body_height_scales_and_stays_on_screen() {
+        assert_eq!(body_height(Size::Compact, 1000.0), HEIGHT);
+        assert_eq!(body_height(Size::Tall, 1000.0), HEIGHT * 1.6);
+        assert_eq!(body_height(Size::ExtraTall, 1200.0), HEIGHT * 2.5);
+        assert_eq!(body_height(Size::ExtraTall, 700.0), 700.0 - SCREEN_MARGIN);
+    }
+
+    #[test]
     fn panel_tracks_screen_top_and_center_in_every_arrangement() {
         // Main, above, below, left and right: AppKit coordinates need not start at zero.
         for (x, y, w, h) in [
@@ -2279,7 +2318,7 @@ mod tests {
         ] {
             let screen = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
             for (width, height) in [DEFAULT_NOTCH, (185.0, 38.0)] {
-                let (collapsed, expanded) = frames_at_top(screen, width, height);
+                let (collapsed, expanded) = frames_at_top(screen, width, height, HEIGHT);
                 for rect in [collapsed, expanded] {
                     assert_eq!(rect.origin.y + rect.size.height, y + h + TOP_SLOP);
                     assert_eq!(rect.origin.x + rect.size.width / 2.0, x + w / 2.0);
