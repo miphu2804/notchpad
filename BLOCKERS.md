@@ -1,20 +1,24 @@
 ### [2026-11-09 15:24 UTC+07:00] — [Feature] Live acceptance of the new features
 
-**Status:** Open
+**Status:** Open (narrowed 2026-11-09 18:37 UTC+07:00)
 
 **Blocked by:**
-- The Mac's screen is locked (`ioreg` reports `CGSSessionScreenIsLocked = true`; still locked after waiting 15:2x–17:21), so no real UI can be driven: hover, the live spring animation, the right-click header menu, the export `NSSavePanel`, and the dashboard window on a real display.
-- Testing rules: tests must not trigger the Calendar, Reminders or Notifications permission prompts, and must not read or overwrite the user's clipboard. That excludes testing real EventKit fetch/complete, notification delivery and the ⌘C pasteboard write automatically. The current TCC grants can't be read without Full Disk Access.
+- Testing rules: tests must not trigger the Calendar, Reminders or Notifications permission prompts, must not read or overwrite the user's clipboard, and must not switch the user's Spaces.
 
 **Impact:**
-- Calendar and Reminders are verified only with injected events, plus unit tests on the pure placement code.
+- Calendar and Reminders are verified only with injected events.
 - Notifications are verified only through the pure `due_alerts` output.
-- Everything else is verified with hand-stepped PNG renders and unit tests.
+- ⌘C is verified only by the selection logic.
+- Space-collapse is verified only by posting the notification.
+- Already accepted with a scratch-HOME hook on 2026-11-09:
+  - the header menu items and ⌘,
+  - the Settings switches: hide, refuse the last one, wing, size, `settings.txt`
+  - the dashboard window: open, close, content returned to the notch
+  - the export JSON: tasks, notes, pomodoros
 
-**Next action:**
-After unlocking, the user:
-1. Clicks "Show calendar" / "Show reminders" in the Week tab and grants access, then checks that real events and reminders appear and that ticking one completes it in Reminders.app.
+**Next action:** the user:
+1. Clicks "Show calendar events" / "Show reminders" in Week, grants access, and checks that real items appear and that ticking one completes it in Reminders.app.
 2. Adds `test <time 2 min ahead>` and checks that the notification fires.
-3. Right-clicks the header → Export backup and checks the saved JSON.
-4. Selects text in the Terminal and presses ⌘C, then pastes it.
-5. Opens the dashboard window and closes it with ✕.
+3. Selects text in Terminal, presses ⌘C, and pastes it.
+4. Right-clicks the header → Export backup and saves through the real save panel.
+5. Swipes between Spaces with the panel open and checks that it folds into the notch.
