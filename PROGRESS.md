@@ -1,3 +1,21 @@
+### [2026-11-10 02:01 UTC+07:00] — [Feature] NotchGo rename, notch shape and glass, dot-matrix countdown, scrolling title
+
+**Done:**
+- Renamed the app to NotchGo (bundle, Info.plist, README, Reminders list); internal ids stay `notchpad`. MIT license.
+- Settings › Notch: Shape (Auto/Notch/Bar, a flat bar for Macs without a notch) and Background (Black/Liquid Glass, `NSGlassEffectView` on macOS 26, a dark blur before).
+- Settings › Focus › Notch countdown: Plain or Dot matrix, `mm:ss` in 5×7 LED dots with a moving ripple beside the collapsed notch; the card keeps its ring.
+- Music tab: a title or artist too long for its width scrolls (rest, one pass, seamless repeat) on a `CATextLayer`.
+- Linear: Connect with an empty key field opens Linear's API-key page.
+
+**Changed  files:**
+- `src/dot_matrix.rs`, `src/marquee.rs` — created
+- `src/ascii_timer.rs` — deleted
+- `src/panel.rs`, `src/controller.rs`, `src/live_activity.rs`, `src/notch_banner.rs`, `src/settings.rs`, `src/settings_window.rs`, `src/linear.rs`, `README.md` — modified
+
+**Flow explained:**
+- The dot countdown runs a 10 fps timer only while a session runs, the panel is collapsed and the wing is on; each tick sets the opacity of 175 dot layers.
+- The scrolling title is one Core Animation keyframe animation, so the app stays idle while it moves; the same text again never restarts it.
+
 ### [2026-11-10 01:19 UTC+07:00] — [Feature] Reminders sync, Shortcuts capture and OSS docs
 
 **Done:**
@@ -100,24 +118,4 @@ The Settings window receives an `on_insights` callback backed by a weak controll
 
 **Flow explained:**
 `reload_done_today` builds `Insights` from the log on each refresh and keeps today's pomodoro count for the goal row and break messages. Verified with 80 tests (the five `pomodoros` week tests went with the code; `insights` tests cover the same parsing) and renders of Workspace and Insights.
-
-### [2026-11-09 23:10 UTC+07:00] — [Feature] Insights page in the dashboard
-
-**Done:**
-- Insights tab in the dashboard window: stat cards (active days ring, streak, focus time, best day), a five-week heatmap with Focus/Pomodoros/Tasks tabs, month rings, 30-day pulse with Export PNG (save panel), moon calendar, and an empty state.
-- Pure `insights` module with per-day aggregates, streaks, best day and intensity levels, 14 unit tests (empty data, month-crossing streak, garbage lines).
-
-**Changed  files:**
-- `src/insights.rs`, `src/insights_chart.rs`, `src/insights_view.rs` — created
-- `src/controller.rs`, `src/widgets.rs`, `src/main.rs`, `README.md` — modified
-
-**Flow explained:**
-`refresh()` calls `render_insights()` only while the Insights tab is visible; it builds `Insights` from the pomodoro log and tasks and hands it to `InsightsView`. The heatmap and rings cover the last 36 days (`SPAN`, six week columns) instead of a year; the palette is purple (focus), green (tasks), orange (pomodoros), cream moons. `Chart` draws each plot with NSBezierPath and skips the redraw when the plot is unchanged, so there are no new timers. Verified with 85 tests, offscreen renders from a scratch HOME (60 and 300 days, empty), and 0.0% idle CPU.
-
-### [2026-11-09 22:58 UTC+07:00] — [UI] Vendor icons in Integrations
-
-**Done:**
-- Embedded the official Notion, Linear and Google Calendar PNG icons from their vendors; calendar marks sit side by side, without tint or redrawing. Asset sources are in `assets/integrations/README.md`.
-- Verified: 89 tests pass; real Settings window screenshot inspected at `/tmp/notchpad-finish/logos/vendor-icons.png`. Both Add buttons dispatched through AppKit in a scratch HOME and changed to Added; Claude Code's CLI was stubbed, while Desktop wrote its real JSON format in the scratch directory. Temporary render/action hooks removed.
-- Still unverified: real Claude configuration, Calendar permission/events, and Linear sync with a real key.
 
