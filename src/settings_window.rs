@@ -385,7 +385,7 @@ impl SettingsWindow {
             menu_row("cup.and.saucer", "Short break", None, minutes(&SHORT_BREAK_CHOICES, settings.short_break)),
             menu_row("sofa", "Long break", Some("After every fourth pomodoro"), minutes(&LONG_BREAK_CHOICES, settings.long_break)),
             menu_row("bell", "Task reminders", Some("A card under the notch for timed tasks"), Some((remind_items, remind_index, sel!(setFocusOption:)))),
-            menu_row("textformat", "Timer style", Some("Draw the countdown as animated text"), Some((TimerStyle::ALL.iter().map(|t| t.name().to_owned()).collect(), settings.timer_style as usize, sel!(setFocusOption:)))),
+            menu_row("textformat", "Notch countdown", Some("How the time beside the notch looks"), Some((TimerStyle::ALL.iter().map(|t| t.name().to_owned()).collect(), settings.timer_style as usize, sel!(setFocusOption:)))),
             Row { symbol: "speaker.wave.2", name: "Sound", blurb: Some("Chime when a session ends or a task is due"), switch: Some((settings.sound, sel!(toggleSound:))), ..Row::default() },
         ];
         let general = [Row { symbol: "power", name: "Open at login", switch: Some((opens_at_login(), sel!(toggleLogin:))), ..Row::default() }];
