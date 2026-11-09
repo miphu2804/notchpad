@@ -1,4 +1,4 @@
-### [2026-11-09 19:50 UTC+07:00] — [Fix] Signed builds keep permissions; block glyphs fill the cell
+### [2026-11-09 19:35 UTC+07:00] — [Fix] Signed builds keep permissions; block glyphs fill the cell
 
 **Done:**
 - `bundle.sh` signs with the first Apple Development identity in the keychain (ad-hoc when there is none). The designated requirement is now the identifier plus the certificate instead of the cdhash, so macOS keeps granted privacy permissions across rebuilds.
