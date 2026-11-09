@@ -13,6 +13,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSNumber, NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::{CABasicAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction, kCAMediaTimingFunctionEaseInEaseOut};
 
+use crate::dot_matrix::{self, COLS, ROWS};
 use crate::panel;
 use crate::widgets::{self as w, rgba};
 
@@ -34,6 +35,10 @@ const BAR_LOW: f64 = 0.25;
 /// One period per bar, none a multiple of another, so the bars never fall into step.
 const BAR_PERIODS: [f64; 4] = [0.47, 0.61, 0.38, 0.54];
 
+/// Centre-to-centre spacing of the dot-matrix countdown; [`COLS`] of it fits [`TIME_WIDTH`].
+const DOT_PITCH: f64 = 1.7;
+const DOT_SIZE: f64 = 1.4;
+
 const CORAL: (u8, u8, u8) = (217, 112, 90);
 const BREAK_GREEN: (u8, u8, u8) = (120, 190, 130);
 
@@ -43,8 +48,8 @@ pub struct Activity<'a> {
     pub music: Option<Option<Retained<NSImage>>>,
     /// `mm:ss` and whether it is a break, while a session runs or is paused.
     pub countdown: Option<(&'a str, bool)>,
-    /// The countdown is ASCII-styled text, which wants a fixed-pitch font.
-    pub mono: bool,
+    /// `Some(frame)` draws the countdown as LED dots, rippling at that animation frame.
+    pub dots: Option<u64>,
 }
 
 impl Activity<'_> {
@@ -71,6 +76,9 @@ pub struct LiveActivity {
     bar_layers: Vec<Retained<CALayer>>,
     animating: Cell<bool>,
     time: Retained<NSTextField>,
+    dots: Retained<NSView>,
+    /// One layer per dot, rows top first.
+    dot_layers: Vec<Retained<CALayer>>,
 }
 
 impl LiveActivity {
@@ -128,11 +136,30 @@ impl LiveActivity {
         time.setFrame(NSRect::new(NSPoint::new(time_x, y + (ART - 16.0) / 2.0), NSSize::new(TIME_WIDTH, 16.0)));
         time.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
 
-        for child in [&*art, &*bars] {
+        // Right-aligned in the label's place and centred on the artwork row.
+        let size = NSSize::new(COLS as f64 * DOT_PITCH, ROWS as f64 * DOT_PITCH);
+        let origin = NSPoint::new(time_x + TIME_WIDTH - size.width, y + ((ART - size.height) / 2.0).round());
+        let dots = NSView::initWithFrame(mtm.alloc(), NSRect::new(origin, size));
+        dots.setWantsLayer(true);
+        dots.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+        let host = dots.layer().expect("layer-backed view");
+        let inset = (DOT_PITCH - DOT_SIZE) / 2.0;
+        let dot_layers = (0..ROWS * COLS).map(|i| {
+            let (row, col) = (i / COLS, i % COLS);
+            let dot = CALayer::new();
+            // Layer y grows upwards, so the top row sits highest.
+            let at = NSPoint::new(col as f64 * DOT_PITCH + inset, (ROWS - 1 - row) as f64 * DOT_PITCH + inset);
+            dot.setFrame(NSRect::new(at, NSSize::new(DOT_SIZE, DOT_SIZE)));
+            dot.setCornerRadius(DOT_SIZE / 2.0);
+            host.addSublayer(&dot);
+            dot
+        }).collect();
+
+        for child in [&*art, &*bars, &*dots] {
             view.addSubview(child);
         }
         view.addSubview(&time);
-        Self { view, art, bars, bar_layers, animating: Cell::new(false), time }
+        Self { view, art, bars, bar_layers, animating: Cell::new(false), time, dots, dot_layers }
     }
 
     /// Fades the wings in or out and fills them; `visible` is false while the panel is open.
@@ -143,22 +170,32 @@ impl LiveActivity {
         }
         let music_only = activity.music.is_some() && activity.countdown.is_none();
         self.bars.setHidden(!music_only);
-        self.time.setHidden(activity.countdown.is_none());
+        self.time.setHidden(activity.countdown.is_none() || activity.dots.is_some());
+        self.dots.setHidden(activity.countdown.is_none() || activity.dots.is_none());
         if let Some((text, on_break)) = activity.countdown {
             let (r, g, b) = if on_break { BREAK_GREEN } else { CORAL };
-            // Digits keep one width in either font; the ASCII spinner needs the fixed-pitch one to stay in the wing.
-            let font = if activity.mono {
-                NSFont::monospacedSystemFontOfSize_weight(11.0, unsafe { NSFontWeightMedium })
-            } else {
-                NSFont::monospacedDigitSystemFontOfSize_weight(12.0, unsafe { NSFontWeightMedium })
-            };
-            self.time.setFont(Some(&font));
-            self.time.setStringValue(&NSString::from_str(text));
-            self.time.setTextColor(Some(&rgba(r, g, b, 1.0)));
+            match activity.dots {
+                Some(frame) => self.light_dots(text, frame, on_break),
+                None => {
+                    self.time.setStringValue(&NSString::from_str(text));
+                    self.time.setTextColor(Some(&rgba(r, g, b, 1.0)));
+                }
+            }
         }
         let shown = visible && activity.is_live();
         self.animate_bars(shown && music_only && !w::reduce_motion());
         w::fade(&self.view, if shown { 1.0 } else { 0.0 }, FADE_SECS);
+    }
+
+    /// White LED dots for focus, the break green for a break, as in the plain countdown.
+    fn light_dots(&self, text: &str, frame: u64, on_break: bool) {
+        let (r, g, b) = if on_break { BREAK_GREEN } else { (245, 245, 245) };
+        let color = rgba(r, g, b, 1.0).CGColor();
+        let opacity = dot_matrix::frame(text, frame);
+        for (i, dot) in self.dot_layers.iter().enumerate() {
+            dot.setBackgroundColor(Some(&color));
+            dot.setOpacity(opacity[i / COLS][i % COLS] as f32);
+        }
     }
 
     /// The bars bounce only while they can be seen. Core Animation runs them in the window

@@ -2,7 +2,7 @@
 //! what the collapsed notch may display.
 //!
 //! Plain `key=value` lines: `hidden=clips,terminal`, `size=terminal:xtall,clips:tall`,
-//! `wing_music=1`, `wing_focus=1`, `calendar=1` (show today's calendar events), `reminders=1` (two-way sync with the Reminders list "NotchGo"), `linear=1` (a Linear key is in the Keychain; the key itself is never written here), `timer_style=ring|ascii`, `focus=25`, `short_break=5`, `long_break=15`, `sound=1`,
+//! `wing_music=1`, `wing_focus=1`, `calendar=1` (show today's calendar events), `reminders=1` (two-way sync with the Reminders list "NotchGo"), `linear=1` (a Linear key is in the Keychain; the key itself is never written here), `timer_style=plain|dots`, `focus=25`, `short_break=5`, `long_break=15`, `sound=1`,
 //! `remind=10` (minutes ahead, `0` for only at the time, `off` for none).
 //! A missing file, a missing key, an unknown key or a garbled line leaves the default,
 //! which shows everything.
@@ -61,28 +61,28 @@ impl Size {
     }
 }
 
-/// How the focus card draws the session.
+/// How the countdown beside the collapsed notch looks.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum TimerStyle {
     #[default]
-    Ring,
-    Ascii,
+    Plain,
+    Dots,
 }
 
 impl TimerStyle {
-    pub const ALL: [TimerStyle; 2] = [TimerStyle::Ring, TimerStyle::Ascii];
+    pub const ALL: [TimerStyle; 2] = [TimerStyle::Plain, TimerStyle::Dots];
 
     pub fn name(self) -> &'static str {
         match self {
-            TimerStyle::Ring => "Ring",
-            TimerStyle::Ascii => "ASCII",
+            TimerStyle::Plain => "Plain",
+            TimerStyle::Dots => "Dot matrix",
         }
     }
 
     fn key(self) -> &'static str {
         match self {
-            TimerStyle::Ring => "ring",
-            TimerStyle::Ascii => "ascii",
+            TimerStyle::Plain => "plain",
+            TimerStyle::Dots => "dots",
         }
     }
 }
@@ -137,7 +137,7 @@ impl Default for Settings {
             calendar: false,
             reminders: false,
             linear: false,
-            timer_style: TimerStyle::Ring,
+            timer_style: TimerStyle::Plain,
             focus: 25,
             short_break: 5,
             long_break: 15,
@@ -319,12 +319,12 @@ mod tests {
     }
 
     #[test]
-    fn timer_style_is_a_ring_unless_the_file_says_ascii() {
-        assert_eq!(parse("").timer_style, TimerStyle::Ring);
-        assert_eq!(parse("timer_style=blocks\n").timer_style, TimerStyle::Ring);
-        let settings = parse("timer_style=ascii\n");
-        assert_eq!(settings.timer_style, TimerStyle::Ascii);
-        assert!(format(&settings).contains("timer_style=ascii\n"));
+    fn the_countdown_is_plain_unless_the_file_says_dots() {
+        assert_eq!(parse("").timer_style, TimerStyle::Plain);
+        assert_eq!(parse("timer_style=blocks\n").timer_style, TimerStyle::Plain);
+        let settings = parse("timer_style=dots\n");
+        assert_eq!(settings.timer_style, TimerStyle::Dots);
+        assert!(format(&settings).contains("timer_style=dots\n"));
         assert_eq!(parse(&format(&settings)), settings);
     }
 
