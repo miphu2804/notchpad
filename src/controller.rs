@@ -9,14 +9,14 @@ use objc2::runtime::AnyObject;
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSApplication, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
+    NSApplication, NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
     NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
     NSLayoutConstraintOrientation, NSMainMenuWindowLevel, NSScreen, NSScrollView, NSStackView,
     NSStackViewDistribution, NSStackViewGravity, NSTextAlignment, NSTextField, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
-use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 
 use crate::clip_card::{self, ClipCard};
@@ -114,7 +114,8 @@ struct Ui {
     focus: FocusCard,
     tasks: TaskCard,
     columns: Vec<Column>,
-    expanded: NSRect,
+    expanded: Cell<NSRect>,
+    header_top: Retained<NSLayoutConstraint>,
     motion: Retained<NotchMotion>,
 }
 
@@ -294,6 +295,17 @@ define_class!(
             }
         }
 
+        #[unsafe(method(screenParametersChanged:))]
+        fn screen_parameters_changed(&self, _notification: &NSNotification) {
+            let (collapsed, expanded, safe_top) = notch_rects(self.mtm());
+            let ui = self.ui();
+            ui.expanded.set(expanded);
+            ui.content.setFrameSize(NSSize::new(WIDTH, HEIGHT + safe_top));
+            ui.header_top.setConstant(safe_top);
+            ui.motion.set_rects(collapsed, expanded);
+            self.collapse_when_left();
+        }
+
         #[unsafe(method(redraw:))]
         fn redraw(&self, _arg: Option<&AnyObject>) {
             self.refresh();
@@ -319,6 +331,12 @@ impl Controller {
         this.ivars().ui.set(ui).ok().expect("ui is built once");
         this.ivars().seen_mtime.set(store::modified());
         unsafe {
+            // The controller lives for the process. Re-anchor after hot-plug, resolution,
+            // primary-display or arrangement changes instead of keeping startup coordinates.
+            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                this.target(), sel!(screenParametersChanged:),
+                Some(NSApplicationDidChangeScreenParametersNotification), None,
+            );
             // Lives for the whole process, so the returned timer handle is not kept.
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(2.0, this.target(), sel!(reload:), None, true);
             // Reading the pasteboard's change count is cheap, so copies show up within half a second.
@@ -394,7 +412,7 @@ impl Controller {
         let inside = |f: NSRect| {
             p.x >= f.origin.x && p.x <= f.origin.x + f.size.width && p.y >= f.origin.y && p.y <= f.origin.y + f.size.height
         };
-        inside(ui.panel.frame()) || (self.ivars().expanded.get() && inside(ui.expanded))
+        inside(ui.panel.frame()) || (self.ivars().expanded.get() && inside(ui.expanded.get()))
     }
 
     fn set_expanded(&self, on: bool) {
@@ -673,7 +691,7 @@ impl Controller {
     // ---- building ------------------------------------------------------------------
 
     fn build_ui(&self, mtm: MainThreadMarker) -> Ui {
-        let (collapsed, expanded, notch_height) = notch_rects(mtm);
+        let (collapsed, expanded, safe_top) = notch_rects(mtm);
 
         let panel_alloc = mtm.alloc::<NotchPanel>().set_ivars(());
         let panel: Retained<NotchPanel> = unsafe {
@@ -720,9 +738,9 @@ impl Controller {
         background.addTrackingArea(&tracking);
 
         // Fixed-size content laid out once at full size; hidden while collapsed.
-        // Sits between the notch's ears, below the off-screen slop.
-        let ear = panel::ear(HEIGHT + TOP_SLOP);
-        let content = NSView::initWithFrame(mtm.alloc(), NSRect::new(NSPoint::new(ear, 0.0), NSSize::new(WIDTH, HEIGHT)));
+        // Reserve the hardware notch above the header without shrinking the cards.
+        let ear = panel::ear(HEIGHT + safe_top + TOP_SLOP);
+        let content = NSView::initWithFrame(mtm.alloc(), NSRect::new(NSPoint::new(ear, 0.0), NSSize::new(WIDTH, HEIGHT + safe_top)));
         content.setHidden(true);
         background.addSubview(&content);
 
@@ -730,8 +748,9 @@ impl Controller {
         content.addSubview(&header);
         header.leadingAnchor().constraintEqualToAnchor_constant(&content.leadingAnchor(), 18.0).setActive(true);
         header.trailingAnchor().constraintEqualToAnchor_constant(&content.trailingAnchor(), -14.0).setActive(true);
-        header.topAnchor().constraintEqualToAnchor(&content.topAnchor()).setActive(true);
-        header.heightAnchor().constraintEqualToConstant(notch_height.max(32.0)).setActive(true);
+        let header_top = header.topAnchor().constraintEqualToAnchor_constant(&content.topAnchor(), safe_top);
+        header_top.setActive(true);
+        header.heightAnchor().constraintEqualToConstant(32.0).setActive(true);
 
         let (focus_view, focus) = self.build_focus_card(mtm);
         let (task_view, tasks) = self.build_task_card(mtm);
@@ -752,7 +771,7 @@ impl Controller {
         }
 
         let motion = NotchMotion::new(panel.clone(), content.clone(), collapsed, expanded, mtm);
-        Ui { panel, content, workspace, week, tab_workspace, tab_week, tab_clips, clips, focus, tasks, columns, expanded, motion }
+        Ui { panel, content, workspace, week, tab_workspace, tab_week, tab_clips, clips, focus, tasks, columns, expanded: Cell::new(expanded), header_top, motion }
     }
 
     fn build_header(&self, mtm: MainThreadMarker) -> (Retained<NSStackView>, Retained<NSButton>, Retained<NSButton>, Retained<NSButton>) {
@@ -1046,7 +1065,7 @@ fn fixed_size(view: &NSView, width: f64, height: f64) {
     view.heightAnchor().constraintEqualToConstant(height).setActive(true);
 }
 
-/// Returns (collapsed rect over the notch, expanded rect, notch height).
+/// Returns (collapsed rect over the notch, expanded rect, hardware safe-area height).
 fn notch_rects(mtm: MainThreadMarker) -> (NSRect, NSRect, f64) {
     let screens = NSScreen::screens(mtm);
     let screen = screens
@@ -1064,6 +1083,11 @@ fn notch_rects(mtm: MainThreadMarker) -> (NSRect, NSRect, f64) {
         // No hardware notch (external display): draw one of our own.
         DEFAULT_NOTCH
     };
+    let (collapsed, expanded) = frames_at_top(frame, width, height, inset);
+    (collapsed, expanded, inset)
+}
+
+fn frames_at_top(frame: NSRect, width: f64, height: f64, safe_top: f64) -> (NSRect, NSRect) {
     let top = frame.origin.y + frame.size.height;
     let mid = frame.origin.x + frame.size.width / 2.0;
     // Body plus an ear on each side, extended TOP_SLOP above the screen.
@@ -1071,5 +1095,39 @@ fn notch_rects(mtm: MainThreadMarker) -> (NSRect, NSRect, f64) {
         let ear = panel::ear(h + TOP_SLOP);
         NSRect::new(NSPoint::new(mid - w / 2.0 - ear, top - h), NSSize::new(w + 2.0 * ear, h + TOP_SLOP))
     };
-    (rect(width, height), rect(WIDTH, HEIGHT), height)
+    (rect(width, height), rect(WIDTH, HEIGHT + safe_top))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panel_tracks_screen_top_and_center_in_every_arrangement() {
+        // Main, above, below, left and right: AppKit coordinates need not start at zero.
+        for (x, y, w, h) in [
+            (0.0, 0.0, 1800.0, 1169.0),
+            (-411.0, 1169.0, 2560.0, 1440.0),
+            (0.0, -1440.0, 2560.0, 1440.0),
+            (-2560.0, 0.0, 2560.0, 1440.0),
+            (1800.0, 200.0, 2560.0, 1440.0),
+        ] {
+            let screen = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+            for ((width, height), safe_top) in [(DEFAULT_NOTCH, 0.0), ((185.0, 38.0), 38.0)] {
+                let (collapsed, expanded) = frames_at_top(screen, width, height, safe_top);
+                for rect in [collapsed, expanded] {
+                    assert_eq!(rect.origin.y + rect.size.height, y + h + TOP_SLOP);
+                    assert_eq!(rect.origin.x + rect.size.width / 2.0, x + w / 2.0);
+                }
+                assert_eq!(collapsed.size.height, height + TOP_SLOP);
+                assert_eq!(expanded.size.height, HEIGHT + safe_top + TOP_SLOP);
+                // Content starts below off-screen slop. The header starts below the
+                // safe area, leaving the same usable height on both display types.
+                let content_top = expanded.origin.y + expanded.size.height - TOP_SLOP;
+                let header_top = content_top - safe_top;
+                assert!(header_top <= y + h - safe_top);
+                assert_eq!(header_top - expanded.origin.y, HEIGHT);
+            }
+        }
+    }
 }
