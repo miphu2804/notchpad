@@ -768,7 +768,6 @@ impl Controller {
         this.reload_events();
         this.refresh();
         this.render_clips();
-
         this.ui().panel.orderFrontRegardless();
         this
     }
