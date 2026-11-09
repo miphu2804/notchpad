@@ -10,25 +10,29 @@ pub const WIDTH: usize = 26;
 const LOOP: u64 = 60;
 const BAR: usize = 21;
 
-/// Heavy box-drawing digits, three rows of three columns.
+/// Half-block digits, three rows of three columns: solid at small sizes where thin
+/// box-drawing strokes wash out.
 const DIGITS: [[&str; 3]; 10] = [
-    ["┏━┓", "┃ ┃", "┗━┛"],
-    [" ╻ ", " ┃ ", " ╹ "],
-    ["╺━┓", "┏━┛", "┗━╸"],
-    ["╺━┓", "╺━┫", "╺━┛"],
-    ["╻ ╻", "┗━┫", "  ╹"],
-    ["┏━╸", "┗━┓", "╺━┛"],
-    ["┏━╸", "┣━┓", "┗━┛"],
-    ["╺━┓", "  ┃", "  ╹"],
-    ["┏━┓", "┣━┫", "┗━┛"],
-    ["┏━┓", "┗━┫", "╺━┛"],
+    ["█▀█", "█ █", "▀▀▀"],
+    ["▄█ ", " █ ", "▄█▄"],
+    ["▀▀█", " ▄▀", "█▄▄"],
+    ["▀▀█", " ▀█", "▄▄█"],
+    ["█ █", "▀▀█", "  ▀"],
+    ["█▀▀", "▀▀█", "▄▄█"],
+    ["█▀▀", "█▀█", "▀▀▀"],
+    ["▀▀█", "  █", "  ▀"],
+    ["█▀█", "█▀█", "▀▀▀"],
+    ["█▀█", "▀▀█", "▄▄█"],
 ];
 const COLON: [&str; 3] = ["▪", " ", "▪"];
 const WAVE: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 /// Left-aligned partial blocks, one eighth to seven eighths of a cell.
 const PARTIAL: [char; 8] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
-const SPINNER_FOCUS: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-const SPINNER_BREAK: [char; 6] = ['◜', '◠', '◝', '◞', '◡', '◟'];
+/// Block elements only: other symbol ranges fall back to a font whose glyphs are not
+/// monospaced and would shift the centred label.
+const SPINNER_FOCUS: [char; 4] = ['▖', '▘', '▝', '▗'];
+/// A bar breathing in and out; its 12 steps divide [`LOOP`].
+const SPINNER_BREAK: [char; 12] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█', '▉', '▊', '▋', '▌'];
 /// Break scene: (glyph, start column, laps per loop). Different speeds so they drift apart.
 const BUBBLES: [(char, usize, u64); 6] = [('∘', 0, 1), ('·', 5, 2), ('○', 9, 1), ('∙', 14, 2), ('°', 18, 1), ('·', 22, 2)];
 
@@ -39,9 +43,9 @@ pub fn frame(remaining_secs: u64, total_secs: u64, frame: u64, on_break: bool) -
     let elapsed = total_secs.saturating_sub(remaining_secs);
     let fraction = if total_secs == 0 { 0.0 } else { (elapsed as f64 / total_secs as f64).min(1.0) };
     let (scene, spinner, label) = if on_break {
-        (bubbles(f), SPINNER_BREAK[f as usize / 2 % SPINNER_BREAK.len()], "break")
+        (bubbles(f), SPINNER_BREAK[f as usize % SPINNER_BREAK.len()], "break")
     } else {
-        (wave(f), SPINNER_FOCUS[f as usize % SPINNER_FOCUS.len()], "focus")
+        (wave(f), SPINNER_FOCUS[f as usize / 2 % SPINNER_FOCUS.len()], "focus")
     };
     let digits = big_clock(remaining_secs);
     let mut lines: Vec<String> = digits.iter().map(|row| center(row)).collect();
@@ -49,9 +53,9 @@ pub fn frame(remaining_secs: u64, total_secs: u64, frame: u64, on_break: bool) -
     lines.join("\n")
 }
 
-/// `⠋24:13`: the collapsed notch has room for little more than the time.
+/// `▖24:13`: the collapsed notch has room for little more than the time.
 pub fn wing(remaining_secs: u64, frame: u64) -> String {
-    let spinner = SPINNER_FOCUS[(frame % LOOP) as usize % SPINNER_FOCUS.len()];
+    let spinner = SPINNER_FOCUS[(frame % LOOP) as usize / 2 % SPINNER_FOCUS.len()];
     format!("{spinner}{:02}:{:02}", (remaining_secs / 60).min(99), remaining_secs % 60)
 }
 
@@ -117,8 +121,8 @@ mod tests {
     #[test]
     fn the_clock_draws_each_digit() {
         let rows = big_clock(24 * 60 + 13);
-        assert_eq!(rows[0], "╺━┓ ╻ ╻ ▪  ╻  ╺━┓");
-        assert_eq!(rows[2], "┗━╸   ╹ ▪  ╹  ╺━┛");
+        assert_eq!(rows[0], "▀▀█ █ █ ▪ ▄█  ▀▀█");
+        assert_eq!(rows[2], "█▄▄   ▀ ▪ ▄█▄ ▄▄█");
     }
 
     #[test]
@@ -144,7 +148,7 @@ mod tests {
             assert!(moved as u64 > LOOP * 3 / 4, "only {moved} of {LOOP} steps change the picture");
         }
         assert_eq!(wing(754, 3), wing(754, 3 + LOOP));
-        assert_ne!(wing(754, 3), wing(754, 4));
+        assert_ne!(wing(754, 3), wing(754, 5));
     }
 
     #[test]
@@ -154,7 +158,7 @@ mod tests {
 
     #[test]
     fn the_wing_is_compact() {
-        assert_eq!(wing(24 * 60 + 13, 0), "⠋24:13");
+        assert_eq!(wing(24 * 60 + 13, 0), "▖24:13");
         assert_eq!(wing(99999, 0).chars().count(), 6);
     }
 }
