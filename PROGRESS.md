@@ -119,3 +119,16 @@ The Settings window receives an `on_insights` callback backed by a weak controll
 **Flow explained:**
 `reload_done_today` builds `Insights` from the log on each refresh and keeps today's pomodoro count for the goal row and break messages. Verified with 80 tests (the five `pomodoros` week tests went with the code; `insights` tests cover the same parsing) and renders of Workspace and Insights.
 
+### [2026-11-09 23:10 UTC+07:00] — [Feature] Insights page in the dashboard
+
+**Done:**
+- Insights tab in the dashboard window: stat cards (active days ring, streak, focus time, best day), a five-week heatmap with Focus/Pomodoros/Tasks tabs, month rings, 30-day pulse with Export PNG (save panel), moon calendar, and an empty state.
+- Pure `insights` module with per-day aggregates, streaks, best day and intensity levels, 14 unit tests (empty data, month-crossing streak, garbage lines).
+
+**Changed  files:**
+- `src/insights.rs`, `src/insights_chart.rs`, `src/insights_view.rs` — created
+- `src/controller.rs`, `src/widgets.rs`, `src/main.rs`, `README.md` — modified
+
+**Flow explained:**
+`refresh()` calls `render_insights()` only while the Insights tab is visible; it builds `Insights` from the pomodoro log and tasks and hands it to `InsightsView`. The heatmap and rings cover the last 36 days (`SPAN`, six week columns) instead of a year; the palette is purple (focus), green (tasks), orange (pomodoros), cream moons. `Chart` draws each plot with NSBezierPath and skips the redraw when the plot is unchanged, so there are no new timers. Verified with 85 tests, offscreen renders from a scratch HOME (60 and 300 days, empty), and 0.0% idle CPU.
+
