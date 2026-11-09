@@ -1,3 +1,25 @@
+### [2026-11-09 18:25 UTC+07:00] — [Feature] Settings window, live waveform, countdown wing, install README
+
+**Done:**
+- Settings window (⌘, or the header menu): show or hide each section, and turn the collapsed-notch music and focus wings on or off. Saved in `settings.txt`.
+- The collapsed notch shows white animated bars while music plays. It is pure Core Animation, so it adds no CPU when idle and stops when Reduce Motion is on.
+- The countdown wing is widened to 50 pt and its digits are right-aligned. Measured clearance from the hardware notch is 7.2 pt.
+- The focus card's tomatoes sit in one row of 22 pt.
+- The two always-on timers get tolerance so their wakeups can be coalesced.
+- README rewritten with an Install for Mac button that points to the latest release zip.
+
+**Changed  files:**
+- `src/settings.rs` — created
+- `src/settings_window.rs` — created
+- `src/live_activity.rs` — modified
+- `src/controller.rs` — modified
+- `src/panel.rs` — modified
+- `README.md` — modified
+- `.gitignore` — modified
+
+**Flow explained:**
+`Settings::load()` runs at startup. `render_tabs` hides the pills of hidden sections and falls back to the first visible tab. `sync_activity` reads the wing flags. `SettingsWindow` saves each change and calls back into the controller, which applies it live. `LiveActivity::animate_bars` only adds or removes the CA animation when the shown state changes.
+
 ### [2026-11-09 15:18 UTC+07:00] — [Feature] Task alerts, timer +5/stopwatch, JSON export, dashboard window
 
 **Done:**
@@ -143,16 +165,3 @@ A ♪ tab shows what Apple Music or Spotify is playing: artwork (Music cover via
 
 **Flow explained:**
 `NSDistributedNotificationCenter` delivers the players' state notifications. `info_map` turns userInfo into strings, `parse` builds a `Track` (Stopped means none), and `apply` keeps the artwork when the track is unchanged. AppleScript runs only when the player app is already running, so a closed app is never launched.
-
-### [2026-11-09 13:55 UTC+07:00] — [Feature] Smart quick-add and right-click task menu
-
-**Done:**
-Typing `gym 6pm !high #health 45m tomorrow` in any add-task field now fills the time (18:00), priority, project, estimate and day, and keeps "gym" as the title. Times: `17:30`, `5pm`, `5:30pm`, `9h`, `9h30` (a preceding "at"/"lúc" is dropped). Priority: `!high`/`!!!`, `!med`/`!!`, `!low`/`!`. Estimate: `30m`, `45min`, `~1.5h`. Day: `today`, `tomorrow`, `tmr`. Plain numbers stay in the title. Right-clicking a task in the Today card or the Week board offers Move to Inbox / Today / Tomorrow and Delete; deleting keeps the focus card on the same task.
-
-**Changed  files:**
-- `src/quick_add.rs` — created (`parse`, 7 unit tests)
-- `src/controller.rs` — modified (`add_task` uses `quick_add::parse`; `task_menu`, `reschedule`, `deleteTask:`, `moveToInbox:`/`moveToToday:`/`moveToTomorrow:`)
-- `src/main.rs` — modified (module)
-
-**Flow explained:**
-`add_task` picks the field's default day (Inbox empty, Tomorrow column, else today) and passes the text to `quick_add::parse`, which takes recognised tokens out of the title. Each rendered `ListRow` gets an `NSMenu` whose items carry the task index in their tag; a right-click on any part of the row climbs the responder chain to that menu. Verified with a temporary hook on a scratch HOME: the menu actions delete and reschedule, remap focus and save `tasks.txt`.
