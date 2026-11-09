@@ -1,3 +1,25 @@
+### [2026-11-09 15:18 UTC+07:00] — [Feature] Task alerts, timer +5/stopwatch, JSON export, dashboard window
+
+**Done:**
+Closed the remaining feature gaps, one Sonnet thread per feature, each accepted and merged with `--no-ff`. Tasks with a day and time get a local notification at that time; the next 7 days are synced after each save, and authorization is asked on the first timed save, only in the bundled app. Focus timer: +5 min (also while paused), and a stopwatch duration that counts up and logs its minutes on End. Completed tasks are stamped with a `done_on` day, which is an optional 9th column so old files still load. The insights strip shows tasks done this week. The header's right-click menu holds "Open dashboard window", which moves the same content view into a resizable window, and "Export backup (JSON)…", which writes tasks, notes and the pomodoro log through a save panel. Closing the window or pressing the header ✕ returns the view to the notch. Verified with 57 unit tests and a hook that opened the dashboard, pressed ✕ and expanded the notch: the window closed, the app kept running, and the notch PNG matched the original. Idle CPU 0.0% after the install.
+
+**Changed  files:**
+- `src/task_alerts.rs` — created
+- `src/export.rs` — created
+- `src/controller.rs` — modified
+- `src/pomodoros.rs` — modified
+- `src/store.rs` — modified
+- `src/bin/notchpad-mcp.rs` — modified
+- `src/main.rs` — modified
+- `src/notch_motion.rs` — modified
+- `Cargo.toml`, `Cargo.lock` — modified
+
+**Flow explained:**
+- Save tasks → `task_alerts::sync` turns the pure `due_alerts` into `UNCalendarNotificationTrigger` requests with stable FNV ids.
+- Timer: the `STOPWATCH` index runs `run_stopwatch` from `since`; `next_duration` and `end_log_minutes` stay pure.
+- Header menu → `openDashboard:` → `show_dashboard`, which reparents `ui.content`. Closing calls `windowWillClose:` → `hide_dashboard` → `attach_to_notch`.
+- `exportBackup:` → `NSSavePanel` → `export::write`.
+
 ### [2026-11-09 14:56 UTC+07:00] — [Feature] Reminders in the Week tab and focus insights
 
 **Done:**
@@ -22,6 +44,7 @@ The Today and Tomorrow columns list that day's calendar events above the tasks: 
 - `src/calendar.rs` — created
 - `src/controller.rs` — modified
 - `src/main.rs` — modified
+- `src/notch_motion.rs` — modified
 - `Cargo.toml`, `Cargo.lock` — modified (`objc2-event-kit`, `block2`)
 - `macos/Info.plist` — modified (`NSCalendarsFullAccessUsageDescription`)
 
@@ -38,6 +61,7 @@ The collapsed notch grows two 34 pt wings while something is live: the playing t
 - `src/notch_motion.rs` — modified
 - `src/controller.rs` — modified
 - `src/main.rs` — modified
+- `src/notch_motion.rs` — modified
 - `src/terminal_view.rs` — modified
 - `src/terminal_session.rs` — modified
 
@@ -56,7 +80,7 @@ The Terminal tab is now a real terminal: the user's login shell in a PTY, emulat
 - `src/terminal_palette.rs` — created
 - `src/shell.rs` — deleted
 - `src/controller.rs` — modified
-- `Cargo.toml` — modified
+- `Cargo.toml`, `Cargo.lock` — modified
 
 **Flow explained:**
 `TerminalSession` spawns the PTY and alacritty's event loop; its listener hops to the main queue via `dispatch2` to mark `TerminalView` dirty, so nothing polls. `TerminalView` draws the grid per row, maps keys through `terminal_keys`, and resizes the PTY to its bounds. While the view is first responder the panel stays open.
@@ -87,6 +111,7 @@ The focus card is now "Today's pomodoros": 8 pixel tomatoes (ripe red when done,
 - `src/controller.rs` — modified
 - `src/days.rs` — modified
 - `src/main.rs` — modified
+- `src/notch_motion.rs` — modified
 
 **Flow explained:**
 The focus timer ticks only while running; on finish it appends a `done` line and starts a break, and End appends `ended`. The count re-reads the log on each refresh. Terminal: Return calls `run_command`, which handles `cd` and the interactive-program hint in `Shell::submit`, or spawns the child in its own process group; two reader threads send chunks over mpsc, and a 0.1 s timer that exists only while a command runs drains them into the output view, trimmed to 2000 lines.
@@ -131,16 +156,3 @@ Typing `gym 6pm !high #health 45m tomorrow` in any add-task field now fills the 
 
 **Flow explained:**
 `add_task` picks the field's default day (Inbox empty, Tomorrow column, else today) and passes the text to `quick_add::parse`, which takes recognised tokens out of the title. Each rendered `ListRow` gets an `NSMenu` whose items carry the task index in their tag; a right-click on any part of the row climbs the responder chain to that menu. Verified with a temporary hook on a scratch HOME: the menu actions delete and reschedule, remap focus and save `tasks.txt`.
-
-### [2026-11-09 13:20 UTC+07:00] — [Feature] Header in the bands beside the notch
-
-**Done:**
-The open panel no longer leaves an empty black strip under the hardware notch. The header now fills the menu-bar band: close sits at the far left, the Workspace/Week/Clips tabs sit right of the notch, and the cards start right below. The logo and app name were dropped from the panel (`src/logo.rs` deleted). The panel stays 720 pt wide (an 840 pt try covered menu-bar items). The panel also re-anchors when displays are plugged, unplugged or rearranged, and the header band and notch gap follow the new screen.
-
-**Changed  files:**
-- `src/controller.rs` — modified (header split into close button and tabs group, `header_band`, `notch_gap`, `screenParametersChanged:`)
-- `src/notch_motion.rs` — modified (`set_rects` for display changes)
-- `src/logo.rs` — deleted; `src/main.rs` — modified
-
-**Flow explained:**
-`build_ui` gives the header a band of `max(safe_top, 32)` at the top of the content. The tabs group has a required constraint keeping its leading edge at least half the notch width plus 8 pt right of the centre, because the panel is centred on the notch. `screenParametersChanged:` recomputes the notch rects, updates both constants and passes the new rects to `NotchMotion`.
