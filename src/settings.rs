@@ -2,7 +2,7 @@
 //! what the collapsed notch may display.
 //!
 //! Plain `key=value` lines: `hidden=clips,terminal`, `size=terminal:xtall,clips:tall`,
-//! `wing_music=1`, `wing_focus=1`, `calendar=1` (show today's calendar events), `reminders=1` (two-way sync with the Reminders list "Overhang"), `linear=1` (a Linear key is in the Keychain; the key itself is never written here), `focus=25`, `short_break=5`, `long_break=15`, `sound=1`,
+//! `wing_music=1`, `wing_focus=1`, `calendar=1` (show today's calendar events), `reminders=1` (two-way sync with the Reminders list "Notchday"), `linear=1` (a Linear key is in the Keychain; the key itself is never written here), `focus=25`, `short_break=5`, `long_break=15`, `sound=1`,
 //! `remind=10` (minutes ahead, `0` for only at the time, `off` for none).
 //! A missing file, a missing key, an unknown key or a garbled line leaves the default,
 //! which shows everything.
@@ -82,7 +82,7 @@ pub struct Settings {
     /// Whether today's calendar events show beside the tasks. Off until the user turns it on,
     /// which is also when macOS is asked for calendar access.
     pub calendar: bool,
-    /// Whether tasks sync with the Reminders list "Overhang". Off until the user turns it on,
+    /// Whether tasks sync with the Reminders list "Notchday". Off until the user turns it on,
     /// which is also when macOS is asked for Reminders access.
     pub reminders: bool,
     /// Whether Linear is connected. Only this flag lives in `settings.txt`; the key is in the Keychain,
