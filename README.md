@@ -75,7 +75,7 @@ Turn on **Show calendar events** to see today's events, read-only, above your ta
 Under **Settings › Integrations › Linear**, either:
 
 - **Connect** with OAuth (browser authorization), or
-- paste a personal API key from Linear › Settings › Security & access (shown when the build has no OAuth client ID).
+- paste a personal API key from Linear › Settings › Security & access (shown when the build has no OAuth client ID). Clicking **Connect** with the field empty opens that page.
 
 Your open assigned issues become tasks on their due date (or today), refreshed when the app opens and every 10 minutes. Completing one in NotchGo moves the issue to its team's completed state. Credentials are stored in the macOS Keychain.
 

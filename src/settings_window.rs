@@ -194,7 +194,8 @@ define_class!(
                 let field = pane.viewWithTag(FIELD + LINEAR_ROW).and_then(|v| v.downcast::<NSTextField>().ok());
                 let key = field.as_ref().map(|f| f.stringValue().to_string()).unwrap_or_default();
                 if key.trim().is_empty() {
-                    return self.refresh_integrations(LINEAR_ROW, Some("Paste a personal API key first".to_owned()));
+                    let hint = linear::open_key_page().map_or_else(|e| e, |()| "Paste the new key here, then Connect".to_owned());
+                    return self.refresh_integrations(LINEAR_ROW, Some(hint));
                 }
                 if let Err(error) = linear::connect_key(key.trim()) {
                     return self.refresh_integrations(LINEAR_ROW, Some(error));
@@ -578,7 +579,7 @@ impl SettingsWindow {
             _ if linear_pending => "Waiting for Linear authorization…",
             _ if linear_on => "Syncing your assigned issues",
             _ if linear::oauth_client_id().is_some() => "Connects with Linear using OAuth",
-            _ => "Key from Security & access",
+            _ => "Connect opens Linear to make a key",
         };
         if let Some(label) = pane.viewWithTag(STATUS + LINEAR_ROW).and_then(|v| v.downcast::<NSTextField>().ok()) {
             label.setStringValue(&NSString::from_str(linear_blurb));
