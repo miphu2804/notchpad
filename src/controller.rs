@@ -1913,9 +1913,10 @@ impl Controller {
         let ends = w::label("", 10.0, unsafe { NSFontWeightRegular }, &white(0.55), mtm);
         let ring = FocusRing::new(mtm);
         ring.heightAnchor().constraintEqualToAnchor(&ring.widthAnchor()).setActive(true);
-        ring.widthAnchor().constraintGreaterThanOrEqualToConstant(124.0).setActive(true);
+        ring.widthAnchor().constraintGreaterThanOrEqualToConstant(120.0).setActive(true);
         let preferred = ring.widthAnchor().constraintEqualToConstant(164.0);
-        preferred.setPriority(750.0);
+        // In the compact notch the ring must shrink before any text row is compressed.
+        preferred.setPriority(200.0);
         preferred.setActive(true);
         let clock = w::stack(&[&time, &ends], true, 0.0, mtm);
         clock.setAlignment(NSLayoutAttribute::CenterX);

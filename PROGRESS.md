@@ -1,3 +1,14 @@
+### [2026-11-10 00:12 UTC+07:00] — [Fix] Preserve text height in the compact focus card
+
+**Done:**
+- The ring now shrinks before text rows. Its minimum allows the full phase, task and daily-total labels in the real 330 pt notch, while taller views retain the larger ring.
+
+**Changed  files:**
+- `src/controller.rs` — modified
+
+**Flow explained:**
+The preferred ring size previously competed with text compression, producing phase/count label heights of 8/7 pt instead of their 14 pt intrinsic heights and a zero-height task row. Lowering the ring preference to 200 and its minimum to 120 yields a 123 pt ring and restores every text row to its intrinsic height. Verified: reproduced before/after on the actual expanded notch, asserted all seven label heights, inspected `/tmp/notchpad-clipping/before.png` and `after.png`, and ran 100 passing tests. Temporary measurement/render hooks removed.
+
 ### [2026-11-10 00:06 UTC+07:00] — [UI] Pomodoro ring and four pixel tomatoes
 
 **Done:**
@@ -112,20 +123,3 @@ The Settings window receives an `on_insights` callback backed by a weak controll
 
 **Flow explained:**
 The 2 s `reload:` tick calls `remind_tasks`, which works only when the minute changes: `task_alerts::reminders_between` returns today's open timed tasks whose reminder minute fell since the last check, at most 5 min back. `alert` rings the chime and pins the panel open with `orderFrontRegardless`, not as key window. Collapsing clears the toasts. Verified by hook logs (reminder opens the panel with `key=false`; delete, Undo and collapse states), renders of the reminder, Undo and General pane, 64 tests, and 0.0% idle CPU.
-
-### [2026-11-09 20:55 UTC+07:00] — [Feature] Task priorities, clear completed; Week and Notes removed
-
-**Done:**
-- Today's tasks sort by priority (high, medium, low, none), then by time. Right-click › Priority sets it. The coloured dots beside the input pick the priority of new tasks, and a typed `!high` still wins.
-- Check circles take the priority colour; the priority word in the metadata line is tinted. Completed tasks are struck through.
-- Completed › Clear takes today's completed tasks off the list. Their `done_on` stays, so the weekly count is unchanged.
-- The Week and Notes tabs, the calendar and reminders reading and the drag-between-days columns are gone. `notes.txt` stays on disk and in backups. Tasks without a day (Inbox) stay in `tasks.txt` and are reached through the MCP server.
-- Header icon pills are 24 pt like the text pills (`alignmentRectInsets` override). Clips is an icon.
-
-**Changed  files:**
-- `src/controller.rs`, `src/settings.rs`, `src/store.rs`, `src/list_row.rs`, `src/pill_button.rs`, `src/main.rs` — modified
-- `src/calendar.rs`, `src/drop_column.rs`, `src/note_view.rs`, `src/task_row.rs` — deleted
-- `Cargo.toml`, `macos/Info.plist`, `README.md` — modified
-
-**Flow explained:**
-`render_task_card` sorts open tasks by `(priority_rank, untimed, time)`. `setPriority:` (menu) and `pickPriority:` (dots) write the priority or the default for new tasks; `push_task` applies it when the typed line names none. `clearCompleted:` empties the `day` of today's done tasks. Verified by renders of the sort, tint, dots and strike, and by logs of the header tabs and the task menu; 59 tests pass.
