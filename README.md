@@ -8,7 +8,7 @@ Apple Silicon, macOS 14 or later. It is written in Rust with AppKit, runs at 0% 
 
 ## Features
 
-- **Workspace.** Today's tasks with quick add (`gym 6pm !high #health 45m tomorrow`), sorted by priority. Pick a priority from the coloured dots beside the input or by right-clicking a task. A deleted task can be brought back with Undo for a few seconds. A pomodoro card shows today's tomatoes, a stopwatch, +5 min and weekly focus stats.
+- **Workspace.** Today's tasks with quick add (`gym 6pm !high #health 45m tomorrow`), sorted by priority. Typing `!`, `#` or `/` shows completions for priorities, projects and words; ↑↓ choose and Tab takes one. ▶ makes a task the pomodoro's focus. Pick a priority from the coloured dots beside the input or by right-clicking a task. A deleted task can be brought back with Undo for a few seconds. A pomodoro card shows today's tomatoes, a stopwatch, +5 min and weekly focus stats.
 - **Collapsed notch.** Shows album art with a moving waveform while music plays, or the focus countdown.
 - **Playing.** Now playing from any app (Spotify, Music, YouTube in a browser), with playback controls.
 - **Clips.** A short clipboard history.

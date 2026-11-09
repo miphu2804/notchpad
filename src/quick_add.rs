@@ -42,6 +42,40 @@ pub fn parse(input: &str, default_day: &str, today: &str, tomorrow: &str) -> Tas
     task
 }
 
+/// Words offered after `/`, in the order shown; `#` projects are added from the task list.
+const VOCABULARY: [&str; 10] = ["today", "tomorrow", "!high", "!medium", "!low", "9am", "2pm", "6pm", "25m", "~1h"];
+const PRIORITIES: [&str; 3] = ["!high", "!medium", "!low"];
+/// More would not fit on the strip above the input.
+const MAX_SUGGESTIONS: usize = 6;
+
+/// Completions for the word being typed at the end of `text`: priorities after `!`, the given
+/// projects after `#`, and the whole vocabulary (projects included) after `/`, each narrowed
+/// by what follows the trigger. Empty once the word is finished with a space.
+pub fn suggestions(text: &str, projects: &[String]) -> Vec<String> {
+    let Some(word) = text.split(char::is_whitespace).next_back().filter(|w| !w.is_empty()) else { return Vec::new() };
+    let tags = projects.iter().map(|p| format!("#{p}"));
+    let (candidates, typed): (Vec<String>, String) = match word.chars().next() {
+        Some('!') => (PRIORITIES.map(String::from).to_vec(), word.to_lowercase()),
+        Some('#') => (tags.collect(), word.to_lowercase()),
+        Some('/') => (VOCABULARY.map(String::from).into_iter().chain(tags).collect(), word[1..].to_lowercase()),
+        _ => return Vec::new(),
+    };
+    candidates
+        .into_iter()
+        .filter(|c| {
+            let c = c.to_lowercase();
+            c.starts_with(&typed) || c.trim_start_matches(['!', '#', '~']).starts_with(&typed)
+        })
+        .take(MAX_SUGGESTIONS)
+        .collect()
+}
+
+/// `text` with its last word replaced by `choice` and a space, ready for the next word.
+pub fn complete(text: &str, choice: &str) -> String {
+    let kept = text.rfind(char::is_whitespace).map_or("", |i| &text[..=i]);
+    format!("{kept}{choice} ")
+}
+
 /// `HH:MM` (24-hour) for a clock time, or `None` if the word isn't one.
 fn clock(word: &str) -> Option<String> {
     let (body, pm) = match word.strip_suffix("pm") {
@@ -150,5 +184,41 @@ mod tests {
     #[test]
     fn only_tokens_keeps_the_input_as_title() {
         assert_eq!(quick("#work").text, "#work");
+    }
+
+    #[test]
+    fn suggests_by_trigger_and_narrows_by_prefix() {
+        let projects = vec!["Work".to_owned(), "Health".to_owned()];
+        assert_eq!(suggestions("call mom !", &projects), ["!high", "!medium", "!low"]);
+        assert_eq!(suggestions("call mom !m", &projects), ["!medium"]);
+        assert_eq!(suggestions("gym #he", &projects), ["#Health"]);
+        assert_eq!(suggestions("gym /to", &projects), ["today", "tomorrow"]);
+        assert_eq!(suggestions("gym /w", &projects), ["#Work"]);
+        assert_eq!(suggestions("gym /1", &projects), ["~1h"]);
+    }
+
+    #[test]
+    fn no_suggestions_for_plain_or_finished_words() {
+        let projects = vec!["Work".to_owned()];
+        assert!(suggestions("", &projects).is_empty());
+        assert!(suggestions("gym", &projects).is_empty());
+        assert!(suggestions("gym !high ", &projects).is_empty());
+        assert!(suggestions("gym !x", &projects).is_empty());
+        assert!(suggestions("gym #", &[]).is_empty());
+    }
+
+    #[test]
+    fn complete_replaces_the_last_word() {
+        assert_eq!(complete("call mom !h", "!high"), "call mom !high ");
+        assert_eq!(complete("/tom", "tomorrow"), "tomorrow ");
+        assert_eq!(complete("gym  #he", "#Health"), "gym  #Health ");
+    }
+
+    #[test]
+    fn every_suggestion_is_understood_by_the_parser() {
+        for word in VOCABULARY.iter().chain(&PRIORITIES) {
+            let task = parse(&format!("x {word}"), "D", "T", "M");
+            assert_eq!(task.text, "x", "{word} was left in the title");
+        }
     }
 }
