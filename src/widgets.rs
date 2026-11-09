@@ -13,6 +13,9 @@ use objc2_foundation::NSString;
 
 use crate::pill_button::PillButton;
 
+/// The dark card surface shared by the notch and the dashboard.
+pub const SURFACE: (u8, u8, u8) = (24, 25, 27);
+
 pub fn rgba(r: u8, g: u8, b: u8, a: f64) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, a)
 }

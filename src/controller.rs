@@ -25,6 +25,8 @@ use crate::settings::{self as prefs, Settings, Size};
 use crate::settings_window::SettingsWindow;
 use crate::days;
 use crate::export;
+use crate::insights::Insights;
+use crate::insights_view::InsightsView;
 use crate::list_row::{self, ListRow};
 use crate::live_activity::{Activity, LiveActivity};
 use crate::notch_banner::{NotchBanner, Notice};
@@ -39,7 +41,7 @@ use crate::week_bars::{self, WeekBars};
 use crate::panel::{self, FileDrag, NotchPanel, NotchShape};
 use crate::store::{self, Task};
 use crate::task_alerts;
-use crate::widgets::{self as w, rgba};
+use crate::widgets::{self as w, SURFACE, rgba};
 
 const WIDTH: f64 = 720.0;
 const HEIGHT: f64 = 330.0;
@@ -79,7 +81,6 @@ const REMIND_GRACE_MIN: u32 = 5;
 const TOMATO_SIZE: f64 = 22.0;
 const CORAL: (u8, u8, u8) = (217, 112, 90);
 /// Cards and the controls on them, in the near-black, faintly cool greys of Linear's dark theme.
-const SURFACE: (u8, u8, u8) = (24, 25, 27);
 const SURFACE_RAISED: (u8, u8, u8) = (40, 41, 45);
 
 fn tone((r, g, b): (u8, u8, u8)) -> Retained<NSColor> {
@@ -156,10 +157,12 @@ enum Tab {
     Clips,
     Music,
     Terminal,
+    /// Only in the dashboard window; not a notch section, so it has no setting.
+    Insights,
 }
 
 impl Tab {
-    /// In header order, like [`crate::settings::SECTIONS`].
+    /// The notch sections in header order, like [`crate::settings::SECTIONS`].
     const ALL: [Tab; 4] = [Tab::Workspace, Tab::Clips, Tab::Music, Tab::Terminal];
 }
 
@@ -169,6 +172,7 @@ struct Header {
     left: Retained<NSStackView>,
     right: Retained<NSStackView>,
     workspace: Retained<NSButton>,
+    insights: Retained<NSButton>,
     clips: Retained<NSButton>,
     music: Retained<NSButton>,
     terminal: Retained<NSButton>,
@@ -179,12 +183,14 @@ struct Ui {
     content: Retained<NSView>,
     workspace: Retained<NSStackView>,
     tab_workspace: Retained<NSButton>,
+    tab_insights: Retained<NSButton>,
     tab_clips: Retained<NSButton>,
     tab_music: Retained<NSButton>,
     tab_terminal: Retained<NSButton>,
     clips: ClipsView,
     music: MusicView,
     terminal: TerminalPane,
+    insights: Retained<InsightsView>,
     focus: FocusCard,
     tasks: TaskCard,
     expanded: Cell<NSRect>,
@@ -499,6 +505,12 @@ define_class!(
         #[unsafe(method(showWorkspace:))]
         fn show_workspace(&self, _sender: &AnyObject) {
             self.ivars().tab.set(Tab::Workspace);
+            self.refresh();
+        }
+
+        #[unsafe(method(showInsights:))]
+        fn show_insights(&self, _sender: &AnyObject) {
+            self.ivars().tab.set(Tab::Insights);
             self.refresh();
         }
 
@@ -821,7 +833,7 @@ impl Controller {
 
     /// Panel size of the section being shown.
     fn tab_size(&self) -> Size {
-        self.ivars().settings.borrow().sizes[self.ivars().tab.get() as usize]
+        self.ivars().settings.borrow().sizes.get(self.ivars().tab.get() as usize).copied().unwrap_or_default()
     }
 
     /// Springs the panel to the current section's height; the content follows at once.
@@ -954,6 +966,7 @@ impl Controller {
         self.render_focus();
         self.render_task_card();
         self.render_music();
+        self.render_insights();
     }
 
     // ---- state queries -------------------------------------------------------------
@@ -1062,12 +1075,17 @@ impl Controller {
     fn render_tabs(&self) {
         let ui = self.ui();
         let settings = self.ivars().settings.borrow();
-        if settings.hidden[self.ivars().tab.get() as usize] {
+        let hidden = |tab: Tab| match tab {
+            Tab::Insights => !self.ivars().dashboard_open.get(),
+            tab => settings.hidden[tab as usize],
+        };
+        if hidden(self.ivars().tab.get()) {
             self.ivars().tab.set(Tab::ALL[settings.first_visible()]);
         }
         let current = self.ivars().tab.get();
-        let tabs: [(&NSView, &NSButton, Tab); 4] = [
+        let tabs: [(&NSView, &NSButton, Tab); 5] = [
             (&ui.workspace, &ui.tab_workspace, Tab::Workspace),
+            (ui.insights.body(), &ui.tab_insights, Tab::Insights),
             (&ui.clips.body, &ui.tab_clips, Tab::Clips),
             (&ui.music.body, &ui.tab_music, Tab::Music),
             (&ui.terminal.body, &ui.tab_terminal, Tab::Terminal),
@@ -1084,7 +1102,7 @@ impl Controller {
         }
         for (body, pill, tab) in tabs {
             body.setHidden(tab != current);
-            pill.setHidden(settings.hidden[tab as usize]);
+            pill.setHidden(hidden(tab));
             if tab == current {
                 w::style_pill(pill, &white(1.0), &NSColor::blackColor(), 12.0);
             } else {
@@ -1092,6 +1110,14 @@ impl Controller {
             }
         }
         self.fit_panel();
+    }
+
+    /// Rebuilds the Insights page while it is the visible tab; no other tab pays for it.
+    fn render_insights(&self) {
+        if self.ivars().tab.get() == Tab::Insights {
+            let data = Insights::build(&pomodoros::load_log(), &self.ivars().tasks.borrow(), &days::key(0));
+            self.ui().insights.show(data);
+        }
     }
 
     fn render_music(&self) {
@@ -1514,6 +1540,8 @@ impl Controller {
             host.addSubview(&ui.content);
             self.ivars().pinned.set(false);
             self.set_expanded(false);
+            // The Insights tab shows only here.
+            self.refresh();
         }
         window.makeKeyAndOrderFront(None);
         #[allow(deprecated)]
@@ -1526,6 +1554,8 @@ impl Controller {
         attach_to_notch(&ui.content, &ui.panel.contentView().expect("panel has a content view"), ui.expanded.get().size.height - TOP_SLOP);
         self.ivars().dashboard_open.set(false);
         ui.motion.drive_content(true);
+        // Back in the notch: the Insights tab goes, and a view left on it falls back to a section.
+        self.refresh();
     }
 
     /// Right-click menu for the task at `index`; each item carries the index in its tag.
@@ -1675,7 +1705,8 @@ impl Controller {
         let clips = self.build_clips(mtm);
         let music = self.build_music(mtm);
         let terminal = self.build_terminal(mtm);
-        for body in [&*workspace, &*clips.body, &*music.body, &*terminal.body] {
+        let insights = InsightsView::new(mtm);
+        for body in [&*workspace, &*clips.body, &*music.body, &*terminal.body, insights.body()] {
             content.addSubview(body);
             body.leadingAnchor().constraintEqualToAnchor_constant(&content.leadingAnchor(), 12.0).setActive(true);
             body.trailingAnchor().constraintEqualToAnchor_constant(&content.trailingAnchor(), -12.0).setActive(true);
@@ -1695,12 +1726,14 @@ impl Controller {
             content,
             workspace,
             tab_workspace: head.workspace,
+            tab_insights: head.insights,
             tab_clips: head.clips,
             tab_music: head.music,
             tab_terminal: head.terminal,
             clips,
             music,
             terminal,
+            insights,
             focus,
             tasks,
             expanded: Cell::new(expanded),
@@ -1726,6 +1759,7 @@ impl Controller {
             pill
         };
         let workspace = pill("Workspace", sel!(showWorkspace:));
+        let insights = pill("Insights", sel!(showInsights:));
         let clips = icon_pill("doc.on.clipboard", sel!(showClips:));
         let music = icon_pill("play.circle", sel!(showMusic:));
         let terminal = pill("Terminal", sel!(showTerminal:));
@@ -1734,9 +1768,10 @@ impl Controller {
         settings.setToolTip(Some(&NSString::from_str("Settings (⌘,)")));
         Header {
             quit: w::icon_button("xmark", "", 10.0, &white(0.55), self.target(), sel!(quit:), mtm),
-            left: w::stack(&[&settings, &workspace], false, 8.0, mtm),
+            left: w::stack(&[&settings, &workspace, &insights], false, 8.0, mtm),
             right: w::stack(&[&clips, &music, &terminal], false, 6.0, mtm),
             workspace,
+            insights,
             clips,
             music,
             terminal,

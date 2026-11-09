@@ -1,3 +1,16 @@
+### [2026-11-09 23:10 UTC+07:00] — [Feature] Insights page in the dashboard
+
+**Done:**
+- Insights tab in the dashboard window: stat cards (active days ring, streak, focus time, best day), a 53x7 heatmap with Focus/Pomodoros/Tasks tabs, year rings, 30-day pulse with Export PNG (save panel), moon calendar, and an empty state.
+- Pure `insights` module with per-day aggregates, streaks, best day and intensity levels, 14 unit tests (empty data, month-crossing streak, garbage lines).
+
+**Changed  files:**
+- `src/insights.rs`, `src/insights_chart.rs`, `src/insights_view.rs` — created
+- `src/controller.rs`, `src/widgets.rs`, `src/main.rs`, `README.md` — modified
+
+**Flow explained:**
+`refresh()` calls `render_insights()` only while the Insights tab is visible; it builds `Insights` from the pomodoro log and tasks and hands it to `InsightsView`. `Chart` draws each plot with NSBezierPath and skips the redraw when the plot is unchanged, so there are no new timers. Verified with 85 tests, offscreen renders from a scratch HOME (60 and 300 days, empty), and 0.0% idle CPU.
+
 ### [2026-11-09 21:55 UTC+07:00] — [Feature] Notch alert cards, focus settings, quick-add hints
 
 **Done:**
@@ -135,25 +148,3 @@ The 2 s `reload:` tick calls `remind_tasks`, which works only when the minute ch
 
 **Flow explained:**
 `Settings::load()` runs at startup. `render_tabs` hides the pills of hidden sections and falls back to the first visible tab. `sync_activity` reads the wing flags. `SettingsWindow` saves each change and calls back into the controller, which applies it live. `LiveActivity::animate_bars` only adds or removes the CA animation when the shown state changes.
-
-### [2026-11-09 15:18 UTC+07:00] — [Feature] Task alerts, timer +5/stopwatch, JSON export, dashboard window
-
-**Done:**
-Closed the remaining feature gaps, one Sonnet thread per feature, each accepted and merged with `--no-ff`. Tasks with a day and time get a local notification at that time; the next 7 days are synced after each save, and authorization is asked on the first timed save, only in the bundled app. Focus timer: +5 min (also while paused), and a stopwatch duration that counts up and logs its minutes on End. Completed tasks are stamped with a `done_on` day, which is an optional 9th column so old files still load. The insights strip shows tasks done this week. The header's right-click menu holds "Open dashboard window", which moves the same content view into a resizable window, and "Export backup (JSON)…", which writes tasks, notes and the pomodoro log through a save panel. Closing the window or pressing the header ✕ returns the view to the notch. Verified with 57 unit tests and a hook that opened the dashboard, pressed ✕ and expanded the notch: the window closed, the app kept running, and the notch PNG matched the original. Idle CPU 0.0% after the install.
-
-**Changed  files:**
-- `src/task_alerts.rs` — created
-- `src/export.rs` — created
-- `src/controller.rs` — modified
-- `src/pomodoros.rs` — modified
-- `src/store.rs` — modified
-- `src/bin/notchpad-mcp.rs` — modified
-- `src/main.rs` — modified
-- `src/notch_motion.rs` — modified
-- `Cargo.toml`, `Cargo.lock` — modified
-
-**Flow explained:**
-- Save tasks → `task_alerts::sync` turns the pure `due_alerts` into `UNCalendarNotificationTrigger` requests with stable FNV ids.
-- Timer: the `STOPWATCH` index runs `run_stopwatch` from `since`; `next_duration` and `end_log_minutes` stay pure.
-- Header menu → `openDashboard:` → `show_dashboard`, which reparents `ui.content`. Closing calls `windowWillClose:` → `hide_dashboard` → `attach_to_notch`.
-- `exportBackup:` → `NSSavePanel` → `export::write`.
