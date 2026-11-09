@@ -78,7 +78,7 @@ const SHORT_BREAK_MIN: u64 = 5;
 const LONG_BREAK_MIN: u64 = 15;
 /// A long break follows every this many focus sessions.
 const CYCLE: usize = 4;
-const TOMATO_SIZE: f64 = 33.0;
+const TOMATO_SIZE: f64 = 22.0;
 const CORAL: (u8, u8, u8) = (217, 112, 90);
 
 /// Week columns, also used as the add-field tag that picks the new task's day.
@@ -716,10 +716,13 @@ impl Controller {
                 this.target(), sel!(screenParametersChanged:),
                 Some(NSApplicationDidChangeScreenParametersNotification), None,
             );
-            // Lives for the whole process, so the returned timer handle is not kept.
-            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(2.0, this.target(), sel!(reload:), None, true);
+            // Both live for the whole process. The tolerance lets macOS fire them together
+            // with other wakeups instead of waking the CPU on their own.
+            let reload = NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(2.0, this.target(), sel!(reload:), None, true);
+            reload.setTolerance(1.0);
             // Reading the pasteboard's change count is cheap, so copies show up within half a second.
-            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.5, this.target(), sel!(pollClips:), None, true);
+            let clips = NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.5, this.target(), sel!(pollClips:), None, true);
+            clips.setTolerance(0.25);
         }
         // The helper blocks on notifications, so it costs nothing while idle; it runs from
         // launch so the collapsed notch can show music without the Music tab being opened.
@@ -1661,22 +1664,13 @@ impl Controller {
         let header = w::stack(&[&heading, &w::spacer(mtm), &count_chip], false, 8.0, mtm);
 
         let tomatoes: Vec<_> = (0..DAILY_GOAL).map(|_| TomatoView::new(mtm)).collect();
-        let rows: Vec<_> = tomatoes
-            .chunks(DAILY_GOAL / 2)
-            .map(|row| {
-                let views: Vec<&NSView> = row.iter().map(|t| &***t).collect();
-                for view in &views {
-                    fixed_size(view, TOMATO_SIZE, TOMATO_SIZE);
-                }
-                let stack = w::stack(&views, false, 0.0, mtm);
-                stack.setDistribution(NSStackViewDistribution::EqualSpacing);
-                stack
-            })
-            .collect();
-        for row in &rows {
-            row.widthAnchor().constraintEqualToConstant(inner).setActive(true);
+        // One row: two rows of larger tomatoes pushed the card's content past its edges.
+        let views: Vec<&NSView> = tomatoes.iter().map(|t| &***t).collect();
+        for view in &views {
+            fixed_size(view, TOMATO_SIZE, TOMATO_SIZE);
         }
-        let grid = w::stack(&[&rows[0], &rows[1]], true, 4.0, mtm);
+        let grid = w::stack(&views, false, 0.0, mtm);
+        grid.setDistribution(NSStackViewDistribution::EqualSpacing);
 
         let task = w::label("", 11.0, unsafe { NSFontWeightRegular }, &white(0.55), mtm);
         task.setAlignment(NSTextAlignment::Center);

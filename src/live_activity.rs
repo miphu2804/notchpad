@@ -1,14 +1,17 @@
 //! What the collapsed notch shows beside the hardware cut-out while something is live:
-//! artwork and a waveform glyph for music, the countdown for a focus or break session.
+//! artwork and moving waveform bars for music, the countdown for a focus or break session.
 //! The panel grows by [`WING`] on each side to make room; this view fills those wings.
+
+use std::cell::Cell;
 
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSFont, NSFontWeightMedium, NSImage, NSImageScaling, NSImageView,
+    NSAutoresizingMaskOptions, NSColor, NSFont, NSFontWeightMedium, NSImage, NSImageScaling, NSImageView,
     NSTextAlignment, NSTextField, NSView,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSNumber, NSPoint, NSRect, NSSize, NSString};
+use objc2_quartz_core::{CABasicAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction, kCAMediaTimingFunctionEaseInEaseOut};
 
 use crate::panel;
 use crate::widgets::{self as w, rgba};
@@ -19,6 +22,14 @@ const ART: f64 = 22.0;
 /// Space between the notch's rounded corner and the artwork.
 const ART_INSET: f64 = 8.0;
 const FADE_SECS: f64 = 0.2;
+
+const BAR_WIDTH: f64 = 3.0;
+const BAR_GAP: f64 = 2.5;
+const BAR_HEIGHT: f64 = 14.0;
+/// Shortest a bar gets, as a fraction of [`BAR_HEIGHT`].
+const BAR_LOW: f64 = 0.25;
+/// One period per bar, none a multiple of another, so the bars never fall into step.
+const BAR_PERIODS: [f64; 4] = [0.47, 0.61, 0.38, 0.54];
 
 const CORAL: (u8, u8, u8) = (217, 112, 90);
 const BREAK_GREEN: (u8, u8, u8) = (120, 190, 130);
@@ -40,7 +51,9 @@ impl Activity<'_> {
 pub struct LiveActivity {
     pub view: Retained<NSView>,
     art: Retained<NSImageView>,
-    glyph: Retained<NSImageView>,
+    bars: Retained<NSView>,
+    bar_layers: Vec<Retained<CALayer>>,
+    animating: Cell<bool>,
     time: Retained<NSTextField>,
 }
 
@@ -56,7 +69,6 @@ impl LiveActivity {
         let notch_height = collapsed.size.height - crate::controller::TOP_SLOP;
         let y = ((notch_height - ART) / 2.0).round();
         let right_edge = collapsed.size.width - ear - WING;
-        let coral = rgba(CORAL.0, CORAL.1, CORAL.2, 1.0);
 
         let art = NSImageView::new(mtm);
         art.setFrame(NSRect::new(NSPoint::new(ear + ART_INSET, y), NSSize::new(ART, ART)));
@@ -71,11 +83,23 @@ impl LiveActivity {
         art.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMaxXMargin);
 
         let wing_frame = NSRect::new(NSPoint::new(right_edge, y), NSSize::new(WING, ART));
-        let glyph = NSImageView::imageViewWithImage(&w::symbol("waveform"), mtm);
-        glyph.setFrame(wing_frame);
-        glyph.setEditable(false);
-        glyph.setContentTintColor(Some(&coral));
-        glyph.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+        let bars = NSView::initWithFrame(mtm.alloc(), wing_frame);
+        bars.setWantsLayer(true);
+        bars.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+        let host = bars.layer().expect("layer-backed view");
+        let white = NSColor::whiteColor().CGColor();
+        let left = ((WING - BAR_PERIODS.len() as f64 * (BAR_WIDTH + BAR_GAP) + BAR_GAP) / 2.0).round();
+        let bar_layers: Vec<_> = (0..BAR_PERIODS.len()).map(|i| {
+            let bar = CALayer::new();
+            bar.setFrame(NSRect::new(
+                NSPoint::new(left + i as f64 * (BAR_WIDTH + BAR_GAP), (ART - BAR_HEIGHT) / 2.0),
+                NSSize::new(BAR_WIDTH, BAR_HEIGHT),
+            ));
+            bar.setCornerRadius(BAR_WIDTH / 2.0);
+            bar.setBackgroundColor(Some(&white));
+            host.addSublayer(&bar);
+            bar
+        }).collect();
 
         // Digits keep one width, so the text does not jitter as the seconds change.
         let time = NSTextField::labelWithString(&NSString::new(), mtm);
@@ -85,11 +109,11 @@ impl LiveActivity {
         time.setFrame(NSRect::new(NSPoint::new(right_edge - 7.0, y + (ART - 16.0) / 2.0), NSSize::new(WING + 8.0, 16.0)));
         time.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
 
-        for child in [&*art, &*glyph] {
+        for child in [&*art, &*bars] {
             view.addSubview(child);
         }
         view.addSubview(&time);
-        Self { view, art, glyph, time }
+        Self { view, art, bars, bar_layers, animating: Cell::new(false), time }
     }
 
     /// Fades the wings in or out and fills them; `visible` is false while the panel is open.
@@ -98,7 +122,8 @@ impl LiveActivity {
         if let Some(artwork) = &activity.music {
             self.art.setImage(Some(&artwork.clone().unwrap_or_else(|| w::symbol("music.note"))));
         }
-        self.glyph.setHidden(activity.music.is_none() || activity.countdown.is_some());
+        let music_only = activity.music.is_some() && activity.countdown.is_none();
+        self.bars.setHidden(!music_only);
         self.time.setHidden(activity.countdown.is_none());
         if let Some((text, on_break)) = activity.countdown {
             let (r, g, b) = if on_break { BREAK_GREEN } else { CORAL };
@@ -106,6 +131,33 @@ impl LiveActivity {
             self.time.setTextColor(Some(&rgba(r, g, b, 1.0)));
         }
         let shown = visible && activity.is_live();
+        self.animate_bars(shown && music_only && !w::reduce_motion());
         w::fade(&self.view, if shown { 1.0 } else { 0.0 }, FADE_SECS);
+    }
+
+    /// The bars bounce only while they can be seen. Core Animation runs them in the window
+    /// server, so the app itself stays idle; started once, not on every refresh, so the
+    /// one-second focus ticks don't restart them.
+    fn animate_bars(&self, on: bool) {
+        if self.animating.replace(on) == on {
+            return;
+        }
+        let ease = CAMediaTimingFunction::functionWithName(unsafe { kCAMediaTimingFunctionEaseInEaseOut });
+        for (bar, period) in self.bar_layers.iter().zip(BAR_PERIODS) {
+            if !on {
+                bar.removeAllAnimations();
+                continue;
+            }
+            let bounce = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("transform.scale.y")));
+            unsafe {
+                bounce.setFromValue(Some(&NSNumber::new_f64(BAR_LOW)));
+                bounce.setToValue(Some(&NSNumber::new_f64(1.0)));
+            }
+            bounce.setDuration(period);
+            bounce.setAutoreverses(true);
+            bounce.setRepeatCount(f32::INFINITY);
+            bounce.setTimingFunction(Some(&ease));
+            bar.addAnimation_forKey(&bounce, None);
+        }
     }
 }
