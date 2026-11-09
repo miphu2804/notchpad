@@ -23,7 +23,7 @@ use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 use crate::calendar::{self, Access, Calendar, Event};
 use crate::clip_card::{self, ClipCard};
 use crate::clips::ClipHistory;
-use crate::settings::{self as prefs, Settings, Size, TimerStyle};
+use crate::settings::{self as prefs, Background, Settings, Shape, Size, TimerStyle};
 use crate::settings_window::SettingsWindow;
 use crate::days;
 use crate::export;
@@ -58,6 +58,8 @@ const SCREEN_MARGIN: f64 = 40.0;
 pub const TOP_SLOP: f64 = 1.0;
 /// MacBook Pro 14" (M4 Pro) notch, used on displays without one.
 const DEFAULT_NOTCH: (f64, f64) = (185.0, 32.0);
+/// Collapsed bar: about the height of the menu bar, flush with the top edge.
+const BAR: (f64, f64) = (160.0, 24.0);
 const FOCUS_CARD_WIDTH: f64 = 236.0;
 const MUSIC_PROGRESS_WIDTH: f64 = 340.0;
 const ICON_TAB_WIDTH: f64 = 32.0;
@@ -793,13 +795,7 @@ define_class!(
 
         #[unsafe(method(screenParametersChanged:))]
         fn screen_parameters_changed(&self, _notification: &NSNotification) {
-            let (collapsed, expanded, safe_top) = notch_rects(self.mtm(), self.tab_size());
-            let ui = self.ui();
-            ui.header_height.setConstant(header_band(safe_top));
-            for constraint in &ui.notch_gaps {
-                constraint.setConstant(notch_gap(collapsed, safe_top));
-            }
-            self.place(collapsed, expanded);
+            self.relayout();
             self.collapse_when_left();
         }
 
@@ -876,6 +872,7 @@ impl Controller {
         let ui = this.build_ui(mtm);
         this.ivars().ui.set(ui).ok().expect("ui is built once");
         this.ivars().seen_mtime.set(store::modified());
+        this.relayout();
         unsafe {
             let center = NSNotificationCenter::defaultCenter();
             let terminal: &AnyObject = this.ui().terminal.view.as_ref();
@@ -949,10 +946,35 @@ impl Controller {
 
     /// Springs the panel to the current section's height; the content follows at once.
     fn fit_panel(&self) {
-        let (collapsed, expanded, _) = notch_rects(self.mtm(), self.tab_size());
+        let (collapsed, expanded, _) = self.rects();
         if expanded != self.ui().expanded.get() {
             self.place(collapsed, expanded);
         }
+    }
+
+    /// Collapsed and expanded frames for the current section and shape.
+    fn rects(&self) -> (NSRect, NSRect, f64) {
+        let shape = self.ivars().settings.borrow().shape;
+        notch_rects(self.mtm(), self.tab_size(), shape)
+    }
+
+    /// Follows a change of screen, shape or background: the panel's frames and silhouette, the
+    /// header band, and the live wings.
+    fn relayout(&self) {
+        let (collapsed, expanded, safe_top) = self.rects();
+        let ui = self.ui();
+        let settings = self.ivars().settings.borrow();
+        let (bar, glass) = (is_bar(self.mtm(), settings.shape), settings.background == Background::Glass);
+        ui.header_height.setConstant(header_band(safe_top));
+        for constraint in &ui.notch_gaps {
+            constraint.setConstant(notch_gap(collapsed, safe_top));
+        }
+        ui.activity.center_in(collapsed.size.height - TOP_SLOP);
+        if let Some(Ok(shape)) = ui.panel.contentView().map(|view| view.downcast::<NotchShape>()) {
+            shape.set_look(bar, glass);
+        }
+        ui.banner.set_look(bar, glass);
+        self.place(collapsed, expanded);
     }
 
     fn place(&self, collapsed: NSRect, expanded: NSRect) {
@@ -1239,7 +1261,7 @@ impl Controller {
             // A crossfade snapshots the old picture at its old size. If the panel is about to
             // change height that snapshot sits stranded at the bottom, so only the new body
             // fades in.
-            let resizing = notch_rects(self.mtm(), self.tab_size()).1 != ui.expanded.get();
+            let resizing = self.rects().1 != ui.expanded.get();
             match tabs.iter().find(|(_, _, tab)| *tab == current) {
                 Some((body, _, _)) if resizing => crossfade(body),
                 _ => crossfade(&ui.content),
@@ -1329,7 +1351,7 @@ impl Controller {
             }
             *self.ivars().chime.borrow_mut() = sound;
         }
-        let (collapsed, _, _) = notch_rects(self.mtm(), self.tab_size());
+        let (collapsed, _, _) = self.rects();
         self.ui().banner.show(collapsed, notice);
         self.ivars().banner_until.set(Some(Instant::now() + Duration::from_secs_f64(seconds)));
         unsafe { NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(seconds, self.target(), sel!(bannerExpired:), None, false) };
@@ -1663,6 +1685,7 @@ impl Controller {
             self.ivars().duration_idx.set(focus_index(&settings));
         }
         *self.ivars().settings.borrow_mut() = settings;
+        self.relayout();
         if linear_changed {
             self.ivars().linear.borrow_mut().reset();
         }
@@ -1802,7 +1825,7 @@ impl Controller {
     // ---- building ------------------------------------------------------------------
 
     fn build_ui(&self, mtm: MainThreadMarker) -> Ui {
-        let (collapsed, expanded, safe_top) = notch_rects(mtm, self.tab_size());
+        let (collapsed, expanded, safe_top) = self.rects();
 
         let panel_alloc = mtm.alloc::<NotchPanel>().set_ivars(());
         let panel: Retained<NotchPanel> = unsafe {
@@ -2472,27 +2495,39 @@ fn fixed_size(view: &NSView, width: f64, height: f64) {
     view.heightAnchor().constraintEqualToConstant(height).setActive(true);
 }
 
-/// Returns (collapsed rect over the notch, expanded rect for `size`, hardware safe-area height).
-fn notch_rects(mtm: MainThreadMarker, size: Size) -> (NSRect, NSRect, f64) {
+/// The display with a hardware notch, else the main one.
+fn notch_screen(mtm: MainThreadMarker) -> Retained<NSScreen> {
     let screens = NSScreen::screens(mtm);
-    let screen = screens
+    screens
         .iter()
         .find(|s| s.safeAreaInsets().top > 0.0)
         .or_else(|| NSScreen::mainScreen(mtm))
-        .expect("no screen available");
+        .expect("no screen available")
+}
+
+fn is_bar(mtm: MainThreadMarker, shape: Shape) -> bool {
+    shape.is_bar(notch_screen(mtm).safeAreaInsets().top > 0.0)
+}
+
+/// Returns (collapsed rect over the notch or bar, expanded rect for `size`, safe-area height the
+/// header must clear: zero for a bar, which has no cut-out to avoid).
+fn notch_rects(mtm: MainThreadMarker, size: Size, shape: Shape) -> (NSRect, NSRect, f64) {
+    let screen = notch_screen(mtm);
     let frame = screen.frame();
     let inset = screen.safeAreaInsets().top;
-    let (width, height) = if inset > 0.0 {
+    let (width, height, safe_top) = if shape.is_bar(inset > 0.0) {
+        (BAR.0, BAR.1, 0.0)
+    } else if inset > 0.0 {
         let left = screen.auxiliaryTopLeftArea().size.width;
         let right = screen.auxiliaryTopRightArea().size.width;
-        (frame.size.width - left - right, inset)
+        (frame.size.width - left - right, inset, inset)
     } else {
         // No hardware notch (external display): draw one of our own.
-        DEFAULT_NOTCH
+        (DEFAULT_NOTCH.0, DEFAULT_NOTCH.1, 0.0)
     };
     let body = body_height(size, screen.visibleFrame().size.height);
     let (collapsed, expanded) = frames_at_top(frame, width, height, body);
-    (collapsed, expanded, inset)
+    (collapsed, expanded, safe_top)
 }
 
 /// The header fills the menu-bar band on a notched display, so it never sits under the notch.

@@ -18,7 +18,7 @@ use crate::calendar::{self, Access};
 use crate::reminders;
 use crate::claude_mcp;
 use crate::linear;
-use crate::settings::{FOCUS_CHOICES, LONG_BREAK_CHOICES, REMIND_CHOICES, SECTIONS, SHORT_BREAK_CHOICES, Settings, Size, TimerStyle};
+use crate::settings::{Background, FOCUS_CHOICES, LONG_BREAK_CHOICES, REMIND_CHOICES, SECTIONS, SHORT_BREAK_CHOICES, Settings, Shape, Size, TimerStyle};
 use crate::widgets::{self as w, rgba};
 
 const WIDTH: f64 = 680.0;
@@ -122,6 +122,20 @@ define_class!(
         fn set_size(&self, sender: &NSPopUpButton) {
             let mut settings = self.ivars().settings.borrow().clone();
             settings.sizes[sender.tag() as usize] = Size::ALL[sender.indexOfSelectedItem() as usize];
+            self.commit(settings);
+        }
+
+        #[unsafe(method(setShape:))]
+        fn set_shape(&self, sender: &NSPopUpButton) {
+            let mut settings = self.ivars().settings.borrow().clone();
+            settings.shape = Shape::ALL[sender.indexOfSelectedItem().max(0) as usize];
+            self.commit(settings);
+        }
+
+        #[unsafe(method(setBackground:))]
+        fn set_background(&self, sender: &NSPopUpButton) {
+            let mut settings = self.ivars().settings.borrow().clone();
+            settings.background = Background::ALL[sender.indexOfSelectedItem().max(0) as usize];
             self.commit(settings);
         }
 
@@ -369,6 +383,29 @@ impl SettingsWindow {
         }).collect();
         let wings: Vec<_> = WINGS.iter().zip([settings.wing_music, settings.wing_focus])
             .map(|((symbol, name), on)| Row { symbol, name, switch: Some((on, sel!(toggleWing:))), ..Row::default() })
+            .chain([
+                Row {
+                    symbol: "rectangle.topthird.inset.filled",
+                    name: "Shape",
+                    blurb: Some("Auto is a bar without a hardware notch"),
+                    menu: Some((
+                        Shape::ALL.iter().map(|s| s.name().to_owned()).collect(),
+                        Shape::ALL.iter().position(|s| *s == settings.shape).unwrap_or(0),
+                        sel!(setShape:),
+                    )),
+                    ..Row::default()
+                },
+                Row {
+                    symbol: "drop",
+                    name: "Background",
+                    menu: Some((
+                        Background::ALL.iter().map(|b| b.name().to_owned()).collect(),
+                        Background::ALL.iter().position(|b| *b == settings.background).unwrap_or(0),
+                        sel!(setBackground:),
+                    )),
+                    ..Row::default()
+                },
+            ])
             .collect();
         let minutes = |choices: &[u64], current: u64| {
             let items = choices.iter().map(|m| format!("{m} min")).collect();
@@ -398,7 +435,7 @@ impl SettingsWindow {
         sections_pane.addSubview(&self.card(&insights, 100.0 + SECTIONS.len() as f64 * ROW, 0, mtm));
         let panes = vec![
             sections_pane,
-            self.pane("Collapsed notch", &wings, mtm),
+            self.pane("Notch", &wings, mtm),
             self.pane("Focus", &focus, mtm),
             self.integrations_pane(mtm),
             self.pane("General", &general, mtm),

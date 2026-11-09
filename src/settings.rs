@@ -3,7 +3,7 @@
 //!
 //! Plain `key=value` lines: `hidden=clips,terminal`, `size=terminal:xtall,clips:tall`,
 //! `wing_music=1`, `wing_focus=1`, `calendar=1` (show today's calendar events), `reminders=1` (two-way sync with the Reminders list "NotchGo"), `linear=1` (a Linear key is in the Keychain; the key itself is never written here), `timer_style=plain|dots`, `focus=25`, `short_break=5`, `long_break=15`, `sound=1`,
-//! `remind=10` (minutes ahead, `0` for only at the time, `off` for none).
+//! `remind=10` (minutes ahead, `0` for only at the time, `off` for none), `shape=auto|notch|bar`, `background=black|glass`.
 //! A missing file, a missing key, an unknown key or a garbled line leaves the default,
 //! which shows everything.
 
@@ -87,6 +87,70 @@ impl TimerStyle {
     }
 }
 
+/// What the collapsed panel looks like: the notch silhouette or a flat bar on the top edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Shape {
+    /// Notch where the display has a hardware notch, bar elsewhere.
+    #[default]
+    Auto,
+    Notch,
+    Bar,
+}
+
+impl Shape {
+    pub const ALL: [Shape; 3] = [Shape::Auto, Shape::Notch, Shape::Bar];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Shape::Auto => "Auto",
+            Shape::Notch => "Notch",
+            Shape::Bar => "Bar",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Shape::Auto => "auto",
+            Shape::Notch => "notch",
+            Shape::Bar => "bar",
+        }
+    }
+
+    /// Whether the panel is drawn as a bar on a display that does or does not have a hardware notch.
+    pub fn is_bar(self, hardware_notch: bool) -> bool {
+        match self {
+            Shape::Auto => !hardware_notch,
+            Shape::Notch => false,
+            Shape::Bar => true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Background {
+    #[default]
+    Black,
+    Glass,
+}
+
+impl Background {
+    pub const ALL: [Background; 2] = [Background::Black, Background::Glass];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Background::Black => "Black",
+            Background::Glass => "Liquid Glass",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Background::Black => "black",
+            Background::Glass => "glass",
+        }
+    }
+}
+
 /// Focus lengths the timer offers, in minutes; clicking the timer cycles through them.
 pub const FOCUS_CHOICES: [u64; 4] = [15, 25, 45, 60];
 pub const SHORT_BREAK_CHOICES: [u64; 3] = [3, 5, 10];
@@ -125,6 +189,8 @@ pub struct Settings {
     pub sound: bool,
     /// One of [`REMIND_CHOICES`].
     pub remind: Option<u32>,
+    pub shape: Shape,
+    pub background: Background,
 }
 
 impl Default for Settings {
@@ -143,6 +209,8 @@ impl Default for Settings {
             long_break: 15,
             sound: true,
             remind: Some(10),
+            shape: Shape::default(),
+            background: Background::default(),
         }
     }
 }
@@ -228,6 +296,8 @@ fn parse(text: &str) -> Settings {
             "sound" => settings.sound = flag(settings.sound),
             "remind" if value == "off" => settings.remind = None,
             "remind" => settings.remind = value.parse().ok().filter(|m| REMIND_CHOICES.contains(&Some(*m))).map_or(settings.remind, Some),
+            "shape" => settings.shape = Shape::ALL.into_iter().find(|s| s.key() == value).unwrap_or(settings.shape),
+            "background" => settings.background = Background::ALL.into_iter().find(|b| b.key() == value).unwrap_or(settings.background),
             _ => {}
         }
     }
@@ -247,7 +317,7 @@ fn format(settings: &Settings) -> String {
     let hidden: Vec<&str> = SECTIONS.iter().zip(settings.hidden).filter(|(_, h)| *h).map(|(s, _)| s.key).collect();
     let sizes: Vec<String> = SECTIONS.iter().zip(settings.sizes).filter(|(_, z)| *z != Size::Compact).map(|(s, z)| format!("{}:{}", s.key, z.key())).collect();
     format!(
-        "hidden={}\nsize={}\nwing_music={}\nwing_focus={}\ncalendar={}\nreminders={}\nlinear={}\ntimer_style={}\nfocus={}\nshort_break={}\nlong_break={}\nsound={}\nremind={}\n",
+        "hidden={}\nsize={}\nwing_music={}\nwing_focus={}\ncalendar={}\nreminders={}\nlinear={}\ntimer_style={}\nfocus={}\nshort_break={}\nlong_break={}\nsound={}\nremind={}\nshape={}\nbackground={}\n",
         hidden.join(","),
         sizes.join(","),
         settings.wing_music as u8,
@@ -261,6 +331,8 @@ fn format(settings: &Settings) -> String {
         settings.long_break,
         settings.sound as u8,
         settings.remind.map_or("off".to_owned(), |m| m.to_string()),
+        settings.shape.key(),
+        settings.background.key(),
     )
 }
 
@@ -353,7 +425,7 @@ mod tests {
         settings.long_break = 30;
         settings.sound = false;
         settings.remind = None;
-        assert!(format(&settings).ends_with("focus=45\nshort_break=10\nlong_break=30\nsound=0\nremind=off\n"));
+        assert!(format(&settings).contains("focus=45\nshort_break=10\nlong_break=30\nsound=0\nremind=off\n"));
         assert_eq!(parse(&format(&settings)), settings);
         settings.remind = Some(0);
         assert_eq!(parse(&format(&settings)), settings);
@@ -363,6 +435,28 @@ mod tests {
     fn focus_options_outside_the_choices_keep_the_default() {
         let settings = parse("focus=7\nshort_break=x\nlong_break=999\nremind=12\nsound=maybe\n");
         assert_eq!(settings, Settings::default());
+    }
+
+    #[test]
+    fn appearance_defaults_to_auto_and_black() {
+        let settings = parse("");
+        assert_eq!((settings.shape, settings.background), (Shape::Auto, Background::Black));
+        assert!(format(&settings).ends_with("shape=auto\nbackground=black\n"));
+    }
+
+    #[test]
+    fn appearance_round_trips_and_ignores_unknown_words() {
+        let settings = parse("shape=bar\nbackground=glass\n");
+        assert_eq!((settings.shape, settings.background), (Shape::Bar, Background::Glass));
+        assert_eq!(parse(&format(&settings)), settings);
+        assert_eq!(parse("shape=notch\n").shape, Shape::Notch);
+        assert_eq!(parse("shape=round\nbackground=blue\n"), Settings::default());
+    }
+
+    #[test]
+    fn auto_shape_is_a_bar_only_without_a_hardware_notch() {
+        assert!(Shape::Auto.is_bar(false) && !Shape::Auto.is_bar(true));
+        assert!(!Shape::Notch.is_bar(false) && Shape::Bar.is_bar(true));
     }
 
     #[test]

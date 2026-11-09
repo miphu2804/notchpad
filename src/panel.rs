@@ -2,13 +2,17 @@
 
 use std::path::PathBuf;
 
+use std::cell::Cell;
+
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{AnyClass, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSBezierPath, NSColor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSPanel, NSPasteboardTypeFileURL, NSScreen, NSView,
+    NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSColor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSGlassEffectView, NSPanel,
+    NSPasteboardTypeFileURL, NSScreen, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
 };
-use objc2_foundation::{NSArray, NSPoint, NSRect};
+use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize};
+use objc2_quartz_core::CAShapeLayer;
 
 use crate::clips;
 
@@ -68,10 +72,15 @@ pub enum FileDrag {
 
 pub struct ShapeIvars {
     on_file_drag: Box<dyn Fn(FileDrag)>,
+    /// Flat bar on the top edge instead of the notch silhouette.
+    bar: Cell<bool>,
+    glass: Cell<bool>,
+    /// Behind everything else; visible only for the glass background.
+    effect: Retained<NSView>,
 }
 
 define_class!(
-    /// Black notch silhouette: concave ears at the top corners flowing into the bezel,
+    /// Notch silhouette (or flat bar), black or glass: concave ears at the top corners flowing into the bezel,
     /// rounded bottom corners. Radii follow the current height, so the shape morphs
     /// smoothly while the window animates between collapsed and expanded.
     /// Also the drop target for files dragged onto the notch.
@@ -103,35 +112,135 @@ define_class!(
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
-            // Cubic Bézier factor for a quarter circle.
-            const K: f64 = 0.5523;
-            let b = self.bounds();
-            let (w, h) = (b.size.width, b.size.height);
-            let e = ear(h);
-            let r = bottom_radius(h).min((w - 2.0 * e) / 2.0);
-            let p = |x: f64, y: f64| NSPoint::new(x, y);
+            // Glass draws itself: the effect view below is masked to the same outline.
+            if !self.ivars().glass.get() {
+                NSColor::blackColor().setFill();
+                self.outline().fill();
+            }
+        }
 
-            let path = NSBezierPath::bezierPath();
-            path.moveToPoint(p(0.0, h));
-            path.curveToPoint_controlPoint1_controlPoint2(p(e, h - e), p(K * e, h), p(e, h - e + K * e));
-            path.lineToPoint(p(e, r));
-            path.curveToPoint_controlPoint1_controlPoint2(p(e + r, 0.0), p(e, r - K * r), p(e + r - K * r, 0.0));
-            path.lineToPoint(p(w - e - r, 0.0));
-            path.curveToPoint_controlPoint1_controlPoint2(p(w - e, r), p(w - e - r + K * r, 0.0), p(w - e, r - K * r));
-            path.lineToPoint(p(w - e, h - e));
-            path.curveToPoint_controlPoint1_controlPoint2(p(w, h), p(w - e, h - e + K * e), p(w - K * e, h));
-            path.closePath();
-            NSColor::blackColor().setFill();
-            path.fill();
+        // The glass mask follows the panel as it springs open and closed.
+        #[unsafe(method(setFrameSize:))]
+        fn set_frame_size(&self, size: NSSize) {
+            let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
+            self.update_mask();
         }
     }
 );
 
 impl NotchShape {
     pub fn new(frame: NSRect, on_file_drag: Box<dyn Fn(FileDrag)>, mtm: MainThreadMarker) -> Retained<Self> {
-        let this = mtm.alloc::<Self>().set_ivars(ShapeIvars { on_file_drag });
+        let effect = effect_view(mtm);
+        effect.setHidden(true);
+        let ivars = ShapeIvars { on_file_drag, bar: Cell::new(false), glass: Cell::new(false), effect };
+        let this = mtm.alloc::<Self>().set_ivars(ivars);
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         this.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
+        let effect = &this.ivars().effect;
+        // The frame passed in is in screen coordinates; the effect view fills the shape's own bounds.
+        effect.setFrame(this.bounds());
+        effect.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+        effect.setWantsLayer(true);
+        unsafe { effect.layer().expect("layer-backed view").setMask(Some(&CAShapeLayer::new())) };
+        this.addSubview(effect);
         this
+    }
+
+    pub fn set_look(&self, bar: bool, glass: bool) {
+        let s = self.ivars();
+        s.bar.set(bar);
+        s.glass.set(glass);
+        s.effect.setHidden(!glass);
+        self.update_mask();
+        self.setNeedsDisplay(true);
+    }
+
+    /// The silhouette, from the view's own size: notch with ears, or flat bar.
+    fn outline(&self) -> Retained<NSBezierPath> {
+        let b = self.bounds();
+        outline(b.size.width, b.size.height, self.ivars().bar.get())
+    }
+
+    fn update_mask(&self) {
+        let mask = self.ivars().effect.layer().and_then(|layer| layer.mask());
+        if let Some(mask) = mask.and_then(|m| m.downcast::<CAShapeLayer>().ok()) {
+            mask.setFrame(self.bounds());
+            mask.setPath(Some(&self.outline().CGPath()));
+        }
+    }
+}
+
+/// Glass on macOS 26 and later; older systems get a dark behind-window blur. Checked at run time
+/// because the class does not exist before 26.
+fn effect_view(mtm: MainThreadMarker) -> Retained<NSView> {
+    if AnyClass::get(c"NSGlassEffectView").is_some() {
+        let glass = NSGlassEffectView::initWithFrame(mtm.alloc(), NSRect::ZERO);
+        // Dark tint keeps the white text legible over bright wallpapers.
+        glass.setTintColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.5)));
+        glass.setContentView(Some(&NSView::new(mtm)));
+        Retained::into_super(glass)
+    } else {
+        let blur = NSVisualEffectView::initWithFrame(mtm.alloc(), NSRect::ZERO);
+        blur.setMaterial(NSVisualEffectMaterial::HUDWindow);
+        blur.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        // The panel never becomes the active window, which would otherwise leave the blur dimmed.
+        blur.setState(NSVisualEffectState::Active);
+        Retained::into_super(blur)
+    }
+}
+
+/// Radius of the bar's rounded bottom corners: small, a little larger as the bar opens.
+fn bar_radius(height: f64) -> f64 {
+    (height * 0.08).clamp(5.0, 12.0)
+}
+
+/// Silhouette in a `w` by `h` view whose ears are reserved on both sides, so the frames
+/// are the same for both shapes.
+fn outline(w: f64, h: f64, bar: bool) -> Retained<NSBezierPath> {
+    // Cubic Bézier factor for a quarter circle.
+    const K: f64 = 0.5523;
+    let e = ear(h);
+    let r = if bar { bar_radius(h) } else { bottom_radius(h) }.min((w - 2.0 * e) / 2.0);
+    let p = |x: f64, y: f64| NSPoint::new(x, y);
+
+    let path = NSBezierPath::bezierPath();
+    if bar {
+        path.moveToPoint(p(e, h));
+    } else {
+        path.moveToPoint(p(0.0, h));
+        path.curveToPoint_controlPoint1_controlPoint2(p(e, h - e), p(K * e, h), p(e, h - e + K * e));
+    }
+    path.lineToPoint(p(e, r));
+    path.curveToPoint_controlPoint1_controlPoint2(p(e + r, 0.0), p(e, r - K * r), p(e + r - K * r, 0.0));
+    path.lineToPoint(p(w - e - r, 0.0));
+    path.curveToPoint_controlPoint1_controlPoint2(p(w - e, r), p(w - e - r + K * r, 0.0), p(w - e, r - K * r));
+    if bar {
+        path.lineToPoint(p(w - e, h));
+    } else {
+        path.lineToPoint(p(w - e, h - e));
+        path.curveToPoint_controlPoint1_controlPoint2(p(w, h), p(w - e, h - e + K * e), p(w - K * e, h));
+    }
+    path.closePath();
+    path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bar_corners_stay_small_and_grow_with_the_panel() {
+        assert_eq!(bar_radius(24.0), 5.0);
+        assert!(bar_radius(150.0) > bar_radius(24.0));
+        assert_eq!(bar_radius(330.0), 12.0);
+    }
+
+    #[test]
+    fn bar_outline_spans_the_view_minus_the_ears() {
+        let bounds = outline(200.0, 24.0, true).bounds();
+        let e = ear(24.0);
+        assert_eq!((bounds.origin.x, bounds.size.width, bounds.size.height), (e, 200.0 - 2.0 * e, 24.0));
+        // The notch shape reaches the view's edges through its ears.
+        assert_eq!(outline(200.0, 24.0, false).bounds().size.width, 200.0);
     }
 }
