@@ -42,6 +42,8 @@ const SET_STATE: &str = "mutation($id: String!, $state: String!) { issueUpdate(i
 
 static AUTH_GENERATION: AtomicU64 = AtomicU64::new(0);
 static AUTH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static AUTH_TRANSITION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static DISCONNECT_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// An open issue assigned to the user.
 #[derive(Debug, PartialEq)]
@@ -92,7 +94,7 @@ impl OAuthAttempt {
 /// Starts the browser authorization flow without doing any network or waiting on the UI thread.
 pub fn start_oauth() -> Result<OAuthAttempt, String> {
     let client_id = oauth_client_id().ok_or_else(oauth_configuration_error)?;
-    let generation = AUTH_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    let generation = reserve_oauth_start()?;
     let cancel = Arc::new(AtomicBool::new(false));
     let worker_cancel = Arc::clone(&cancel);
     let (sender, receiver) = mpsc::channel();
@@ -147,6 +149,18 @@ struct TokenSet {
 
 fn auth_lock() -> &'static Mutex<()> {
     AUTH_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn auth_transition_lock() -> &'static Mutex<()> {
+    AUTH_TRANSITION_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn reserve_oauth_start() -> Result<u64, String> {
+    let _gate = auth_transition_lock().try_lock().map_err(|_| "Linear is finishing a disconnect; please try Connect again shortly".to_owned())?;
+    if DISCONNECT_PENDING.load(Ordering::Acquire) {
+        return Err("Linear is finishing a disconnect; please try Connect again shortly".to_owned());
+    }
+    Ok(AUTH_GENERATION.fetch_add(1, Ordering::AcqRel) + 1)
 }
 
 fn save_oauth(token: &TokenSet, generation: u64) -> Result<(), String> {
@@ -430,17 +444,18 @@ pub fn connect(key: &str) -> Result<(), String> {
 }
 
 pub fn disconnect() {
-    let generation = AUTH_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    let Ok(_gate) = auth_transition_lock().lock() else { return };
+    AUTH_GENERATION.fetch_add(1, Ordering::AcqRel);
     if let Ok(_guard) = auth_lock().try_lock() {
         delete_credentials();
         return;
     }
-    thread::spawn(move || {
+    DISCONNECT_PENDING.store(true, Ordering::Release);
+    thread::spawn(|| {
         let Ok(_guard) = auth_lock().lock() else { return };
-        if AUTH_GENERATION.load(Ordering::Acquire) != generation {
-            return;
-        }
+        let Ok(_gate) = auth_transition_lock().lock() else { return };
         delete_credentials();
+        DISCONNECT_PENDING.store(false, Ordering::Release);
     });
 }
 
@@ -648,9 +663,9 @@ mod tests {
         let server = thread::spawn(move || receive_callback_until(listener, "right", &cancel, CALLBACK_TIMEOUT).unwrap());
         for state in ["wrong", "right"] {
             let mut stream = TcpStream::connect(address).unwrap();
-            write!(stream, "GET /oauth/callback?code=abc&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+            let _ = write!(stream, "GET /oauth/callback?code=abc&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n");
             let mut response = String::new();
-            stream.read_to_string(&mut response).unwrap();
+            let _ = stream.read_to_string(&mut response);
             if state == "wrong" { assert!(response.contains("invalid")); }
         }
         assert_eq!(server.join().unwrap(), "abc");
@@ -676,9 +691,9 @@ mod tests {
             "code=abc&state=wrong",
         ] {
             let mut stream = TcpStream::connect(address).unwrap();
-            write!(stream, "GET /oauth/callback?{query} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+            let _ = write!(stream, "GET /oauth/callback?{query} HTTP/1.1\r\nHost: localhost\r\n\r\n");
             let mut response = String::new();
-            stream.read_to_string(&mut response).unwrap();
+            let _ = stream.read_to_string(&mut response);
             assert!(response.contains("callback") || response.contains("state"));
         }
         cancel.store(true, Ordering::Release);
@@ -702,6 +717,16 @@ mod tests {
         thread::sleep(Duration::from_millis(20));
         cancel.store(true, Ordering::Release);
         assert_eq!(server.join().unwrap(), Err("Linear authorization canceled".to_owned()));
+    }
+
+    #[test]
+    fn oauth_start_is_rejected_while_disconnect_cleanup_is_pending() {
+        let generation = AUTH_GENERATION.load(Ordering::Acquire);
+        DISCONNECT_PENDING.store(true, Ordering::Release);
+        assert!(reserve_oauth_start().is_err());
+        DISCONNECT_PENDING.store(false, Ordering::Release);
+        assert!(reserve_oauth_start().is_ok());
+        AUTH_GENERATION.store(generation, Ordering::Release);
     }
 
     #[test]
