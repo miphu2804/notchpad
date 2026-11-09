@@ -1,3 +1,18 @@
+### [2026-11-09 22:15 UTC+07:00] — [Feature] Notch alert cards, focus settings, quick-add hints
+
+**Done:**
+- Alerts now drop a small card out of the notch (`NotchBanner`, its own non-activating panel) instead of opening the whole panel. Task reminders carry Snooze 5 min and Done; pomodoro and break ends show for 8 s.
+- Settings › Focus: focus length, short/long break, reminder lead (off, at the time, 5/10/15 min) and chime on/off, saved in `settings.txt`.
+- Typing `!`, `#` or `/` in the add-task field shows completion pills (↑↓, Tab/Return, Esc). ▶ has a tooltip.
+
+**Changed  files:**
+- `src/notch_banner.rs` — created
+- `src/controller.rs`, `src/settings.rs`, `src/settings_window.rs`, `src/task_alerts.rs`, `src/quick_add.rs`, `src/main.rs`, `README.md` — modified
+
+**Flow explained:**
+- The 2 s reload tick calls `remind_tasks`, which collects `reminders_between(lead)` plus snoozed reminders due, then `notify` rings the chime (if enabled) and shows the card under the collapsed notch; `bannerExpired:` hides it after 60 s (8 s for sessions).
+- Snooze stores the reminder with now + 5 min; Done marks the matching task done and saves.
+
 ### [2026-11-09 21:35 UTC+07:00] — [Feature] Notch alerts, task reminders, undo delete, open at login
 
 **Done:**
@@ -142,18 +157,3 @@ Closed the remaining feature gaps, one Sonnet thread per feature, each accepted 
 - Timer: the `STOPWATCH` index runs `run_stopwatch` from `since`; `next_duration` and `end_log_minutes` stay pure.
 - Header menu → `openDashboard:` → `show_dashboard`, which reparents `ui.content`. Closing calls `windowWillClose:` → `hide_dashboard` → `attach_to_notch`.
 - `exportBackup:` → `NSSavePanel` → `export::write`.
-
-### [2026-11-09 14:56 UTC+07:00] — [Feature] Reminders in the Week tab and focus insights
-
-**Done:**
-Week tab: incomplete Apple Reminders due today or overdue sit in Today, those due tomorrow in Tomorrow, below the calendar events — a hollow circle in the list colour (click completes it), the title, and the due time (soft red when overdue); at most 3 then "+N more". Access is asked only from a "Show reminders" pill in Inbox. Workspace focus card: an insights strip with 7 daily bars of completed pomodoros (today coral), weekly focus minutes and the day streak; the card's spacing and countdown size were tightened to fit. Both built by Sonnet threads; accepted by expanded-panel PNGs (motion stepped by hand while the screen was locked) and unit tests; the merged main was rendered again. Idle CPU 0.0%.
-
-**Changed  files:**
-- `src/calendar.rs` — modified (reminders fetch/complete, pure `place`/`reminder_rows`)
-- `src/week_bars.rs` — created
-- `src/pomodoros.rs` — modified (`week`, `week_of`, `streak`; `done_today`/`count_done` removed)
-- `src/days.rs` — modified (`initial`)
-- `src/controller.rs`, `src/main.rs`, `Cargo.toml`, `macos/Info.plist` — modified
-
-**Flow explained:**
-`reload_events` also starts an async `fetchRemindersMatchingPredicate`; its completion converts to plain `Reminder`s off the main thread, hops to the main queue and posts `NotchpadRemindersFetched`, whose observer stores them and re-renders the Week tab. `refresh` reads `pomodoros.txt` once into `Week { done[7], minutes, streak }`; the count chip uses `done[6]` and `WeekBars` draws the array.
