@@ -27,7 +27,6 @@ use crate::calendar::{self, Access, Calendar, Event, Reminder};
 use crate::clip_card::{self, ClipCard};
 use crate::clips::ClipHistory;
 use crate::days;
-use crate::task_alerts;
 use crate::drop_column::DropColumn;
 use crate::list_row::{self, ListRow};
 use crate::live_activity::{Activity, LiveActivity, WING};
@@ -42,6 +41,7 @@ use crate::tomato_view::{Tomato, TomatoView};
 use crate::week_bars::{self, WeekBars};
 use crate::panel::{self, FileDrag, NotchPanel, NotchShape};
 use crate::store::{self, Task};
+use crate::task_alerts;
 use crate::widgets::{self as w, rgba};
 
 const WIDTH: f64 = 720.0;
