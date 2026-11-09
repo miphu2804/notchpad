@@ -16,7 +16,7 @@ use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
 use crate::settings::{SECTIONS, Settings, Size};
 use crate::widgets::{self as w, rgba};
 
-const WIDTH: f64 = 640.0;
+const WIDTH: f64 = 680.0;
 const HEIGHT: f64 = 420.0;
 const SIDEBAR: f64 = 170.0;
 const PANE: f64 = WIDTH - SIDEBAR;
@@ -189,9 +189,41 @@ impl SettingsWindow {
             icon.setFrame(rect(14.0, (ROW - 20.0) / 2.0, 22.0, 20.0));
             row.addSubview(&icon);
 
+            // Controls are laid out right to left from their intrinsic sizes: macOS 26 draws a
+            // wider switch than the classic 38×22, and a fixed frame let it overrun the menu.
+            let switch = NSSwitch::new(mtm);
+            let switch_size = switch.intrinsicContentSize();
+            let switch_x = card_width - 14.0 - switch_size.width;
+            switch.setFrame(rect(switch_x, (ROW - switch_size.height) / 2.0, switch_size.width, switch_size.height));
+            switch.setState(if *on { NSControlStateValueOn } else { 0 });
+            switch.setTag(i as isize);
+            unsafe {
+                switch.setTarget(Some(target));
+                switch.setAction(Some(*action));
+            }
+            row.addSubview(&switch);
+
+            let mut controls_x = switch_x;
+            if let Some(sizes) = sizes {
+                let menu = NSPopUpButton::initWithFrame_pullsDown(mtm.alloc(), NSRect::ZERO, false);
+                menu.setControlSize(NSControlSize::Small);
+                for size in Size::ALL {
+                    menu.addItemWithTitle(&NSString::from_str(size.name()));
+                }
+                let menu_height = menu.intrinsicContentSize().height;
+                controls_x = switch_x - 12.0 - SIZE_MENU_WIDTH;
+                menu.setFrame(rect(controls_x, (ROW - menu_height) / 2.0, SIZE_MENU_WIDTH, menu_height));
+                menu.selectItemAtIndex(Size::ALL.iter().position(|s| *s == sizes[i]).unwrap_or(0) as isize);
+                menu.setTag(i as isize);
+                unsafe {
+                    menu.setTarget(Some(target));
+                    menu.setAction(Some(sel!(setSize:)));
+                }
+                row.addSubview(&menu);
+            }
+
             let name = w::label(name, 13.0, unsafe { NSFontWeightMedium }, &rgba(255, 255, 255, 0.95), mtm);
-            let menu_width = if sizes.is_some() { SIZE_MENU_WIDTH + 8.0 } else { 0.0 };
-            let text_width = card_width - 48.0 - 66.0 - menu_width;
+            let text_width = controls_x - 12.0 - 48.0;
             match blurb {
                 Some(blurb) => {
                     name.setFrame(rect(48.0, ROW - 9.0 - 16.0, text_width, 16.0));
@@ -202,32 +234,6 @@ impl SettingsWindow {
                 None => name.setFrame(rect(48.0, (ROW - 16.0) / 2.0, text_width, 16.0)),
             }
             row.addSubview(&name);
-
-            let switch = NSSwitch::new(mtm);
-            switch.setFrame(rect(card_width - 14.0 - 38.0, (ROW - 22.0) / 2.0, 38.0, 22.0));
-            switch.setState(if *on { NSControlStateValueOn } else { 0 });
-            switch.setTag(i as isize);
-            unsafe {
-                switch.setTarget(Some(target));
-                switch.setAction(Some(*action));
-            }
-            row.addSubview(&switch);
-
-            if let Some(sizes) = sizes {
-                let menu_frame = rect(card_width - 14.0 - 38.0 - 8.0 - SIZE_MENU_WIDTH, (ROW - 22.0) / 2.0, SIZE_MENU_WIDTH, 22.0);
-                let menu = NSPopUpButton::initWithFrame_pullsDown(mtm.alloc(), menu_frame, false);
-                menu.setControlSize(NSControlSize::Small);
-                for size in Size::ALL {
-                    menu.addItemWithTitle(&NSString::from_str(size.name()));
-                }
-                menu.selectItemAtIndex(Size::ALL.iter().position(|s| *s == sizes[i]).unwrap_or(0) as isize);
-                menu.setTag(i as isize);
-                unsafe {
-                    menu.setTarget(Some(target));
-                    menu.setAction(Some(sel!(setSize:)));
-                }
-                row.addSubview(&menu);
-            }
 
             if i + 1 < rows.len() {
                 let rule = frame_view(48.0, 0.0, card_width - 48.0, 1.0, mtm);

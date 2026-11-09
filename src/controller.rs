@@ -284,6 +284,16 @@ define_class!(
         fn window_will_close(&self, _notification: &NSNotification) {
             self.hide_dashboard();
         }
+
+        /// Typing in the notes or terminal holds the panel open even after the pointer leaves.
+        /// Clicking another window ends that, so fold it unless the pointer is still over it.
+        #[unsafe(method(windowDidResignKey:))]
+        fn window_did_resign_key(&self, notification: &NSNotification) {
+            let panel: &AnyObject = self.ui().panel.as_ref();
+            if notification.object().is_some_and(|window| std::ptr::eq(&*window as *const AnyObject, panel)) {
+                self.collapse_when_left();
+            }
+        }
     }
 
     impl Controller {
