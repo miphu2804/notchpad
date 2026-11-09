@@ -1,5 +1,5 @@
 //! Linear: assigned issues become tasks (`ext = linear:<identifier>`), and completing such a
-//! task in Notchpad moves the issue to its team's completed state.
+//! task in Overhang moves the issue to its team's completed state.
 //!
 //! OAuth credentials and the legacy personal API key live only in the macOS Keychain. HTTP goes
 //! through `curl`, which reads URLs, headers and bodies from a config on stdin, so credentials
@@ -68,7 +68,7 @@ pub fn oauth_client_id() -> Option<String> {
 
 pub fn oauth_configuration_error() -> String {
     format!(
-        "Linear OAuth is not configured. Set NOTCHPAD_LINEAR_CLIENT_ID when building or launching Notchpad, and register {REDIRECT_URI} as the redirect URI."
+        "Linear OAuth is not configured. Set NOTCHPAD_LINEAR_CLIENT_ID when building or launching Overhang, and register {REDIRECT_URI} as the redirect URI."
     )
 }
 
@@ -262,27 +262,27 @@ fn receive_callback_until(listener: TcpListener, expected_state: &str, cancel: &
                     Err(_) => continue,
                 };
                 let Some(target) = request.strip_prefix("GET ").and_then(|request| request.split_once(' ').map(|(target, _)| target)) else {
-                    respond(&mut stream, "Notchpad is waiting for Linear's callback.");
+                    respond(&mut stream, "Overhang is waiting for Linear's callback.");
                     continue;
                 };
                 let Some((path, query)) = target.split_once('?') else {
-                    respond(&mut stream, "Notchpad is waiting for Linear's callback.");
+                    respond(&mut stream, "Overhang is waiting for Linear's callback.");
                     continue;
                 };
                 if path != CALLBACK_PATH {
-                    respond(&mut stream, "This callback is not for Notchpad.");
+                    respond(&mut stream, "This callback is not for Overhang.");
                     continue;
                 }
                 let params = match parse_query(query) {
                     Ok(params) => params,
                     Err(error) => {
-                        respond(&mut stream, "The Linear callback was malformed; return to Notchpad and try again.");
+                        respond(&mut stream, "The Linear callback was malformed; return to Overhang and try again.");
                         eprintln!("notchpad: malformed Linear callback: {error}");
                         continue;
                     }
                 };
                 if params.get("state").map(String::as_str) != Some(expected_state) {
-                    respond(&mut stream, "The Linear authorization state was invalid; return to Notchpad and try again.");
+                    respond(&mut stream, "The Linear authorization state was invalid; return to Overhang and try again.");
                     continue;
                 }
                 if let Some(error) = params.get("error") {

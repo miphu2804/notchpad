@@ -7,7 +7,7 @@ Requires macOS 14+, a Rust toolchain and the Xcode command line tools.
 ```bash
 cargo build --release
 cargo test
-./macos/bundle.sh          # builds target/release/Notchpad.app
+./macos/bundle.sh          # builds target/release/Overhang.app
 ```
 
 ## Workflow
