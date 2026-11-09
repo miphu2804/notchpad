@@ -1,3 +1,14 @@
+### [2026-11-09 19:25 UTC+07:00] — [Fix] Terminal wheel scrolls programs that track the mouse
+
+**Done:**
+- When a program has turned on mouse tracking (e.g. Claude Code full screen, vim with `mouse=a`), the scroll wheel sends it wheel reports at the cell under the pointer, in SGR form when asked, else the legacy form. Before, the alternate screen always got arrow keys, which only walked the prompt history. Programs without mouse tracking still get arrows, and the normal screen still scrolls the scrollback.
+
+**Changed  files:**
+- `src/terminal_view.rs` — modified
+
+**Flow explained:**
+`scrollWheel:` → `scroll_by` turns the delta into whole lines → with `MOUSE_MODE`, `pointer_cell` + `wheel_report` (button 64 up / 65 down) per line; otherwise the arrow keys or scrollback path as before. Verified by a run against a probe program: mouse mode got `ESC[<64;41;1M` ×2 and `ESC[<65;41;1M`, plain alternate screen got `ESC[A` ×6 and `ESC[B` ×3.
+
 ### [2026-11-09 18:35 UTC+07:00] — [Feature] Per-section panel size and collapse on Space change
 
 **Done:**
@@ -153,16 +164,3 @@ The focus card is now "Today's pomodoros": 8 pixel tomatoes (ripe red when done,
 **Flow explained:**
 The focus timer ticks only while running; on finish it appends a `done` line and starts a break, and End appends `ended`. The count re-reads the log on each refresh. Terminal: Return calls `run_command`, which handles `cd` and the interactive-program hint in `Shell::submit`, or spawns the child in its own process group; two reader threads send chunks over mpsc, and a 0.1 s timer that exists only while a command runs drains them into the output view, trimmed to 2000 lines.
 
-### [2026-11-09 14:45 UTC+07:00] — [Feature] Notes tab, and header tabs on both sides of the notch
-
-**Done:**
-A Notes tab (note icon) holds a free-text notepad that saves to `notes.txt` half a second after typing stops and whenever the panel closes. ⌘↩ turns the line under the cursor into a task for today, parsed by quick-add (`call mom 6pm` becomes "call mom" at 18:00), removes the line from the note and flashes "Added to Today". With five tabs, the header now splits them across the notch: Workspace and Week left (after ✕), Clips, ♪ and Notes right. Built by the np-notes thread. Accepted by renders of the Notes and Workspace tabs and by a scripted ⌘↩ on a scratch HOME.
-
-**Changed  files:**
-- `src/note_view.rs` — created (`NoteView` text view with ⌘↩, `take_line`, tests)
-- `src/store.rs` — modified (`load_notes`, `save_notes`)
-- `src/controller.rs` — modified (Notes tab; `push_task` shared by add-task fields and ⌘↩; `Header` with left and right tab groups and two `notch_gaps` constraints)
-- `src/main.rs` — modified (module)
-
-**Flow explained:**
-`NoteView` reports edits and ⌘↩ to the controller. Edits reschedule a debounced `saveNotes:`; ⌘↩ calls `note_line_to_task`, which splits the text with `take_line` and passes the line to `push_task` (quick-add, save, refresh). In the header, one constraint keeps the left group's trailing edge clear of the notch and another keeps the right group's leading edge clear; `screenParametersChanged:` updates both.
