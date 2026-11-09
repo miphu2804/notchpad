@@ -1,3 +1,17 @@
+### [2026-11-09 21:35 UTC+07:00] — [Feature] Notch alerts, task reminders, undo delete, open at login
+
+**Done:**
+- Pomodoro and break endings and timed tasks (10 min before, and at the time) chime and open the notch on Workspace without taking keyboard focus. The message stays on the card until the panel closes; before, a pomodoro ending focused the task input.
+- Deleting a task shows "Deleted …" with Undo for 6 s; Undo puts it back where it was.
+- Header menu › Copy today as Markdown: a checklist in the quick-add syntax.
+- Settings › General › Open at login (`SMAppService`).
+
+**Changed  files:**
+- `src/controller.rs`, `src/task_alerts.rs`, `src/chime.rs`, `src/settings_window.rs`, `Cargo.toml`, `Cargo.lock`, `README.md` — modified
+
+**Flow explained:**
+The 2 s `reload:` tick calls `remind_tasks`, which works only when the minute changes: `task_alerts::reminders_between` returns today's open timed tasks whose reminder minute fell since the last check, at most 5 min back. `alert` rings the chime and pins the panel open with `orderFrontRegardless`, not as key window. Collapsing clears the toasts. Verified by hook logs (reminder opens the panel with `key=false`; delete, Undo and collapse states), renders of the reminder, Undo and General pane, 64 tests, and 0.0% idle CPU.
+
 ### [2026-11-09 20:55 UTC+07:00] — [Feature] Task priorities, clear completed; Week and Notes removed
 
 **Done:**
@@ -143,19 +157,3 @@ Week tab: incomplete Apple Reminders due today or overdue sit in Today, those du
 
 **Flow explained:**
 `reload_events` also starts an async `fetchRemindersMatchingPredicate`; its completion converts to plain `Reminder`s off the main thread, hops to the main queue and posts `NotchpadRemindersFetched`, whose observer stores them and re-renders the Week tab. `refresh` reads `pomodoros.txt` once into `Week { done[7], minutes, streak }`; the count chip uses `done[6]` and `WeekBars` draws the array.
-
-### [2026-11-09 14:50 UTC+07:00] — [Feature] Calendar events in the Week tab
-
-**Done:**
-The Today and Tomorrow columns list that day's calendar events above the tasks: a dot in the calendar's colour, `HH:mm` or "All day", and a one-line title, at most 4 then "+N more". Read-only through EventKit. Access is never requested at launch: while undetermined, the Inbox column shows a "Show calendar events" pill that asks; denied shows nothing. Events re-fetch on launch, tab switch, expand and `EKEventStoreChangedNotification` — no polling, idle CPU 0.0%. Built by a Sonnet thread; accepted by fake-event state logs and unit tests (the real fetch and prompt need the bundled app and the user's click).
-
-**Changed  files:**
-- `src/calendar.rs` — created
-- `src/controller.rs` — modified
-- `src/main.rs` — modified
-- `src/notch_motion.rs` — modified
-- `Cargo.toml`, `Cargo.lock` — modified (`objc2-event-kit`, `block2`)
-- `macos/Info.plist` — modified (`NSCalendarsFullAccessUsageDescription`)
-
-**Flow explained:**
-`reload_events` asks `Calendar::events` (empty unless access is FullAccess) for today and tomorrow, splitting multi-day events per day, then `render_week` builds rows from the pure `day_rows` (all-day first, by start time, capped). The pill's click calls `requestFullAccessToEventsWithCompletion`, whose handler posts the change notification so the main-queue observer re-fetches.
