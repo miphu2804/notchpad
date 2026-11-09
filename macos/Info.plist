@@ -25,10 +25,6 @@
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Notchpad controls Music and Spotify playback from the notch.</string>
-	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>Notchpad reads your calendar to show today's and tomorrow's events beside your tasks. It never changes them.</string>
-	<key>NSRemindersFullAccessUsageDescription</key>
-	<string>Notchpad shows your due and overdue reminders beside your tasks. It only changes a reminder when you tick it off.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 </dict>

@@ -1,7 +1,7 @@
 //! User preferences in `settings.txt` beside `tasks.txt`: which notch sections are shown and
 //! what the collapsed notch may display.
 //!
-//! Plain `key=value` lines: `hidden=clips,terminal`, `size=terminal:xtall,week:tall`,
+//! Plain `key=value` lines: `hidden=clips,terminal`, `size=terminal:xtall,clips:tall`,
 //! `wing_music=1`, `wing_focus=1`.
 //! A missing file, a missing key, an unknown key or a garbled line leaves the default,
 //! which shows everything.
@@ -16,12 +16,10 @@ pub struct Section {
     pub blurb: &'static str,
 }
 
-pub const SECTIONS: [Section; 6] = [
+pub const SECTIONS: [Section; 4] = [
     Section { key: "workspace", name: "Workspace", symbol: "checklist", blurb: "Today's tasks and the focus timer" },
-    Section { key: "week", name: "Week", symbol: "calendar", blurb: "Events, reminders and tasks" },
     Section { key: "clips", name: "Clips", symbol: "paperclip", blurb: "Clipboard history and dropped files" },
     Section { key: "music", name: "Playing", symbol: "play.circle", blurb: "Now playing and playback controls" },
-    Section { key: "notes", name: "Notes", symbol: "note.text", blurb: "A scratch note" },
     Section { key: "terminal", name: "Terminal", symbol: "terminal", blurb: "A shell in the notch" },
 ];
 
@@ -63,7 +61,7 @@ impl Size {
 }
 
 /// Index of Music in [`SECTIONS`].
-const MUSIC: usize = 3;
+const MUSIC: usize = 2;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -191,8 +189,8 @@ mod tests {
     #[test]
     fn round_trip() {
         let mut settings = Settings::default();
-        settings.hidden[2] = true;
-        settings.hidden[5] = true;
+        settings.hidden[1] = true;
+        settings.hidden[3] = true;
         settings.wing_music = false;
         assert_eq!(format(&settings), "hidden=clips,terminal\nsize=\nwing_music=0\nwing_focus=1\n");
         assert_eq!(parse(&format(&settings)), settings);
@@ -203,29 +201,30 @@ mod tests {
     fn sizes_round_trip_listing_only_non_compact() {
         let mut settings = Settings::default();
         settings.sizes[1] = Size::Tall;
-        settings.sizes[5] = Size::ExtraTall;
-        assert!(format(&settings).contains("size=week:tall,terminal:xtall\n"));
+        settings.sizes[3] = Size::ExtraTall;
+        assert!(format(&settings).contains("size=clips:tall,terminal:xtall\n"));
         assert_eq!(parse(&format(&settings)), settings);
         assert_eq!(parse("hidden=clips\n").sizes, [Size::Compact; SECTIONS.len()]);
     }
 
     #[test]
     fn unknown_size_words_and_sections_are_ignored() {
-        let settings = parse("size=terminal:huge,bogus:tall,week:tall,notes\n");
-        assert_eq!(settings.sizes, [Size::Compact, Size::Tall, Size::Compact, Size::Compact, Size::Compact, Size::Compact]);
+        // `week` and `notes` were sections once; files that still name them load as before.
+        let settings = parse("size=terminal:huge,bogus:tall,week:tall,clips:tall,notes\n");
+        assert_eq!(settings.sizes, [Size::Compact, Size::Tall, Size::Compact, Size::Compact]);
     }
 
     #[test]
     fn unknown_keys_and_names_are_ignored() {
-        let settings = parse("theme=dark\nhidden=notes,bogus\nwing_focus=0\n");
-        assert_eq!(settings.hidden, [false, false, false, false, true, false]);
+        let settings = parse("theme=dark\nhidden=notes,bogus,music\nwing_focus=0\n");
+        assert_eq!(settings.hidden, [false, false, true, false]);
         assert!(!settings.wing_focus);
     }
 
     #[test]
     fn garbage_lines_are_ignored() {
-        let settings = parse("???\n\n=\nwing_music=maybe\nhidden\n  hidden = week \n");
-        assert_eq!(settings.hidden, [false, true, false, false, false, false]);
+        let settings = parse("???\n\n=\nwing_music=maybe\nhidden\n  hidden = clips \n");
+        assert_eq!(settings.hidden, [false, true, false, false]);
         assert!(settings.wing_music);
     }
 
@@ -238,12 +237,12 @@ mod tests {
     #[test]
     fn the_last_visible_section_cannot_be_hidden() {
         let mut settings = Settings::default();
-        for i in 0..5 {
+        for i in 0..3 {
             assert!(settings.set_shown(i, false));
         }
-        assert!(!settings.set_shown(5, false));
-        assert!(!settings.hidden[5]);
-        assert_eq!(settings.first_visible(), 5);
+        assert!(!settings.set_shown(3, false));
+        assert!(!settings.hidden[3]);
+        assert_eq!(settings.first_visible(), 3);
         assert!(settings.set_shown(0, true));
     }
 
