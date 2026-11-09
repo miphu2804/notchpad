@@ -48,6 +48,8 @@ pub struct Ivars {
     wing_velocity: Cell<f64>,
     wing_target: Cell<f64>,
     last_frame: Cell<Option<f64>>,
+    /// False while the content lives in the dashboard window: fading and hiding it would blank that window.
+    drives_content: Cell<bool>,
 }
 
 define_class!(
@@ -75,7 +77,7 @@ define_class!(
             if settled {
                 link.setPaused(true);
                 self.ivars().last_frame.set(None);
-                if !self.ivars().open.get() {
+                if !self.ivars().open.get() && self.ivars().drives_content.get() {
                     self.ivars().content.setHidden(true);
                 }
             }
@@ -103,6 +105,7 @@ impl NotchMotion {
             wing_velocity: Cell::new(0.0),
             wing_target: Cell::new(0.0),
             last_frame: Cell::new(None),
+            drives_content: Cell::new(true),
         };
         let this = mtm.alloc::<Self>().set_ivars(ivars);
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -119,11 +122,28 @@ impl NotchMotion {
         self.apply();
     }
 
+    /// Hands the content to, or takes it back from, another window. Taking it back
+    /// re-applies the current fade, so a collapsed notch gets its content hidden again.
+    pub fn drive_content(&self, on: bool) {
+        let content = &self.ivars().content;
+        self.ivars().drives_content.set(on);
+        if on {
+            content.setHidden(!self.ivars().open.get());
+            self.apply();
+        } else {
+            content.setHidden(false);
+            content.setAlphaValue(1.0);
+            if let Some(layer) = content.layer() {
+                layer.setTransform(CATransform3D::new_translation(0.0, 0.0, 0.0));
+            }
+        }
+    }
+
     pub fn set_open(&self, open: bool) {
         let s = self.ivars();
         s.open.set(open);
         s.reduce_motion.set(w::reduce_motion());
-        if open {
+        if open && s.drives_content.get() {
             s.content.setHidden(false);
         }
         self.wake();
@@ -211,6 +231,9 @@ impl NotchMotion {
         let frame = self.frame_at(s.progress.get());
         if s.panel.frame() != frame {
             s.panel.setFrame_display(frame, true);
+        }
+        if !s.drives_content.get() {
+            return;
         }
         let size = s.content.frame().size;
         s.content.setFrameOrigin(NSPoint::new(((frame.size.width - size.width) / 2.0).round(), 0.0));
