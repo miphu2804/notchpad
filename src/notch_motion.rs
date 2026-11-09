@@ -32,8 +32,8 @@ const MIN_SCALE: f64 = 0.97;
 pub struct Ivars {
     panel: Retained<NotchPanel>,
     content: Retained<NSView>,
-    collapsed: NSRect,
-    expanded: NSRect,
+    collapsed: Cell<NSRect>,
+    expanded: Cell<NSRect>,
     link: OnceCell<Retained<CADisplayLink>>,
     open: Cell<bool>,
     /// 0 = collapsed frame, 1 = expanded frame; overshoots past 1 while springing open.
@@ -86,8 +86,8 @@ impl NotchMotion {
         let ivars = Ivars {
             panel,
             content,
-            collapsed,
-            expanded,
+            collapsed: Cell::new(collapsed),
+            expanded: Cell::new(expanded),
             link: OnceCell::new(),
             open: Cell::new(false),
             progress: Cell::new(0.0),
@@ -102,6 +102,14 @@ impl NotchMotion {
         this.ivars().content.setWantsLayer(true);
         this.apply();
         this
+    }
+
+    /// Replace both animation endpoints without travelling across the desktop or
+    /// changing the current open/close progress.
+    pub fn set_rects(&self, collapsed: NSRect, expanded: NSRect) {
+        self.ivars().collapsed.set(collapsed);
+        self.ivars().expanded.set(expanded);
+        self.apply();
     }
 
     pub fn set_open(&self, open: bool) {
@@ -196,7 +204,7 @@ impl NotchMotion {
 
     /// Panel frame for `progress`, kept centred under the notch and flush with the top.
     fn frame_at(&self, progress: f64) -> NSRect {
-        let (a, b) = (self.ivars().collapsed, self.ivars().expanded);
+        let (a, b) = (self.ivars().collapsed.get(), self.ivars().expanded.get());
         let lerp = |from: f64, to: f64| from + (to - from) * progress;
         let width = lerp(a.size.width, b.size.width).round();
         let height = lerp(a.size.height, b.size.height).round();
