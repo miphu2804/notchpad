@@ -16,7 +16,7 @@ use objc2_app_kit::{NSClickGestureRecognizer, NSSound,
     NSStackViewDistribution, NSTextAlignment, NSTextDidChangeNotification, NSTextDidEndEditingNotification, NSTextField, NSTextView, NSControlTextDidEndEditingNotification, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
-use objc2_foundation::{NSRange, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSNotificationSuspensionBehavior, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
+use objc2_foundation::{NSRange, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 
 use crate::clip_card::{self, ClipCard};
@@ -24,7 +24,7 @@ use crate::clips::ClipHistory;
 use crate::days;
 use crate::drop_column::DropColumn;
 use crate::list_row::{self, ListRow};
-use crate::now_playing::{self, Command, NowPlaying, Source};
+use crate::now_playing::{Command, NowPlaying};
 use crate::note_view::{self, NoteView};
 use crate::notch_motion::NotchMotion;
 use crate::task_row::TaskRow;
@@ -354,37 +354,34 @@ define_class!(
         #[unsafe(method(showMusic:))]
         fn show_music(&self, _sender: &AnyObject) {
             self.ivars().tab.set(Tab::Music);
+            // Spawned on first use, so nothing runs for people who never open the tab.
+            self.ivars().now_playing.borrow_mut().start(self.target(), sel!(nowPlayingChanged:));
             self.refresh();
         }
 
         #[unsafe(method(musicPrevious:))]
         fn music_previous(&self, _sender: &AnyObject) {
-            self.ivars().now_playing.borrow().send(Command::Previous);
+            self.ivars().now_playing.borrow_mut().send(Command::Previous);
         }
 
         #[unsafe(method(musicPlayPause:))]
         fn music_play_pause(&self, _sender: &AnyObject) {
-            self.ivars().now_playing.borrow().send(Command::PlayPause);
+            self.ivars().now_playing.borrow_mut().send(Command::PlayPause);
         }
 
         #[unsafe(method(musicNext:))]
         fn music_next(&self, _sender: &AnyObject) {
-            self.ivars().now_playing.borrow().send(Command::Next);
+            self.ivars().now_playing.borrow_mut().send(Command::Next);
         }
 
-        #[unsafe(method(musicChanged:))]
-        fn music_changed(&self, notification: &NSNotification) {
-            self.player_changed(Source::Music, notification);
-        }
-
-        #[unsafe(method(spotifyChanged:))]
-        fn spotify_changed(&self, notification: &NSNotification) {
-            self.player_changed(Source::Spotify, notification);
+        #[unsafe(method(nowPlayingChanged:))]
+        fn now_playing_changed(&self, _arg: Option<&AnyObject>) {
+            self.ivars().now_playing.borrow_mut().drain();
+            self.render_music();
         }
 
         #[unsafe(method(tickMusic:))]
         fn tick_music(&self, _timer: &NSTimer) {
-            self.ivars().now_playing.borrow_mut().tick();
             self.render_music();
         }
 
@@ -585,6 +582,7 @@ define_class!(
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: &AnyObject) {
             self.save_notes_now();
+            self.ivars().now_playing.borrow_mut().stop();
             NSApplication::sharedApplication(self.mtm()).terminate(None);
         }
     }
@@ -621,14 +619,6 @@ impl Controller {
             );
             // Lives for the whole process, so the returned timer handle is not kept.
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(2.0, this.target(), sel!(reload:), None, true);
-            // Delivered even while this accessory app is inactive, which it always is.
-            let center = NSDistributedNotificationCenter::defaultCenter();
-            for (name, action) in [(now_playing::MUSIC_NOTIFICATION, sel!(musicChanged:)), (now_playing::SPOTIFY_NOTIFICATION, sel!(spotifyChanged:))] {
-                center.addObserver_selector_name_object_suspensionBehavior(
-                    this.target(), action, Some(&NSString::from_str(name)), None,
-                    NSNotificationSuspensionBehavior::DeliverImmediately,
-                );
-            }
             // Reading the pasteboard's change count is cheap, so copies show up within half a second.
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.5, this.target(), sel!(pollClips:), None, true);
         }
@@ -928,12 +918,6 @@ impl Controller {
         self.render_focus();
     }
 
-    fn player_changed(&self, source: Source, notification: &NSNotification) {
-        let Some(info) = notification.userInfo() else { return };
-        self.ivars().now_playing.borrow_mut().apply(source, &now_playing::info_map(&info));
-        self.render_music();
-    }
-
     /// One-second ticks only while someone can see the position move.
     fn sync_music_timer(&self) {
         let state = self.ivars();
@@ -985,9 +969,9 @@ impl Controller {
                 view.title.setStringValue(&NSString::from_str(&track.title));
                 let credits = [track.artist.as_str(), track.album.as_str()];
                 view.subtitle.setStringValue(&NSString::from_str(&credits.iter().filter(|c| !c.is_empty()).copied().collect::<Vec<_>>().join(" · ")));
-                view.elapsed.setStringValue(&NSString::from_str(&clock(track.position)));
+                view.elapsed.setStringValue(&NSString::from_str(&clock(track.position())));
                 view.total.setStringValue(&NSString::from_str(&clock(track.duration)));
-                let fraction = if track.duration > 0.0 { track.position / track.duration } else { 0.0 };
+                let fraction = if track.duration > 0.0 { track.position() / track.duration } else { 0.0 };
                 view.progress.setConstant(MUSIC_PROGRESS_WIDTH * fraction.clamp(0.0, 1.0));
                 view.toggle.setImage(Some(&w::symbol(if track.playing { "pause.fill" } else { "play.fill" })));
             }
@@ -1650,7 +1634,7 @@ impl Controller {
         column.setCustomSpacing_afterView(10.0, &times);
         let now = w::stack(&[&art, &column], false, 20.0, mtm);
 
-        let empty = w::label("Nothing playing. Start Music or Spotify.", 12.0, unsafe { NSFontWeightRegular }, &white(0.45), mtm);
+        let empty = w::label("Nothing playing.", 12.0, unsafe { NSFontWeightRegular }, &white(0.45), mtm);
         let body = NSView::new(mtm);
         body.setTranslatesAutoresizingMaskIntoConstraints(false);
         for view in [&**now, &**empty] {
