@@ -1,3 +1,17 @@
+### [2026-11-09 14:45 UTC+07:00] — [Feature] Notes tab, and header tabs on both sides of the notch
+
+**Done:**
+A Notes tab (note icon) holds a free-text notepad that saves to `notes.txt` half a second after typing stops and whenever the panel closes. ⌘↩ turns the line under the cursor into a task for today, parsed by quick-add (`call mom 6pm` becomes "call mom" at 18:00), removes the line from the note and flashes "Added to Today". With five tabs, the header now splits them across the notch: Workspace and Week left (after ✕), Clips, ♪ and Notes right. Built by the np-notes thread. Accepted by renders of the Notes and Workspace tabs and by a scripted ⌘↩ on a scratch HOME.
+
+**Changed  files:**
+- `src/note_view.rs` — created (`NoteView` text view with ⌘↩, `take_line`, tests)
+- `src/store.rs` — modified (`load_notes`, `save_notes`)
+- `src/controller.rs` — modified (Notes tab; `push_task` shared by add-task fields and ⌘↩; `Header` with left and right tab groups and two `notch_gaps` constraints)
+- `src/main.rs` — modified (module)
+
+**Flow explained:**
+`NoteView` reports edits and ⌘↩ to the controller. Edits reschedule a debounced `saveNotes:`; ⌘↩ calls `note_line_to_task`, which splits the text with `take_line` and passes the line to `push_task` (quick-add, save, refresh). In the header, one constraint keeps the left group's trailing edge clear of the notch and another keeps the right group's leading edge clear; `screenParametersChanged:` updates both.
+
 ### [2026-11-09 14:20 UTC+07:00] — [Feature] Now Playing music tab
 
 **Done:**
@@ -126,16 +140,4 @@ Dragging a row puts its store index on the pasteboard. The column under the poin
 
 **Flow explained:**
 Claude pulls items via a service connector and calls `add_task` with `ext`; the server rewrites `tasks.txt`; the app sees the new mtime and re-renders.
-
-### [2026-11-08 20:45 UTC+07:00] — [Fix] Hover flicker at top edge; M4 Pro notch shape
-
-**Done:**
-Panel no longer closes/reopens while the pointer rests on the notch. Notch drawn with concave top ears and rounded bottom corners (MacBook Pro M4 Pro proportions; 185×32 default on displays without a notch).
-
-**Changed  files:**
-- `src/panel.rs` — modified (`NotchShape` view, `ear()` sizing)
-- `src/controller.rs` — modified (`TOP_SLOP`, exit confirmation + recheck, ear-aware rects)
-
-**Flow explained:**
-The pointer at the top edge sits at the screen's max Y, outside a window ending there, so AppKit reported exits and the panel looped. The window now extends 1pt above the screen, and every exit is confirmed against `NSEvent::mouseLocation()`; a spurious exit starts a 0.25s recheck until the pointer truly leaves.
 
