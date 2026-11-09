@@ -9,8 +9,9 @@
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -28,6 +29,7 @@ const SERVICE: &str = "notchpad.linear";
 const API_KEY_ACCOUNT: &str = "api-key";
 const OAUTH_ACCOUNT: &str = "oauth-token";
 const CALLBACK_ADDR: &str = "127.0.0.1:53682";
+const REDIRECT_URI: &str = "http://127.0.0.1:53682/oauth/callback";
 const CALLBACK_PATH: &str = "/oauth/callback";
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const SYNC_EVERY: Duration = Duration::from_secs(10 * 60);
@@ -39,6 +41,7 @@ const COMPLETED_STATE: &str = r#"query($id: String!) { issue(id: $id) { id team 
 const SET_STATE: &str = "mutation($id: String!, $state: String!) { issueUpdate(id: $id, input: {stateId: $state}) { success } }";
 
 static AUTH_GENERATION: AtomicU64 = AtomicU64::new(0);
+static AUTH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// An open issue assigned to the user.
 #[derive(Debug, PartialEq)]
@@ -64,41 +67,53 @@ pub fn oauth_client_id() -> Option<String> {
 
 pub fn oauth_configuration_error() -> String {
     format!(
-        "Linear OAuth is not configured. Set NOTCHPAD_LINEAR_CLIENT_ID when building or launching Notchpad, and register {CALLBACK_ADDR}{CALLBACK_PATH} as the redirect URI."
+        "Linear OAuth is not configured. Set NOTCHPAD_LINEAR_CLIENT_ID when building or launching Notchpad, and register {REDIRECT_URI} as the redirect URI."
     )
 }
 
-/// Starts the browser authorization flow without doing any network or waiting on the UI thread.
-/// The receiver is completed by a main-thread selector after the callback or timeout arrives.
-pub fn start_oauth(target: &AnyObject, selector: Sel) -> Result<Receiver<Result<(), String>>, String> {
-    let client_id = oauth_client_id().ok_or_else(oauth_configuration_error)?;
-    let (sender, receiver) = mpsc::channel();
-    let target = target as *const AnyObject as usize;
-    thread::spawn(move || {
-        let result = oauth_flow(&client_id);
-        if sender.send(result).is_ok() {
-            let target = target as *const AnyObject;
-            let _: () = unsafe {
-                msg_send![target, performSelectorOnMainThread: selector, withObject: std::ptr::null::<AnyObject>(), waitUntilDone: false]
-            };
-        }
-    });
-    Ok(receiver)
+/// A pending browser authorization. The UI polls the receiver on the main thread, so the worker
+/// never retains or messages an AppKit object after the window has gone away.
+pub struct OAuthAttempt {
+    receiver: Receiver<Result<(), String>>,
+    cancel: Arc<AtomicBool>,
 }
 
-fn oauth_flow(client_id: &str) -> Result<(), String> {
-    let generation = AUTH_GENERATION.load(Ordering::Acquire);
+impl OAuthAttempt {
+    pub fn try_result(&self) -> Option<Result<(), String>> {
+        self.receiver.try_recv().ok()
+    }
+
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Release);
+        AUTH_GENERATION.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// Starts the browser authorization flow without doing any network or waiting on the UI thread.
+pub fn start_oauth() -> Result<OAuthAttempt, String> {
+    let client_id = oauth_client_id().ok_or_else(oauth_configuration_error)?;
+    let generation = AUTH_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker_cancel = Arc::clone(&cancel);
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = oauth_flow(&client_id, generation, &worker_cancel);
+        let _ = sender.send(result);
+    });
+    Ok(OAuthAttempt { receiver, cancel })
+}
+
+fn oauth_flow(client_id: &str, generation: u64, cancel: &AtomicBool) -> Result<(), String> {
     let listener = TcpListener::bind(CALLBACK_ADDR)
         .map_err(|_| format!("Could not listen for Linear's callback on {CALLBACK_ADDR}; close another OAuth attempt and try again"))?;
     listener.set_nonblocking(true).map_err(|err| format!("Linear callback listener: {err}"))?;
     let verifier = random_url_token()?;
     let state = random_url_token()?;
     let challenge = url_token(&sha256(verifier.as_bytes()));
-    let redirect_uri = format!("http://{CALLBACK_ADDR}{CALLBACK_PATH}");
     let url = format!(
         "{AUTHORIZE_ENDPOINT}?client_id={}&redirect_uri={}&response_type=code&scope=read%2Cwrite&state={}&code_challenge={}&code_challenge_method=S256",
         form_component(client_id),
-        form_component(&redirect_uri),
+        form_component(REDIRECT_URI),
         form_component(&state),
         form_component(&challenge),
     );
@@ -107,11 +122,14 @@ fn oauth_flow(client_id: &str) -> Result<(), String> {
         .spawn()
         .map_err(|err| format!("Could not open Linear in the default browser: {err}"))?;
 
-    let code = receive_callback(listener, &state)?;
+    let code = receive_callback(listener, &state, cancel)?;
+    if cancel.load(Ordering::Acquire) {
+        return Err("Linear authorization canceled".to_owned());
+    }
     let body = form(&[
         ("grant_type", "authorization_code"),
         ("code", &code),
-        ("redirect_uri", &redirect_uri),
+        ("redirect_uri", REDIRECT_URI),
         ("client_id", client_id),
         ("code_verifier", &verifier),
     ]);
@@ -127,7 +145,16 @@ struct TokenSet {
     expires_at: u64,
 }
 
+fn auth_lock() -> &'static Mutex<()> {
+    AUTH_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn save_oauth(token: &TokenSet, generation: u64) -> Result<(), String> {
+    let _guard = auth_lock().lock().map_err(|_| "Linear credential lock failed".to_owned())?;
+    save_oauth_locked(token, generation)
+}
+
+fn save_oauth_locked(token: &TokenSet, generation: u64) -> Result<(), String> {
     if AUTH_GENERATION.load(Ordering::Acquire) != generation {
         return Err("Linear credentials were disconnected during authorization".to_owned());
     }
@@ -148,15 +175,26 @@ fn oauth_tokens() -> Result<Option<TokenSet>, String> {
 }
 
 fn access_token() -> Result<String, String> {
+    let generation = AUTH_GENERATION.load(Ordering::Acquire);
     let Some(token) = oauth_tokens()? else { return legacy_key() };
     if token.expires_at > now().saturating_add(30) {
         return Ok(format!("Bearer {}", token.access));
     }
-    Ok(format!("Bearer {}", refresh_oauth(&token)?))
+    Ok(format!("Bearer {}", refresh_oauth(generation)?))
 }
 
-fn refresh_oauth(old: &TokenSet) -> Result<String, String> {
-    let generation = AUTH_GENERATION.load(Ordering::Acquire);
+/// Refresh is a single-flight operation. The Keychain is re-read after acquiring the lock so
+/// callers that observed the same expired token reuse a rotated result instead of racing it.
+fn refresh_oauth(expected_generation: u64) -> Result<String, String> {
+    let _guard = auth_lock().lock().map_err(|_| "Linear credential lock failed".to_owned())?;
+    if AUTH_GENERATION.load(Ordering::Acquire) != expected_generation {
+        return Err("Linear credentials were disconnected during refresh".to_owned());
+    }
+    let old = oauth_tokens()?.ok_or("Linear OAuth credentials disappeared")?;
+    if old.expires_at > now().saturating_add(30) {
+        return Ok(old.access);
+    }
+    let generation = expected_generation;
     let client_id = oauth_client_id().ok_or_else(oauth_configuration_error)?;
     let body = form(&[
         ("grant_type", "refresh_token"),
@@ -164,9 +202,9 @@ fn refresh_oauth(old: &TokenSet) -> Result<String, String> {
         ("client_id", &client_id),
     ]);
     let reply = post_form(TOKEN_ENDPOINT, &body)?;
-    let token = parse_token_response(&reply, Some(old))?;
+    let token = parse_token_response(&reply, Some(&old))?;
     let access = token.access.clone();
-    save_oauth(&token, generation)?;
+    save_oauth_locked(&token, generation)?;
     Ok(access)
 }
 
@@ -181,12 +219,20 @@ fn parse_token_response(text: &str, old: Option<&TokenSet>) -> Result<TokenSet, 
     Ok(TokenSet { access: access.to_owned(), refresh: refresh.to_owned(), expires_at: now().saturating_add(expires_in) })
 }
 
-fn receive_callback(listener: TcpListener, expected_state: &str) -> Result<String, String> {
-    let deadline = Instant::now() + CALLBACK_TIMEOUT;
+fn receive_callback(listener: TcpListener, expected_state: &str, cancel: &AtomicBool) -> Result<String, String> {
+    receive_callback_until(listener, expected_state, cancel, CALLBACK_TIMEOUT)
+}
+
+fn receive_callback_until(listener: TcpListener, expected_state: &str, cancel: &AtomicBool, timeout: Duration) -> Result<String, String> {
+    listener.set_nonblocking(true).map_err(|err| format!("Linear callback listener: {err}"))?;
+    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
+        if cancel.load(Ordering::Acquire) {
+            return Err("Linear authorization canceled".to_owned());
+        }
         match listener.accept() {
             Ok((mut stream, _)) => {
-                if stream.set_read_timeout(Some(Duration::from_secs(5))).is_err() {
+                if stream.set_read_timeout(Some(Duration::from_millis(100))).is_err() {
                     continue;
                 }
                 let request = match read_callback_request(&mut stream) {
@@ -205,7 +251,14 @@ fn receive_callback(listener: TcpListener, expected_state: &str) -> Result<Strin
                     respond(&mut stream, "This callback is not for Notchpad.");
                     continue;
                 }
-                let params = parse_query(query);
+                let params = match parse_query(query) {
+                    Ok(params) => params,
+                    Err(error) => {
+                        respond(&mut stream, "The Linear callback was malformed; return to Notchpad and try again.");
+                        eprintln!("notchpad: malformed Linear callback: {error}");
+                        continue;
+                    }
+                };
                 if params.get("state").map(String::as_str) != Some(expected_state) {
                     respond(&mut stream, "The Linear authorization state was invalid; return to Notchpad and try again.");
                     continue;
@@ -226,7 +279,11 @@ fn receive_callback(listener: TcpListener, expected_state: &str) -> Result<Strin
             Err(err) => return Err(format!("Linear callback listener: {err}")),
         }
     }
-    Err("Timed out waiting for Linear authorization".to_owned())
+    if cancel.load(Ordering::Acquire) {
+        Err("Linear authorization canceled".to_owned())
+    } else {
+        Err("Timed out waiting for Linear authorization".to_owned())
+    }
 }
 
 fn read_callback_request(stream: &mut TcpStream) -> Result<String, String> {
@@ -249,11 +306,20 @@ fn respond(stream: &mut TcpStream, message: &str) {
     let _ = stream.shutdown(Shutdown::Both);
 }
 
-fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
-    query.split('&').filter_map(|part| {
-        let (key, value) = part.split_once('=')?;
-        Some((percent_decode(key)?, percent_decode(value)?))
-    }).collect()
+fn parse_query(query: &str) -> Result<std::collections::HashMap<String, String>, String> {
+    let mut params = std::collections::HashMap::new();
+    for part in query.split('&') {
+        let (key, value) = part.split_once('=').ok_or("query parameter has no '='")?;
+        let key = percent_decode(key).ok_or("query parameter has invalid percent encoding")?;
+        let value = percent_decode(value).ok_or("query parameter has invalid percent encoding")?;
+        if key.is_empty() {
+            return Err("query parameter has an empty name".to_owned());
+        }
+        if params.insert(key, value).is_some() {
+            return Err("query parameter is duplicated".to_owned());
+        }
+    }
+    Ok(params)
 }
 
 fn hex_digit(byte: u8) -> Option<u8> {
@@ -364,7 +430,21 @@ pub fn connect(key: &str) -> Result<(), String> {
 }
 
 pub fn disconnect() {
-    AUTH_GENERATION.fetch_add(1, Ordering::AcqRel);
+    let generation = AUTH_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    if let Ok(_guard) = auth_lock().try_lock() {
+        delete_credentials();
+        return;
+    }
+    thread::spawn(move || {
+        let Ok(_guard) = auth_lock().lock() else { return };
+        if AUTH_GENERATION.load(Ordering::Acquire) != generation {
+            return;
+        }
+        delete_credentials();
+    });
+}
+
+fn delete_credentials() {
     let _ = delete_generic_password(SERVICE, API_KEY_ACCOUNT);
     let _ = delete_generic_password(SERVICE, OAUTH_ACCOUNT);
 }
@@ -445,12 +525,12 @@ fn set_completed(identifier: &str) -> Result<(), String> {
 // ---- HTTP --------------------------------------------------------------------------------
 
 fn request(query: &str, variables: Value) -> Result<String, String> {
+    let generation = AUTH_GENERATION.load(Ordering::Acquire);
     let auth = access_token()?;
     let oauth = oauth_tokens()?.is_some();
     let reply = request_with(&auth, query, variables.clone())?;
     if oauth && graphql_auth_failure(&reply) {
-        let token = oauth_tokens()?.ok_or("Linear OAuth credentials disappeared")?;
-        return request_with(&format!("Bearer {}", refresh_oauth(&token)?), query, variables);
+        return request_with(&format!("Bearer {}", refresh_oauth(generation)?), query, variables);
     }
     Ok(reply)
 }
@@ -564,7 +644,8 @@ mod tests {
     fn callback_rejects_wrong_state_before_accepting_the_real_one() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || receive_callback(listener, "right").unwrap());
+        let cancel = AtomicBool::new(false);
+        let server = thread::spawn(move || receive_callback_until(listener, "right", &cancel, CALLBACK_TIMEOUT).unwrap());
         for state in ["wrong", "right"] {
             let mut stream = TcpStream::connect(address).unwrap();
             write!(stream, "GET /oauth/callback?code=abc&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
@@ -583,11 +664,82 @@ mod tests {
     }
 
     #[test]
+    fn callback_rejects_duplicate_and_bad_percent_parameters() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let server = thread::spawn(move || receive_callback_until(listener, "right", &worker_cancel, CALLBACK_TIMEOUT));
+        for query in [
+            "code=abc&state=right&state=right",
+            "code=%ZZ&state=right",
+            "code=abc&state=wrong",
+        ] {
+            let mut stream = TcpStream::connect(address).unwrap();
+            write!(stream, "GET /oauth/callback?{query} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            assert!(response.contains("callback") || response.contains("state"));
+        }
+        cancel.store(true, Ordering::Release);
+        assert_eq!(server.join().unwrap(), Err("Linear authorization canceled".to_owned()));
+    }
+
+    #[test]
+    fn callback_timeout_and_cancel_are_prompt() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let started = Instant::now();
+        let server = thread::spawn(move || receive_callback_until(listener, "state", &worker_cancel, Duration::from_millis(20)));
+        assert_eq!(server.join().unwrap(), Err("Timed out waiting for Linear authorization".to_owned()));
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let server = thread::spawn(move || receive_callback_until(listener, "state", &worker_cancel, CALLBACK_TIMEOUT));
+        thread::sleep(Duration::from_millis(20));
+        cancel.store(true, Ordering::Release);
+        assert_eq!(server.join().unwrap(), Err("Linear authorization canceled".to_owned()));
+    }
+
+    #[test]
+    fn refresh_lock_serializes_concurrent_refresh_attempts() {
+        let guard = auth_lock().lock().unwrap();
+        let completed = Arc::new(AtomicBool::new(false));
+        let worker_completed = Arc::clone(&completed);
+        let worker = thread::spawn(move || {
+            let _guard = auth_lock().lock().unwrap();
+            worker_completed.store(true, Ordering::Release);
+        });
+        thread::sleep(Duration::from_millis(20));
+        assert!(!completed.load(Ordering::Acquire));
+        drop(guard);
+        worker.join().unwrap();
+        assert!(completed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn disconnected_generation_rejects_late_token_storage() {
+        let generation = AUTH_GENERATION.load(Ordering::Acquire);
+        AUTH_GENERATION.store(generation.wrapping_add(1), Ordering::Release);
+        let token = TokenSet { access: "access".into(), refresh: "refresh".into(), expires_at: now() + 60 };
+        assert!(save_oauth_locked(&token, generation).is_err());
+        AUTH_GENERATION.store(generation, Ordering::Release);
+    }
+
+    #[test]
+    fn oauth_configuration_names_exact_redirect_uri() {
+        assert!(oauth_configuration_error().contains(REDIRECT_URI));
+    }
+
+    #[test]
     fn oauth_token_forms_use_client_id_and_no_client_secret() {
         let authorization = form(&[
             ("grant_type", "authorization_code"),
             ("code", "code"),
-            ("redirect_uri", "http://127.0.0.1:53682/oauth/callback"),
+            ("redirect_uri", REDIRECT_URI),
             ("client_id", "client"),
             ("code_verifier", "verifier"),
         ]);

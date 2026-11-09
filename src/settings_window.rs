@@ -3,8 +3,6 @@
 //! except Open at login: that is the system's login-item state, read and set through `SMAppService`.
 
 use std::cell::{OnceCell, RefCell};
-use std::sync::mpsc::Receiver;
-
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
@@ -13,7 +11,7 @@ use objc2_app_kit::{
     NSControlSize, NSControlStateValueOn, NSFont, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSImageView,
     NSPopUpButton, NSSecureTextField, NSSwitch, NSTextAlignment, NSTextField, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
 };
-use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
 use crate::calendar::{self, Access};
@@ -49,7 +47,7 @@ const CLAUDE_CODE_ROW: isize = 10;
 const CLAUDE_DESKTOP_ROW: isize = 11;
 const CALENDAR_ROW: isize = 12;
 const LINEAR_ROW: isize = 13;
-/// The Linear key field carries `FIELD + row`.
+/// Generic secure-field tags used by integration rows that still have a field.
 const FIELD: isize = 200;
 const STATUS: isize = 100;
 const BUTTON_WIDTH: f64 = 90.0;
@@ -84,7 +82,8 @@ pub struct Ivars {
     on_change: Box<dyn Fn(&Settings)>,
     on_insights: Box<dyn Fn()>,
     parts: OnceCell<Parts>,
-    linear_oauth_pending: RefCell<Option<Receiver<Result<(), String>>>>,
+    linear_oauth_pending: RefCell<Option<linear::OAuthAttempt>>,
+    linear_oauth_timer: RefCell<Option<Retained<NSTimer>>>,
 }
 
 define_class!(
@@ -168,10 +167,16 @@ define_class!(
             self.refresh_integrations(CLAUDE_DESKTOP_ROW, error);
         }
 
-        /// Connects with the key typed into the field, or disconnects. The key goes to the Keychain
-        /// and nowhere else; the field is emptied once it has been used.
+        /// Starts OAuth, cancels a pending browser flow, or disconnects. Credentials never enter the UI.
         #[unsafe(method(toggleLinear:))]
         fn toggle_linear(&self, _sender: &NSButton) {
+            if let Some(attempt) = self.ivars().linear_oauth_pending.borrow_mut().take() {
+                attempt.cancel();
+                if let Some(timer) = self.ivars().linear_oauth_timer.borrow_mut().take() {
+                    timer.invalidate();
+                }
+                return self.refresh_integrations(LINEAR_ROW, Some("Linear authorization canceled".to_owned()));
+            }
             let mut settings = self.ivars().settings.borrow().clone();
             if settings.linear {
                 linear::disconnect();
@@ -179,23 +184,29 @@ define_class!(
                 self.commit(settings);
                 return self.refresh_integrations(-1, None);
             }
-            if self.ivars().linear_oauth_pending.borrow().is_some() {
-                return;
-            }
-            let target: &AnyObject = self.as_ref();
-            match linear::start_oauth(target, sel!(linearOAuthFinished:)) {
-                Ok(receiver) => {
-                    *self.ivars().linear_oauth_pending.borrow_mut() = Some(receiver);
+            match linear::start_oauth() {
+                Ok(attempt) => {
+                    *self.ivars().linear_oauth_pending.borrow_mut() = Some(attempt);
+                    let timer = unsafe {
+                        NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                            0.1, self.as_ref(), sel!(pollLinearOAuth:), None, true,
+                        )
+                    };
+                    *self.ivars().linear_oauth_timer.borrow_mut() = Some(timer);
                     self.refresh_integrations(-1, None);
                 }
                 Err(error) => self.refresh_integrations(LINEAR_ROW, Some(error)),
             }
         }
 
-        #[unsafe(method(linearOAuthFinished:))]
-        fn linear_oauth_finished(&self, _sender: Option<&AnyObject>) {
-            let result = self.ivars().linear_oauth_pending.borrow_mut().take().and_then(|receiver| receiver.try_recv().ok());
+        #[unsafe(method(pollLinearOAuth:))]
+        fn poll_linear_oauth(&self, _timer: &NSTimer) {
+            let result = self.ivars().linear_oauth_pending.borrow().as_ref().and_then(linear::OAuthAttempt::try_result);
             let Some(result) = result else { return };
+            self.ivars().linear_oauth_pending.borrow_mut().take();
+            if let Some(timer) = self.ivars().linear_oauth_timer.borrow_mut().take() {
+                timer.invalidate();
+            }
             match result {
                 Ok(()) => {
                     let mut settings = self.ivars().settings.borrow().clone();
@@ -235,7 +246,14 @@ define_class!(
 
 impl SettingsWindow {
     pub fn new(settings: Settings, on_change: Box<dyn Fn(&Settings)>, on_insights: Box<dyn Fn()>, mtm: MainThreadMarker) -> Retained<Self> {
-        let ivars = Ivars { settings: RefCell::new(settings), on_change, on_insights, parts: OnceCell::new(), linear_oauth_pending: RefCell::new(None) };
+        let ivars = Ivars {
+            settings: RefCell::new(settings),
+            on_change,
+            on_insights,
+            parts: OnceCell::new(),
+            linear_oauth_pending: RefCell::new(None),
+            linear_oauth_timer: RefCell::new(None),
+        };
         let this = mtm.alloc::<Self>().set_ivars(ivars);
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         let parts = this.build(mtm);
@@ -525,8 +543,8 @@ impl SettingsWindow {
             label.setStringValue(&NSString::from_str(linear_blurb));
         }
         if let Some(button) = pane.viewWithTag(LINEAR_ROW).and_then(|v| v.downcast::<NSButton>().ok()) {
-            button.setTitle(&NSString::from_str(if linear_on { "Disconnect" } else if linear_pending { "Waiting…" } else { "Connect" }));
-            button.setEnabled(!linear_pending);
+            button.setTitle(&NSString::from_str(if linear_on { "Disconnect" } else if linear_pending { "Cancel" } else { "Connect" }));
+            button.setEnabled(true);
         }
         if let Some(field) = pane.viewWithTag(FIELD + LINEAR_ROW) {
             field.setHidden(linear_on);
