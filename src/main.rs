@@ -1,3 +1,4 @@
+mod brand_logos;
 mod calendar;
 mod chime;
 mod claude_mcp;

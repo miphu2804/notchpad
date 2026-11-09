@@ -1,3 +1,10 @@
+### [2026-11-09 22:58 UTC+07:00] — [UI] Vendor icons in Integrations
+
+**Done:**
+- Embedded the official Notion, Linear and Google Calendar PNG icons from their vendors; calendar marks sit side by side, without tint or redrawing. Asset sources are in `assets/integrations/README.md`.
+- Verified: 89 tests pass; real Settings window screenshot inspected at `/tmp/notchpad-finish/logos/vendor-icons.png`. Both Add buttons dispatched through AppKit in a scratch HOME and changed to Added; Claude Code's CLI was stubbed, while Desktop wrote its real JSON format in the scratch directory. Temporary render/action hooks removed.
+- Still unverified: real Claude configuration, Calendar permission/events, and Linear sync with a real key.
+
 ### [2026-11-09 22:16 UTC+07:00] — [Feature] Settings › Integrations: Claude, calendars, Linear
 
 **Done:**

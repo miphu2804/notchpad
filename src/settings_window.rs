@@ -344,14 +344,14 @@ impl SettingsWindow {
             Row { symbol: "bubble.left", name: "Claude Desktop", blurb: Some(""), button: Some(("Add", sel!(addClaudeDesktop:))), ..Row::default() },
         ];
         let calendars = [Row {
-            symbol: "calendar",
+            symbol: "calendars",
             name: "Show calendar events",
             blurb: Some(""),
             switch: Some((self.ivars().settings.borrow().calendar, sel!(toggleCalendar:))),
             ..Row::default()
         }];
         let linear = [Row {
-            symbol: "arrow.triangle.branch",
+            symbol: "linear",
             name: "Linear",
             blurb: Some(""),
             button: Some(("Connect", sel!(toggleLinear:))),
@@ -392,9 +392,14 @@ impl SettingsWindow {
         for (i, Row { symbol, name, blurb, switch, menu, button, field }) in rows.iter().enumerate() {
             let tag = base + i as isize;
             let row = frame_view(0.0, from_top(card_height, i as f64 * ROW, ROW), card_width, ROW, mtm);
-            let icon = NSImageView::imageViewWithImage(&w::symbol(symbol), mtm);
-            icon.setContentTintColor(Some(&rgba(255, 255, 255, 0.85)));
-            icon.setFrame(rect(14.0, (ROW - 20.0) / 2.0, 22.0, 20.0));
+            let logo = crate::brand_logos::logo(symbol);
+            let image = logo.as_ref().cloned().unwrap_or_else(|| w::symbol(symbol));
+            let icon = NSImageView::imageViewWithImage(&image, mtm);
+            let width = if logo.is_some() { image.size().width } else { 22.0 };
+            if logo.is_none() {
+                icon.setContentTintColor(Some(&rgba(255, 255, 255, 0.85)));
+            }
+            icon.setFrame(rect(25.0 - width / 2.0, (ROW - 22.0) / 2.0, width, 22.0));
             row.addSubview(&icon);
 
             // Controls are laid out right to left from their intrinsic sizes: macOS 26 draws a
