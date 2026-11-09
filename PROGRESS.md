@@ -1,3 +1,22 @@
+### [2026-11-09 20:30 UTC+07:00] — [Feature] Phase-end bell and toast, Linear-like palette, smooth section resize
+
+**Done:**
+- When a focus or break phase ends, a short synthesised two-note bell plays and the task line shows a toast for 6 s, e.g. "Pomodoro 1 done · short break 5 min". This replaces the Glass system sound.
+- The cards use one dark surface (24,25,27) with raised controls (40,41,45). The tasks card is no longer sage.
+- The Music section is now "Playing", with the `play.circle` icon.
+- Switching between a compact and an extra-tall section no longer strands a ghost of the old tab or sinks the header. The content grows with the panel each frame. The terminal grid is resized only once the panel settles.
+
+**Changed  files:**
+- `src/chime.rs` — created
+- `src/main.rs` — modified
+- `src/controller.rs` — modified
+- `src/notch_motion.rs` — modified
+- `src/terminal_view.rs` — modified
+- `src/settings.rs`, `src/settings_window.rs`, `README.md` — modified
+
+**Flow explained:**
+`tick:` at the deadline → `announce(chime, toast)` → `Chime::sound()` builds a WAV in memory for `NSSound` → `render_focus` shows the toast until `toastExpired:`. For a resize, `NotchMotion::apply` sizes the content to the spring height before it sets the panel frame. Only the new body crossfades. `setFrameSize:` on the terminal debounces `fitGrid` by 0.12 s. Verified with frame captures of both directions and 73 passing tests.
+
 ### [2026-11-09 19:45 UTC+07:00] — [Feature] Current pomodoro tomato ripens as the session runs
 
 **Done:**
@@ -140,21 +159,3 @@ The collapsed notch grows two 34 pt wings while something is live: the playing t
 
 **Flow explained:**
 `sync_activity` runs on every focus render (the existing session tick), each now-playing change and each expand/collapse; it fills the wing view and tells `NotchMotion::set_wings` the extra width, which springs the collapsed frame wider. Terminal mouse events map to grid cells via the pure `cell_at`, update alacritty's `Selection`, and the draw pass highlights the selected cells; ⌘C writes `selection_to_string()` to the pasteboard.
-
-### [2026-11-09 14:35 UTC+07:00] — [Feature] Real PTY terminal tab
-
-**Done:**
-The Terminal tab is now a real terminal: the user's login shell in a PTY, emulated by `alacritty_terminal`, so `claude`, vim and htop run as in a full terminal. Colors (16/256/truecolor), alternate screen, block cursor, bold/dim/inverse/underline, scrollback on the wheel, Ctrl/Option/arrow/function keys, ⌘V with bracketed paste, and an `NSTextInputClient` for IME input. The shell starts the first time the tab opens and survives collapse; Return restarts it after exit. Replaces the old command runner (`shell.rs`). Built by a Sonnet thread; accepted by renders of colored output, typed input, vi full-screen, and `claude --version`. Idle CPU 0.0%; footprint 28.2 MB before the shell starts, about 41 MB with it running.
-
-**Changed  files:**
-- `src/terminal_view.rs` — created
-- `src/terminal_session.rs` — created
-- `src/terminal_keys.rs` — created
-- `src/terminal_palette.rs` — created
-- `src/shell.rs` — deleted
-- `src/controller.rs` — modified
-- `Cargo.toml`, `Cargo.lock` — modified
-
-**Flow explained:**
-`TerminalSession` spawns the PTY and alacritty's event loop; its listener hops to the main queue via `dispatch2` to mark `TerminalView` dirty, so nothing polls. `TerminalView` draws the grid per row, maps keys through `terminal_keys`, and resizes the PTY to its bounds. While the view is first responder the panel stays open.
-
