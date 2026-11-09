@@ -20,16 +20,19 @@ fn home() -> PathBuf {
 
 // ---- Claude Code -------------------------------------------------------------------------
 
-/// Whether Claude Code has a user-scope `notchpad` server (`~/.claude.json` is where `--scope user` writes).
+/// Whether Claude Code's user-scope `notchpad` server runs this app's binary (`~/.claude.json` is
+/// where `--scope user` writes).
 pub fn code_added() -> bool {
-    let text = fs::read_to_string(home().join(".claude.json")).unwrap_or_default();
-    serde_json::from_str::<Value>(&text).is_ok_and(|config| config["mcpServers"].get(NAME).is_some())
+    points_here(&home().join(".claude.json"), &server_path())
 }
 
 /// Runs `claude mcp add`. The error is a line fit to show beside the button.
 pub fn add_to_code() -> Result<(), String> {
     let path = std::env::var("PATH").unwrap_or_default();
     let claude = find_claude(&path, &home()).ok_or("Claude Code not found")?;
+    // `add` refuses a name that is taken, e.g. by another build of the app; a missing server
+    // makes `remove` fail, which is fine.
+    let _ = Command::new(&claude).args(["mcp", "remove", "--scope", "user", NAME]).output();
     let output = Command::new(claude).args(add_args(&server_path())).output().map_err(|err| err.to_string())?;
     if output.status.success() {
         return Ok(());
@@ -56,8 +59,14 @@ fn desktop_config(home: &Path) -> PathBuf {
 }
 
 pub fn desktop_added() -> bool {
-    let text = fs::read_to_string(desktop_config(&home())).unwrap_or_default();
-    serde_json::from_str::<Value>(&text).is_ok_and(|config| config["mcpServers"].get(NAME).is_some())
+    points_here(&desktop_config(&home()), &server_path())
+}
+
+/// Whether `config` registers the `notchpad` server at `server`. One left by another build of the
+/// app counts as not added, so the row offers Add again and Add points it here.
+fn points_here(config: &Path, server: &Path) -> bool {
+    let text = fs::read_to_string(config).unwrap_or_default();
+    serde_json::from_str::<Value>(&text).is_ok_and(|config| config["mcpServers"][NAME]["command"].as_str() == server.to_str())
 }
 
 /// Merges the server into Claude Desktop's config, keeping a `.bak` of what was there.
@@ -158,6 +167,17 @@ mod tests {
         assert!(merge_server("{ not json", SERVER).is_err());
         assert!(merge_server("[1,2]", SERVER).is_err());
         assert!(merge_server(r#"{"mcpServers":[]}"#, SERVER).is_err());
+    }
+
+    #[test]
+    fn only_a_server_running_this_binary_counts_as_added() {
+        let home = scratch_home("points");
+        let config = home.join("config.json");
+        assert!(!points_here(&config, Path::new(SERVER)));
+        fs::write(&config, r#"{"mcpServers":{"notchpad":{"command":"/old/build/notchpad-mcp"}}}"#).unwrap();
+        assert!(!points_here(&config, Path::new(SERVER)));
+        fs::write(&config, format!(r#"{{"mcpServers":{{"notchpad":{{"type":"stdio","command":"{SERVER}"}}}}}}"#)).unwrap();
+        assert!(points_here(&config, Path::new(SERVER)));
     }
 
     #[test]
