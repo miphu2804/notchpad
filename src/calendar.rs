@@ -24,7 +24,7 @@ pub struct Event {
     start: f64,
 }
 
-/// What macOS lets Overhang do with the user's calendars.
+/// What macOS lets Notchday do with the user's calendars.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Access {
     Undecided,

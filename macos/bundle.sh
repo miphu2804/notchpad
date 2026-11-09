@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds target/release/Overhang.app. With --install, also replaces /Applications/Overhang.app.
+# Builds target/release/Notchday.app. With --install, also replaces /Applications/Notchday.app.
 # Signed with the first Apple Development identity in the keychain, so macOS keeps the
 # app's privacy permissions across rebuilds; ad-hoc signing (the fallback) changes the
 # app's identity every build and macOS asks for every permission again.
@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 #   NOTCHPAD_LINEAR_CLIENT_ID='<registered-client-id>' macos/bundle.sh
 # The redirect URI must be registered exactly as http://127.0.0.1:53682/oauth/callback.
 cargo build --release
-app=target/release/Overhang.app
+app=target/release/Notchday.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp macos/Info.plist "$app/Contents/"
@@ -22,7 +22,7 @@ codesign --force --sign "${identity:--}" "$app"
 echo "built $app"
 
 if [ "${1:-}" = "--install" ]; then
-    rm -rf /Applications/Overhang.app
+    rm -rf /Applications/Notchday.app
     cp -R "$app" /Applications/
-    echo "installed /Applications/Overhang.app"
+    echo "installed /Applications/Notchday.app"
 fi
