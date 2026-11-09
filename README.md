@@ -8,12 +8,13 @@ Apple Silicon, macOS 14 or later. It is written in Rust with AppKit, runs at 0% 
 
 ## Features
 
-- **Workspace.** Today's tasks with quick add (`gym 6pm !high #health 45m tomorrow`), sorted by priority. Pick a priority from the coloured dots beside the input or by right-clicking a task. A pomodoro card shows today's tomatoes, a stopwatch, +5 min and weekly focus stats.
+- **Workspace.** Today's tasks with quick add (`gym 6pm !high #health 45m tomorrow`), sorted by priority. Pick a priority from the coloured dots beside the input or by right-clicking a task. A deleted task can be brought back with Undo for a few seconds. A pomodoro card shows today's tomatoes, a stopwatch, +5 min and weekly focus stats.
 - **Collapsed notch.** Shows album art with a moving waveform while music plays, or the focus countdown.
 - **Playing.** Now playing from any app (Spotify, Music, YouTube in a browser), with playback controls.
 - **Clips.** A short clipboard history.
 - **Terminal.** A real shell in the notch.
-- **Notifications.** Alerts for timed tasks, a JSON backup export, and a dashboard window. Right-click the header to open the dashboard or export.
+- **Alerts.** When a focus session or a break ends, and 10 minutes before and at a timed task's time, the notch chimes and opens with the news. It does not take the keyboard from the app you're in, and it stays open until you hover it and leave. Timed tasks also get a system notification.
+- **More.** A JSON backup export, a dashboard window, and today's tasks copied as a Markdown checklist. Right-click the header for these.
 
 ## Install
 
@@ -24,7 +25,7 @@ Apple Silicon, macOS 14 or later. It is written in Rust with AppKit, runs at 0% 
    xattr -dr com.apple.quarantine /Applications/Notchpad.app
    ```
 
-3. To start Notchpad at login, add it under **System Settings › General › Login Items**.
+3. To start Notchpad at login, turn on **Settings › General › Open at login**.
 
 Quit with the ✕ in the notch. Data lives in `~/Library/Application Support/notchpad/` as plain text.
 

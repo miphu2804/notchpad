@@ -21,6 +21,7 @@ objc2-app-kit = "0.3.2"
 objc2-core-graphics = "0.3.2"
 objc2-foundation = "0.3.2"
 objc2-quartz-core = "0.3.2"
+objc2-service-management = "0.3.2"
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNNotification", "UNNotificationResponse", "UNUserNotificationCenter", "UNNotificationCategory", "UNError"] }
 serde_json = "1"
 
