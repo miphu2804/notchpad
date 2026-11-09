@@ -5,18 +5,18 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::time::{Duration, Instant};
 
 use objc2::rc::{Retained, Weak};
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, Bool};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAppearance, NSImageScaling, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+    NSAppearance, NSFontAttributeName, NSForegroundColorAttributeName, NSImageScaling, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
     NSApplication, NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
     NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
     NSLayoutConstraintOrientation, NSMainMenuWindowLevel, NSMenu, NSMenuItem, NSScreen, NSScrollView, NSStackView,
-    NSStackViewDistribution, NSTextAlignment, NSTextDidChangeNotification, NSTextDidEndEditingNotification, NSTextField, NSTrackingArea,
+    NSStackViewDistribution, NSTextAlignment, NSTextDidChangeNotification, NSTextDidEndEditingNotification, NSTextField, NSTextView, NSControlTextDidEndEditingNotification, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
-use objc2_foundation::{NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSNotificationSuspensionBehavior, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
+use objc2_foundation::{NSRange, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSNotificationSuspensionBehavior, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 
 use crate::clip_card::{self, ClipCard};
@@ -29,6 +29,7 @@ use crate::note_view::{self, NoteView};
 use crate::notch_motion::NotchMotion;
 use crate::task_row::TaskRow;
 use crate::quick_add;
+use crate::shell::{self, Chunk, Shell, Submitted};
 use crate::panel::{self, FileDrag, NotchPanel, NotchShape};
 use crate::store::{self, Task};
 use crate::widgets::{self as w, rgba};
@@ -61,6 +62,14 @@ const TOMORROW: isize = 2;
 
 unsafe extern "C" {
     fn NSBeep();
+}
+
+fn soft_red() -> Retained<NSColor> {
+    rgba(255, 130, 120, 1.0)
+}
+
+fn terminal_font() -> Retained<NSFont> {
+    NSFont::monospacedSystemFontOfSize_weight(12.0, unsafe { NSFontWeightRegular })
 }
 
 /// Dark text on the pastel cards.
@@ -124,6 +133,13 @@ struct NotesView {
     added: Retained<NSTextField>,
 }
 
+struct TerminalView {
+    body: Retained<NSView>,
+    output: Retained<NSTextView>,
+    prompt: Retained<NSTextField>,
+    input: Retained<NSTextField>,
+}
+
 #[derive(Clone, Copy, PartialEq, Default)]
 enum Tab {
     #[default]
@@ -132,6 +148,7 @@ enum Tab {
     Clips,
     Music,
     Notes,
+    Terminal,
 }
 
 /// The header's views: close, the tab groups left and right of the notch, and each tab.
@@ -144,6 +161,7 @@ struct Header {
     clips: Retained<NSButton>,
     music: Retained<NSButton>,
     notes: Retained<NSButton>,
+    terminal: Retained<NSButton>,
 }
 
 struct Ui {
@@ -156,9 +174,11 @@ struct Ui {
     tab_clips: Retained<NSButton>,
     tab_music: Retained<NSButton>,
     tab_notes: Retained<NSButton>,
+    tab_terminal: Retained<NSButton>,
     clips: ClipsView,
     music: MusicView,
     notes: NotesView,
+    terminal: TerminalView,
     focus: FocusCard,
     tasks: TaskCard,
     columns: Vec<Column>,
@@ -178,6 +198,9 @@ pub struct State {
     /// Opened by hotkey: stays open until the pointer has visited and left.
     pinned: Cell<bool>,
     tab: Cell<Tab>,
+    shell: RefCell<Shell>,
+    /// Runs only while a terminal command does.
+    shell_timer: RefCell<Option<Retained<NSTimer>>>,
     clips: RefCell<ClipHistory>,
     now_playing: RefCell<NowPlaying>,
     /// Runs only while the Music tab is visible and a track is playing.
@@ -378,6 +401,63 @@ define_class!(
             self.collapse_when_left();
         }
 
+        #[unsafe(method(showTerminal:))]
+        fn show_terminal(&self, _sender: &AnyObject) {
+            self.ivars().tab.set(Tab::Terminal);
+            self.refresh();
+        }
+
+        /// Return in the prompt.
+        #[unsafe(method(runTerminal:))]
+        fn run_terminal(&self, field: &NSTextField) {
+            let line = field.stringValue().to_string();
+            field.setStringValue(&NSString::new());
+            self.run_command(line.trim());
+        }
+
+        #[unsafe(method(tickTerminal:))]
+        fn tick_terminal(&self, _timer: &NSTimer) {
+            self.drain_shell();
+        }
+
+        #[unsafe(method(clearTerminal:))]
+        fn clear_terminal(&self, _sender: &AnyObject) {
+            self.ui().terminal.output.setString(&NSString::new());
+        }
+
+        #[unsafe(method(openInTerminal:))]
+        fn open_in_terminal(&self, _sender: &AnyObject) {
+            if let Err(err) = self.ivars().shell.borrow().open_in_terminal() {
+                self.print(&format!("could not open Terminal: {err}\n"), &soft_red());
+            }
+        }
+
+        /// ↑/↓ walk the history and Escape kills the running command.
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn terminal_command(&self, field: &NSTextField, _editor: &AnyObject, command: objc2::runtime::Sel) -> Bool {
+            let mut shell = self.ivars().shell.borrow_mut();
+            if command == sel!(cancelOperation:) {
+                shell.kill();
+                return Bool::YES;
+            }
+            let recalled = if command == sel!(moveUp:) {
+                shell.history_up(&field.stringValue().to_string())
+            } else if command == sel!(moveDown:) {
+                shell.history_down()
+            } else {
+                return Bool::NO;
+            };
+            if let Some(line) = recalled {
+                field.setStringValue(&NSString::from_str(&line));
+            }
+            Bool::YES
+        }
+
+        #[unsafe(method(terminalEditingEnded:))]
+        fn terminal_editing_ended(&self, _notification: &NSNotification) {
+            self.collapse_when_left();
+        }
+
         #[unsafe(method(clearAdded:))]
         fn clear_added(&self, _arg: Option<&AnyObject>) {
             self.ivars().ui.get().expect("ui is built in new()").notes.added.setHidden(true);
@@ -495,6 +575,9 @@ impl Controller {
             let text: &AnyObject = this.ui().notes.text.as_ref();
             center.addObserver_selector_name_object(this.target(), sel!(notesChanged:), Some(NSTextDidChangeNotification), Some(text));
             center.addObserver_selector_name_object(this.target(), sel!(notesEditingEnded:), Some(NSTextDidEndEditingNotification), Some(text));
+            let input: &AnyObject = this.ui().terminal.input.as_ref();
+            center.addObserver_selector_name_object(this.target(), sel!(terminalEditingEnded:), Some(NSControlTextDidEndEditingNotification), Some(input));
+            let _: () = msg_send![input, setDelegate: this.target()];
             // The controller lives for the process. Re-anchor after hot-plug, resolution,
             // primary-display or arrangement changes instead of keeping startup coordinates.
             NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
@@ -600,11 +683,92 @@ impl Controller {
         }
     }
 
-    /// An open note keeps the panel up while typing, even with the pointer elsewhere.
+    /// An open note or terminal prompt keeps the panel up while typing, even with the
+    /// pointer elsewhere.
     fn note_has_focus(&self) -> bool {
         let ui = self.ui();
-        let note: &AnyObject = ui.notes.text.as_ref();
-        ui.panel.isKeyWindow() && ui.panel.firstResponder().is_some_and(|r| std::ptr::eq(&*r as *const _ as *const u8, note as *const _ as *const u8))
+        let same = |a: &AnyObject, b: &AnyObject| std::ptr::eq(a as *const _ as *const u8, b as *const _ as *const u8);
+        let Some(responder) = ui.panel.firstResponder() else { return false };
+        // A text field is edited through its field editor, not through itself.
+        let editor = ui.terminal.input.currentEditor();
+        ui.panel.isKeyWindow()
+            && (same(&responder, ui.notes.text.as_ref()) || editor.is_some_and(|e| same(&responder, e.as_ref())))
+    }
+
+    /// The one path from the prompt (or a test hook) to a running command.
+    fn run_command(&self, line: &str) {
+        if line.is_empty() || self.ivars().shell.borrow().is_running() {
+            return;
+        }
+        let dim = white(0.45);
+        self.print(&format!("% {line}\n"), &dim);
+        let submitted = self.ivars().shell.borrow_mut().submit(line);
+        match submitted {
+            Submitted::Started => self.set_shell_running(true),
+            Submitted::Refused(hint) => self.print(&format!("{hint}\n"), &dim),
+            Submitted::Done(err) => {
+                if let Some(err) = err {
+                    self.print(&format!("{err}\n"), &soft_red());
+                }
+                self.ui().terminal.prompt.setStringValue(&NSString::from_str(&self.prompt_text()));
+            }
+        }
+    }
+
+    fn drain_shell(&self) {
+        let chunks = self.ivars().shell.borrow_mut().drain();
+        for chunk in chunks {
+            match chunk {
+                Chunk::Out(text) => self.print(&text, &white(0.88)),
+                Chunk::Err(text) => self.print(&text, &soft_red()),
+                Chunk::Exit(code) => {
+                    if code != 0 {
+                        self.print(&format!("[exit {code}]\n"), &soft_red());
+                    }
+                    self.set_shell_running(false);
+                }
+            }
+        }
+    }
+
+    /// The timer exists only while a command runs, so an idle panel costs no wakeups.
+    fn set_shell_running(&self, running: bool) {
+        let input = &self.ui().terminal.input;
+        input.setEnabled(!running);
+        let mut timer = self.ivars().shell_timer.borrow_mut();
+        if running {
+            *timer = Some(unsafe {
+                NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.1, self.target(), sel!(tickTerminal:), None, true)
+            });
+        } else {
+            if let Some(timer) = timer.take() {
+                timer.invalidate();
+            }
+            self.ui().panel.makeFirstResponder(Some(input));
+        }
+    }
+
+    fn prompt_text(&self) -> String {
+        format!("{} %", self.ivars().shell.borrow().dir_label())
+    }
+
+    /// Appends coloured text to the output, drops lines beyond the cap and follows the end.
+    fn print(&self, text: &str, color: &NSColor) {
+        let output = &self.ui().terminal.output;
+        let Some(storage) = (unsafe { output.textStorage() }) else { return };
+        let start = storage.length();
+        storage.replaceCharactersInRange_withString(NSRange::new(start, 0), &NSString::from_str(text));
+        let added = NSRange::new(start, text.encode_utf16().count());
+        unsafe {
+            storage.addAttribute_value_range(NSForegroundColorAttributeName, color, added);
+            storage.addAttribute_value_range(NSFontAttributeName, &terminal_font(), added);
+        }
+        let all = storage.string().to_string();
+        let cut = shell::trim_start(&all, shell::MAX_LINES);
+        if cut > 0 {
+            storage.deleteCharactersInRange(NSRange::new(0, all[..cut].encode_utf16().count()));
+        }
+        output.scrollRangeToVisible(NSRange::new(storage.length(), 0));
     }
 
     /// Adds a typed line as a task; words like `6pm`, `!high` or `tomorrow` fill its fields.
@@ -731,12 +895,13 @@ impl Controller {
     fn render_tabs(&self) {
         let ui = self.ui();
         let current = self.ivars().tab.get();
-        let tabs: [(&NSView, &NSButton, Tab); 5] = [
+        let tabs: [(&NSView, &NSButton, Tab); 6] = [
             (&ui.workspace, &ui.tab_workspace, Tab::Workspace),
             (&ui.week, &ui.tab_week, Tab::Week),
             (&ui.clips.body, &ui.tab_clips, Tab::Clips),
             (&ui.music.body, &ui.tab_music, Tab::Music),
             (&ui.notes.body, &ui.tab_notes, Tab::Notes),
+            (&ui.terminal.body, &ui.tab_terminal, Tab::Terminal),
         ];
         if !ui.content.isHidden() && tabs.iter().any(|(body, _, tab)| body.isHidden() == (*tab == current)) {
             crossfade(&ui.content);
@@ -1092,7 +1257,8 @@ impl Controller {
         let clips = self.build_clips(mtm);
         let music = self.build_music(mtm);
         let notes = self.build_notes(mtm);
-        for body in [&*workspace, &*week, &*clips.body, &*music.body, &*notes.body] {
+        let terminal = self.build_terminal(mtm);
+        for body in [&*workspace, &*week, &*clips.body, &*music.body, &*notes.body, &*terminal.body] {
             content.addSubview(body);
             body.leadingAnchor().constraintEqualToAnchor_constant(&content.leadingAnchor(), 12.0).setActive(true);
             body.trailingAnchor().constraintEqualToAnchor_constant(&content.trailingAnchor(), -12.0).setActive(true);
@@ -1114,9 +1280,11 @@ impl Controller {
             tab_clips: head.clips,
             tab_music: head.music,
             tab_notes: head.notes,
+            tab_terminal: head.terminal,
             clips,
             music,
             notes,
+            terminal,
             focus,
             tasks,
             columns,
@@ -1145,15 +1313,17 @@ impl Controller {
         let clips = pill("Clips", sel!(showClips:));
         let music = icon_pill("music.note", sel!(showMusic:));
         let notes = icon_pill("note.text", sel!(showNotes:));
+        let terminal = icon_pill("terminal", sel!(showTerminal:));
         Header {
             quit: w::icon_button("xmark", "", 10.0, &white(0.55), self.target(), sel!(quit:), mtm),
             left: w::stack(&[&workspace, &week], false, 6.0, mtm),
-            right: w::stack(&[&clips, &music, &notes], false, 6.0, mtm),
+            right: w::stack(&[&clips, &music, &notes, &terminal], false, 6.0, mtm),
             workspace,
             week,
             clips,
             music,
             notes,
+            terminal,
         }
     }
 
@@ -1440,6 +1610,65 @@ impl Controller {
         added.bottomAnchor().constraintEqualToAnchor_constant(&card.bottomAnchor(), -12.0).setActive(true);
 
         NotesView { body: card, text, hint, added }
+    }
+
+    /// Output card with a prompt row below it: folder label, input, Clear, Open in Terminal.
+    fn build_terminal(&self, mtm: MainThreadMarker) -> TerminalView {
+        let body = NSView::new(mtm);
+        body.setTranslatesAutoresizingMaskIntoConstraints(false);
+        let card = w::filled(&rgba(42, 42, 45, 1.0), 18.0, mtm);
+
+        let output = NSTextView::initWithFrame(mtm.alloc(), NSRect::new(NSPoint::ZERO, NSSize::new(100.0, 100.0)));
+        output.setEditable(false);
+        output.setSelectable(true);
+        output.setRichText(false);
+        output.setDrawsBackground(false);
+        output.setFont(Some(&terminal_font()));
+        output.setTextColor(Some(&white(0.88)));
+        output.setTextContainerInset(NSSize::new(0.0, 0.0));
+        output.setVerticallyResizable(true);
+        output.setHorizontallyResizable(false);
+        output.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
+
+        let scroll = NSScrollView::new(mtm);
+        scroll.setTranslatesAutoresizingMaskIntoConstraints(false);
+        scroll.setDrawsBackground(false);
+        scroll.setHasVerticalScroller(true);
+        scroll.setAutohidesScrollers(true);
+        scroll.setDocumentView(Some(&output));
+        card.addSubview(&scroll);
+        scroll.leadingAnchor().constraintEqualToAnchor_constant(&card.leadingAnchor(), 14.0).setActive(true);
+        scroll.trailingAnchor().constraintEqualToAnchor_constant(&card.trailingAnchor(), -14.0).setActive(true);
+        scroll.topAnchor().constraintEqualToAnchor_constant(&card.topAnchor(), 12.0).setActive(true);
+        scroll.bottomAnchor().constraintEqualToAnchor_constant(&card.bottomAnchor(), -12.0).setActive(true);
+
+        let prompt = w::label(&self.prompt_text(), 12.0, unsafe { NSFontWeightRegular }, &white(0.45), mtm);
+        prompt.setFont(Some(&terminal_font()));
+        prompt.setContentHuggingPriority_forOrientation(750.0, NSLayoutConstraintOrientation::Horizontal);
+        let input = w::input("command", &white(0.9), 0, self.target(), sel!(runTerminal:), mtm);
+        input.setFont(Some(&terminal_font()));
+        input.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
+        let button = |title: &str, action| {
+            let button = w::pill(title, 22.0, self.target(), action, mtm);
+            w::fit_pill(&button, 9.0);
+            w::style_pill(&button, &white(0.1), &white(0.8), 11.0);
+            button
+        };
+        let clear = button("Clear", sel!(clearTerminal:));
+        let open = button("Open in Terminal", sel!(openInTerminal:));
+        let row = w::stack(&[&prompt, &input, &clear, &open], false, 8.0, mtm);
+
+        body.addSubview(&card);
+        body.addSubview(&row);
+        for view in [&*card, &*row] {
+            view.leadingAnchor().constraintEqualToAnchor(&body.leadingAnchor()).setActive(true);
+            view.trailingAnchor().constraintEqualToAnchor(&body.trailingAnchor()).setActive(true);
+        }
+        card.topAnchor().constraintEqualToAnchor(&body.topAnchor()).setActive(true);
+        row.topAnchor().constraintEqualToAnchor_constant(&card.bottomAnchor(), 8.0).setActive(true);
+        row.bottomAnchor().constraintEqualToAnchor(&body.bottomAnchor()).setActive(true);
+
+        TerminalView { body, output, prompt, input }
     }
 
     /// "+ <input>" row used under every task list.

@@ -11,6 +11,7 @@ mod notch_motion;
 mod panel;
 mod pill_button;
 mod quick_add;
+mod shell;
 mod store;
 mod task_row;
 mod widgets;
