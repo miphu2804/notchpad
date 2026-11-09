@@ -3,6 +3,7 @@
 //! except Open at login: that is the system's login-item state, read and set through `SMAppService`.
 
 use std::cell::{OnceCell, RefCell};
+use std::sync::mpsc::Receiver;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
@@ -83,6 +84,7 @@ pub struct Ivars {
     on_change: Box<dyn Fn(&Settings)>,
     on_insights: Box<dyn Fn()>,
     parts: OnceCell<Parts>,
+    linear_oauth_pending: RefCell<Option<Receiver<Result<(), String>>>>,
 }
 
 define_class!(
@@ -171,23 +173,38 @@ define_class!(
         #[unsafe(method(toggleLinear:))]
         fn toggle_linear(&self, _sender: &NSButton) {
             let mut settings = self.ivars().settings.borrow().clone();
-            let field = self.integrations_view(FIELD + LINEAR_ROW).and_then(|v| v.downcast::<NSTextField>().ok());
-            let result = if settings.linear {
+            if settings.linear {
                 linear::disconnect();
-                Ok(())
-            } else {
-                let key = field.as_ref().map(|f| f.stringValue().to_string()).unwrap_or_default();
-                if key.trim().is_empty() { Err("Paste a personal API key first".to_owned()) } else { linear::connect(key.trim()) }
-            };
-            if let Err(error) = result {
-                return self.refresh_integrations(LINEAR_ROW, Some(error));
+                settings.linear = false;
+                self.commit(settings);
+                return self.refresh_integrations(-1, None);
             }
-            if let Some(field) = field {
-                field.setStringValue(&NSString::new());
+            if self.ivars().linear_oauth_pending.borrow().is_some() {
+                return;
             }
-            settings.linear = !settings.linear;
-            self.commit(settings);
-            self.refresh_integrations(-1, None);
+            let target: &AnyObject = self.as_ref();
+            match linear::start_oauth(target, sel!(linearOAuthFinished:)) {
+                Ok(receiver) => {
+                    *self.ivars().linear_oauth_pending.borrow_mut() = Some(receiver);
+                    self.refresh_integrations(-1, None);
+                }
+                Err(error) => self.refresh_integrations(LINEAR_ROW, Some(error)),
+            }
+        }
+
+        #[unsafe(method(linearOAuthFinished:))]
+        fn linear_oauth_finished(&self, _sender: Option<&AnyObject>) {
+            let result = self.ivars().linear_oauth_pending.borrow_mut().take().and_then(|receiver| receiver.try_recv().ok());
+            let Some(result) = result else { return };
+            match result {
+                Ok(()) => {
+                    let mut settings = self.ivars().settings.borrow().clone();
+                    settings.linear = true;
+                    self.commit(settings);
+                    self.refresh_integrations(-1, None);
+                }
+                Err(error) => self.refresh_integrations(LINEAR_ROW, Some(error)),
+            }
         }
 
         #[unsafe(method(toggleCalendar:))]
@@ -218,7 +235,7 @@ define_class!(
 
 impl SettingsWindow {
     pub fn new(settings: Settings, on_change: Box<dyn Fn(&Settings)>, on_insights: Box<dyn Fn()>, mtm: MainThreadMarker) -> Retained<Self> {
-        let ivars = Ivars { settings: RefCell::new(settings), on_change, on_insights, parts: OnceCell::new() };
+        let ivars = Ivars { settings: RefCell::new(settings), on_change, on_insights, parts: OnceCell::new(), linear_oauth_pending: RefCell::new(None) };
         let this = mtm.alloc::<Self>().set_ivars(ivars);
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         let parts = this.build(mtm);
@@ -368,7 +385,6 @@ impl SettingsWindow {
             name: "Linear",
             blurb: Some(""),
             button: Some(("Connect", sel!(toggleLinear:))),
-            field: Some("Personal API key"),
             ..Row::default()
         }];
         let calendar_note = "Add a Google account in System Settings › Internet Accounts. Notion Calendar events come from that same Google calendar.";
@@ -493,24 +509,24 @@ impl SettingsWindow {
         card
     }
 
-    fn integrations_view(&self, tag: isize) -> Option<Retained<NSView>> {
-        self.ivars().parts.get()?.panes[INTEGRATIONS_PANE].viewWithTag(tag)
-    }
-
     /// Rewrites the Integrations rows from what is on disk and in macOS; `error` is shown on row `failed` instead of its blurb.
     fn refresh_integrations(&self, failed: isize, error: Option<String>) {
         let pane = &self.ivars().parts.get().expect("built in new()").panes[INTEGRATIONS_PANE];
         let linear_on = self.ivars().settings.borrow().linear;
+        let linear_pending = self.ivars().linear_oauth_pending.borrow().is_some();
         let linear_blurb = match &error {
             Some(error) if failed == LINEAR_ROW => error,
+            _ if linear_pending => "Waiting for Linear authorization…",
             _ if linear_on => "Syncing your assigned issues",
-            _ => "Imports your assigned issues",
+            _ if linear::oauth_client_id().is_some() => "Connects with Linear using OAuth",
+            _ => "OAuth client ID is not configured",
         };
         if let Some(label) = pane.viewWithTag(STATUS + LINEAR_ROW).and_then(|v| v.downcast::<NSTextField>().ok()) {
             label.setStringValue(&NSString::from_str(linear_blurb));
         }
         if let Some(button) = pane.viewWithTag(LINEAR_ROW).and_then(|v| v.downcast::<NSButton>().ok()) {
-            button.setTitle(&NSString::from_str(if linear_on { "Disconnect" } else { "Connect" }));
+            button.setTitle(&NSString::from_str(if linear_on { "Disconnect" } else if linear_pending { "Waiting…" } else { "Connect" }));
+            button.setEnabled(!linear_pending);
         }
         if let Some(field) = pane.viewWithTag(FIELD + LINEAR_ROW) {
             field.setHidden(linear_on);
