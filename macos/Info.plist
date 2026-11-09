@@ -23,6 +23,8 @@
 	<!-- Lives in the notch: no Dock icon, no menu bar. -->
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Notchpad controls Music and Spotify playback from the notch.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 </dict>
