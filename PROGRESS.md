@@ -1,3 +1,17 @@
+### [2026-11-09 14:20 UTC+07:00] — [Feature] Now Playing music tab
+
+**Done:**
+A ♪ tab shows what Apple Music or Spotify is playing: artwork (Music cover via AppleScript, else the app icon), title, artist · album, a progress bar with elapsed/total, and ⏮ ⏯ ⏭ controls that send AppleScript to the player. With nothing playing it says "Nothing playing. Start Music or Spotify." The 1 s progress timer runs only while the panel is open on the Music tab and a track plays. The private MediaRemote framework isn't used. Built by the np-music thread; accepted by renders of the empty and playing states, plus a real `com.apple.Music.playerInfo` notification posted from another process, which updated the tab.
+
+**Changed  files:**
+- `src/now_playing.rs` — created (`NowPlaying`, `parse`, `info_map`, AppleScript `send`, 4 tests)
+- `src/controller.rs` — modified (Music tab, `musicChanged:`/`spotifyChanged:` observers, `render_music`, progress timer)
+- `macos/Info.plist` — modified (`NSAppleEventsUsageDescription`)
+- `src/main.rs` — modified (module)
+
+**Flow explained:**
+`NSDistributedNotificationCenter` delivers the players' state notifications. `info_map` turns userInfo into strings, `parse` builds a `Track` (Stopped means none), and `apply` keeps the artwork when the track is unchanged. AppleScript runs only when the player app is already running, so a closed app is never launched.
+
 ### [2026-11-09 13:55 UTC+07:00] — [Feature] Smart quick-add and right-click task menu
 
 **Done:**
@@ -125,18 +139,3 @@ Panel no longer closes/reopens while the pointer rests on the notch. Notch drawn
 **Flow explained:**
 The pointer at the top edge sits at the screen's max Y, outside a window ending there, so AppKit reported exits and the panel looped. The window now extends 1pt above the screen, and every exit is confirmed against `NSEvent::mouseLocation()`; a spurious exit starts a 0.25s recheck until the pointer truly leaves.
 
-### [2026-11-08 20:32 UTC+07:00] — [Feature] Workspace and Week UI
-
-**Done:**
-Rebuilt the expanded notch panel to a new layout: header with Workspace/Week tabs, lavender Focus card (task title, timer, Start/✓, Set time), sage "Today's tasks" card (To do/Completed, circle rows, ▶ to focus, add field), and a Week tab with Inbox/Today/Tomorrow columns. Tasks now carry a done flag and a day.
-
-**Changed  files:**
-- `src/controller.rs` — modified (state, rendering, builders)
-- `src/store.rs` — modified (`Task { text, done, day }`, tab-separated file)
-- `src/widgets.rs` — created (view factories)
-- `src/days.rs` — created (day keys/labels)
-- `src/panel.rs` — modified (removed custom background view)
-- `src/main.rs`, `Cargo.toml` — modified
-
-**Flow explained:**
-Hover on the notch (or Option-N) expands the panel; every action mutates `State`, saves `tasks.txt`, then `refresh()` re-renders both tabs from state. Open tasks dated today or earlier show under Today; empty day = Inbox.
