@@ -34,6 +34,7 @@ use crate::linear::{self, Linear};
 use crate::reminders::{self, Reminders};
 use crate::reminders_sync;
 use crate::list_row::{self, ListRow};
+use crate::marquee::Marquee;
 use crate::live_activity::{Activity, LiveActivity};
 use crate::notch_banner::{NotchBanner, Notice};
 use crate::now_playing::{Command, NowPlaying};
@@ -148,8 +149,8 @@ struct MusicView {
     now: Retained<NSStackView>,
     empty: Retained<NSTextField>,
     art: Retained<NSImageView>,
-    title: Retained<NSTextField>,
-    subtitle: Retained<NSTextField>,
+    title: Marquee,
+    subtitle: Marquee,
     progress: Retained<NSLayoutConstraint>,
     elapsed: Retained<NSTextField>,
     total: Retained<NSTextField>,
@@ -1295,9 +1296,9 @@ impl Controller {
             view.empty.setHidden(now.track.is_some());
             if let Some(track) = &now.track {
                 view.art.setImage(Some(&track.artwork.clone().unwrap_or_else(|| w::symbol("music.note"))));
-                view.title.setStringValue(&NSString::from_str(&track.title));
+                view.title.set_text(&track.title);
                 let credits = [track.artist.as_str(), track.album.as_str()];
-                view.subtitle.setStringValue(&NSString::from_str(&credits.iter().filter(|c| !c.is_empty()).copied().collect::<Vec<_>>().join(" · ")));
+                view.subtitle.set_text(&credits.iter().filter(|c| !c.is_empty()).copied().collect::<Vec<_>>().join(" · "));
                 view.elapsed.setStringValue(&NSString::from_str(&clock(track.position())));
                 view.total.setStringValue(&NSString::from_str(&clock(track.duration)));
                 let fraction = if track.duration > 0.0 { track.position() / track.duration } else { 0.0 };
@@ -2191,11 +2192,8 @@ impl Controller {
             layer.setMasksToBounds(true);
         }
 
-        let title = w::label("", 17.0, unsafe { NSFontWeightBold }, &white(0.95), mtm);
-        let subtitle = w::label("", 12.0, unsafe { NSFontWeightRegular }, &white(0.6), mtm);
-        for text in [&title, &subtitle] {
-            text.widthAnchor().constraintLessThanOrEqualToConstant(MUSIC_PROGRESS_WIDTH).setActive(true);
-        }
+        let title = Marquee::new(w::label("", 17.0, unsafe { NSFontWeightBold }, &white(0.95), mtm), MUSIC_PROGRESS_WIDTH, mtm);
+        let subtitle = Marquee::new(w::label("", 12.0, unsafe { NSFontWeightRegular }, &white(0.6), mtm), MUSIC_PROGRESS_WIDTH, mtm);
 
         let track = w::filled(&white(0.15), 1.5, mtm);
         fixed_size(&track, MUSIC_PROGRESS_WIDTH, 3.0);
@@ -2222,8 +2220,8 @@ impl Controller {
         let next = button("forward.fill", 16.0, sel!(musicNext:));
         let controls = w::stack(&[&previous, &toggle, &next], false, 10.0, mtm);
 
-        let column = w::stack(&[&title, &subtitle, &track, &times, &controls], true, 6.0, mtm);
-        column.setCustomSpacing_afterView(12.0, &subtitle);
+        let column = w::stack(&[&title.view, &subtitle.view, &track, &times, &controls], true, 6.0, mtm);
+        column.setCustomSpacing_afterView(12.0, &subtitle.view);
         column.setCustomSpacing_afterView(10.0, &times);
         let now = w::stack(&[&art, &column], false, 20.0, mtm);
 
