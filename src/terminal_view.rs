@@ -17,14 +17,14 @@ use alacritty_terminal::vte::ansi::{Color, Rgb};
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyObject;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSBezierPath, NSColor, NSEvent, NSEventModifierFlags, NSFont, NSFontAttributeName,
     NSFontWeightBold, NSFontWeightRegular, NSForegroundColorAttributeName, NSPasteboard, NSPasteboardTypeString,
     NSStringDrawing, NSTextInputClient, NSView,
 };
 use objc2_foundation::{
-    NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary, NSNotFound, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRange,
+    NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary, NSNotFound, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRange,
     NSRangePointer, NSRect, NSSize, NSString, NSUInteger,
 };
 
@@ -39,6 +39,8 @@ const EXITED_NOTICE: &str = "[process exited — press Return to restart]";
 const RETURN_KEY: u16 = 36;
 /// Lines the wheel moves a full-screen program that has no scrollback (like a key press).
 const ALT_SCREEN_ARROWS: i32 = 3;
+/// Quiet time after the last size change before the grid follows it.
+const GRID_SETTLE_SECS: f64 = 0.12;
 
 pub struct ViewIvars {
     session: RefCell<Option<TerminalSession>>,
@@ -101,6 +103,15 @@ define_class!(
         #[unsafe(method(setFrameSize:))]
         fn set_frame_size(&self, size: NSSize) {
             let _: () = unsafe { msg_send![super(self), setFrameSize: size] };
+            // The panel resizes on every frame while it springs to a new height. Telling the
+            // program only once it has settled spares it a redraw per row along the way.
+            let none: Option<&AnyObject> = None;
+            let _: () = unsafe { msg_send![NSObject::class(), cancelPreviousPerformRequestsWithTarget: self, selector: sel!(fitGrid), object: none] };
+            let _: () = unsafe { msg_send![self, performSelector: sel!(fitGrid), withObject: none, afterDelay: GRID_SETTLE_SECS] };
+        }
+
+        #[unsafe(method(fitGrid))]
+        fn fit_grid(&self) {
             self.fit();
         }
 

@@ -833,11 +833,9 @@ impl Controller {
     fn place(&self, collapsed: NSRect, expanded: NSRect) {
         let ui = self.ui();
         ui.expanded.set(expanded);
+        // The motion grows or shrinks the content with the panel; in the dashboard window
+        // the content follows that window instead.
         ui.motion.set_rects(collapsed, expanded);
-        // In the dashboard window the content follows that window instead.
-        if !self.ivars().dashboard_open.get() {
-            ui.content.setFrameSize(NSSize::new(WIDTH, expanded.size.height - TOP_SLOP));
-        }
     }
 
     fn ui(&self) -> &Ui {
@@ -1133,7 +1131,14 @@ impl Controller {
             (&ui.terminal.body, &ui.tab_terminal, Tab::Terminal),
         ];
         if !ui.content.isHidden() && tabs.iter().any(|(body, _, tab)| body.isHidden() == (*tab == current)) {
-            crossfade(&ui.content);
+            // A crossfade snapshots the old picture at its old size. If the panel is about to
+            // change height that snapshot sits stranded at the bottom, so only the new body
+            // fades in.
+            let resizing = notch_rects(self.mtm(), self.tab_size()).1 != ui.expanded.get();
+            match tabs.iter().find(|(_, _, tab)| *tab == current) {
+                Some((body, _, _)) if resizing => crossfade(body),
+                _ => crossfade(&ui.content),
+            }
         }
         for (body, pill, tab) in tabs {
             body.setHidden(tab != current);
