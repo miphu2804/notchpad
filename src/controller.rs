@@ -24,6 +24,7 @@ use crate::clips::ClipHistory;
 use crate::days;
 use crate::drop_column::DropColumn;
 use crate::list_row::{self, ListRow};
+use crate::live_activity::{Activity, LiveActivity, WING};
 use crate::now_playing::{Command, NowPlaying};
 use crate::note_view::{self, NoteView};
 use crate::notch_motion::NotchMotion;
@@ -41,7 +42,7 @@ const HEIGHT: f64 = 330.0;
 /// The window extends this far above the screen. The pointer pressed against the top
 /// edge sits at exactly the screen's max Y, which would otherwise count as outside the
 /// window and make the panel close and reopen in a loop.
-const TOP_SLOP: f64 = 1.0;
+pub const TOP_SLOP: f64 = 1.0;
 /// MacBook Pro 14" (M4 Pro) notch, used on displays without one.
 const DEFAULT_NOTCH: (f64, f64) = (185.0, 32.0);
 const FOCUS_CARD_WIDTH: f64 = 236.0;
@@ -183,6 +184,7 @@ struct Ui {
     /// Keep the tab groups clear of the hardware notch: half its width plus a margin.
     notch_gaps: [Retained<NSLayoutConstraint>; 2],
     motion: Retained<NotchMotion>,
+    activity: LiveActivity,
 }
 
 #[derive(Default)]
@@ -195,6 +197,8 @@ pub struct State {
     tab: Cell<Tab>,
     clips: RefCell<ClipHistory>,
     now_playing: RefCell<NowPlaying>,
+    /// Wing width the panel was last told to grow by; zero when nothing is live.
+    wings: Cell<f64>,
     /// Runs only while the Music tab is visible and a track is playing.
     music_timer: RefCell<Option<Retained<NSTimer>>>,
     show_completed: Cell<bool>,
@@ -341,8 +345,6 @@ define_class!(
         #[unsafe(method(showMusic:))]
         fn show_music(&self, _sender: &AnyObject) {
             self.ivars().tab.set(Tab::Music);
-            // Spawned on first use, so nothing runs for people who never open the tab.
-            self.ivars().now_playing.borrow_mut().start(self.target(), sel!(nowPlayingChanged:));
             self.refresh();
         }
 
@@ -365,6 +367,7 @@ define_class!(
         fn now_playing_changed(&self, _arg: Option<&AnyObject>) {
             self.ivars().now_playing.borrow_mut().drain();
             self.render_music();
+            self.sync_activity();
         }
 
         #[unsafe(method(tickMusic:))]
@@ -573,6 +576,9 @@ impl Controller {
             // Reading the pasteboard's change count is cheap, so copies show up within half a second.
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.5, this.target(), sel!(pollClips:), None, true);
         }
+        // The helper blocks on notifications, so it costs nothing while idle; it runs from
+        // launch so the collapsed notch can show music without the Music tab being opened.
+        this.ivars().now_playing.borrow_mut().start(this.target(), sel!(nowPlayingChanged:));
         this.refresh();
         this.render_clips();
         this.ui().panel.orderFrontRegardless();
@@ -650,6 +656,7 @@ impl Controller {
         if self.ivars().expanded.replace(on) != on {
             self.ui().motion.set_open(on);
             self.sync_music_timer();
+            self.sync_activity();
             if !on {
                 self.save_notes_now();
                 if self.note_has_focus() {
@@ -911,7 +918,7 @@ impl Controller {
         } else {
             "Break · short".to_owned()
         });
-        set(&card.time, &format!("{:02}:{:02}", remaining / 60, remaining % 60));
+        set(&card.time, &mmss(remaining));
         set(&card.ends, &match (running, active) {
             (true, _) => format!("ends at {}", days::clock_in(remaining)),
             (false, true) => "paused".to_owned(),
@@ -926,6 +933,23 @@ impl Controller {
         card.end.setAlphaValue(if active { 1.0 } else { 0.4 });
         let hint = (!active).then(|| NSString::from_str("Click to change the length"));
         card.time.setToolTip(hint.as_deref());
+        self.sync_activity();
+    }
+
+    /// Shows what is live in the collapsed notch's wings and widens the panel to fit.
+    fn sync_activity(&self) {
+        let state = self.ivars();
+        let ui = self.ui();
+        let countdown = self.session_active().then(|| mmss(self.remaining_secs()));
+        let activity = Activity {
+            music: state.now_playing.borrow().track.as_ref().filter(|t| t.playing).map(|t| t.artwork.clone()),
+            countdown: countdown.as_deref().map(|text| (text, state.on_break.get())),
+        };
+        ui.activity.show(&activity, !state.expanded.get());
+        let wings = if activity.is_live() { WING } else { 0.0 };
+        if state.wings.replace(wings) != wings {
+            ui.motion.set_wings(2.0 * wings);
+        }
     }
 
     fn render_task_card(&self) {
@@ -1205,6 +1229,9 @@ impl Controller {
             card.heightAnchor().constraintEqualToAnchor(&workspace.heightAnchor()).setActive(true);
         }
 
+        let activity = LiveActivity::new(collapsed, mtm);
+        // Under the content, so the open panel never shows the wings through it.
+        background.addSubview_positioned_relativeTo(&activity.view, NSWindowOrderingMode::Below, Some(&content));
         let motion = NotchMotion::new(panel.clone(), content.clone(), collapsed, expanded, mtm);
         Ui {
             panel,
@@ -1228,6 +1255,7 @@ impl Controller {
             header_height,
             notch_gaps,
             motion,
+            activity,
         }
     }
 
@@ -1607,6 +1635,11 @@ fn chip(color: &NSColor, fill: &NSColor, h_pad: f64, v_pad: f64, mtm: MainThread
 }
 
 /// `m:ss` for a position or duration in seconds.
+/// `23:57`, for the focus card and the collapsed notch.
+fn mmss(secs: u64) -> String {
+    format!("{:02}:{:02}", secs / 60, secs % 60)
+}
+
 fn clock(seconds: f64) -> String {
     let seconds = seconds as u64;
     format!("{}:{:02}", seconds / 60, seconds % 60)
@@ -1746,6 +1779,11 @@ fn frames_at_top(frame: NSRect, width: f64, height: f64) -> (NSRect, NSRect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn countdown_pads_minutes_and_seconds() {
+        assert_eq!((mmss(0), mmss(59), mmss(1437), mmss(3600)), ("00:00".into(), "00:59".into(), "23:57".into(), "60:00".into()));
+    }
 
     #[test]
     fn panel_tracks_screen_top_and_center_in_every_arrangement() {

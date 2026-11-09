@@ -5,6 +5,7 @@ mod days;
 mod drop_column;
 mod hotkey;
 mod list_row;
+mod live_activity;
 mod now_playing;
 mod note_view;
 mod notch_motion;
