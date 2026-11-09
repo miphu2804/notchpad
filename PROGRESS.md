@@ -1,3 +1,15 @@
+### [2026-11-09 13:20 UTC+07:00] — [Feature] Header in the bands beside the notch
+
+**Done:**
+The open panel no longer leaves an empty black strip under the hardware notch. The header now fills the menu-bar band: close, logo and "Notchpad" sit left of the notch, the Workspace/Week/Clips tabs sit right of it, and the cards start right below. The panel stays 720 pt wide (an 840 pt try covered menu-bar items). The panel also re-anchors when displays are plugged, unplugged or rearranged, and the header band and notch gap follow the new screen.
+
+**Changed  files:**
+- `src/controller.rs` — modified (header split into brand and tabs groups, `header_band`, `notch_gap`, `screenParametersChanged:`)
+- `src/notch_motion.rs` — modified (`set_rects` for display changes)
+
+**Flow explained:**
+`build_ui` gives the header a band of `max(safe_top, 32)` at the top of the content. The tabs group has a required constraint keeping its leading edge at least half the notch width plus 8 pt right of the centre, because the panel is centred on the notch. `screenParametersChanged:` recomputes the notch rects, updates both constants and passes the new rects to `NotchMotion`.
+
 ### [2026-11-08 22:06 UTC+07:00] — [Feature] Clips: clipboard history in the notch
 
 **Done:**
