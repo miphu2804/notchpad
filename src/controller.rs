@@ -39,6 +39,7 @@ use crate::notch_motion::NotchMotion;
 use crate::task_row::TaskRow;
 use crate::quick_add;
 use crate::terminal_view::{self, TerminalView};
+use crate::chime::Chime;
 use crate::pomodoros::{self, DAILY_GOAL, Week};
 use crate::tomato_view::{Tomato, TomatoView};
 use crate::week_bars::{self, WeekBars};
@@ -82,6 +83,8 @@ const SHORT_BREAK_MIN: u64 = 5;
 const LONG_BREAK_MIN: u64 = 15;
 /// A long break follows every this many focus sessions.
 const CYCLE: usize = 4;
+/// How long the focus card's task line shows what just happened to the session.
+const TOAST_SECS: f64 = 6.0;
 const TOMATO_SIZE: f64 = 22.0;
 const CORAL: (u8, u8, u8) = (217, 112, 90);
 /// Cards and the controls on them, in the near-black, faintly cool greys of Linear's dark theme.
@@ -259,6 +262,10 @@ pub struct State {
     paused: Cell<Option<Duration>>,
     on_break: Cell<bool>,
     break_min: Cell<u64>,
+    /// The chime that is ringing; held because a released `NSSound` stops mid-note.
+    chime: RefCell<Option<Retained<NSSound>>>,
+    /// What just happened to the session, shown on the focus card's task line for `TOAST_SECS`.
+    toast: RefCell<Option<(String, Instant)>>,
     /// Last seven days of `pomodoros.txt`, read once per refresh.
     week: Cell<Week>,
     ticker: RefCell<Option<Retained<NSTimer>>>,
@@ -599,6 +606,11 @@ define_class!(
             self.render_focus();
         }
 
+        #[unsafe(method(toastExpired:))]
+        fn toast_expired(&self, _timer: &NSTimer) {
+            self.render_focus();
+        }
+
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: &NSTimer) {
             let Some(deadline) = self.ivars().deadline.get() else {
@@ -610,19 +622,20 @@ define_class!(
                 let was_break = state.on_break.replace(false);
                 let planned_min = self.session_secs() / 60; // before stop_timer clears the +5 extras
                 self.stop_timer();
-                if !was_break {
+                let (chime, toast) = if was_break {
+                    (Chime::BreakEnd, format!("Break over · ready for pomodoro {}", self.done_today() + 1))
+                } else {
                     pomodoros::append(&days::stamp(), planned_min, true);
                     self.reload_week();
                     let done = self.done_today();
                     let long = done % CYCLE == 0;
+                    let break_min = if long { LONG_BREAK_MIN } else { SHORT_BREAK_MIN };
                     state.on_break.set(true);
-                    state.break_min.set(if long { LONG_BREAK_MIN } else { SHORT_BREAK_MIN });
+                    state.break_min.set(break_min);
                     self.run_timer(self.session_secs());
-                }
-                // A soft chime rather than the alert beep: this is good news, not an error.
-                if let Some(chime) = NSSound::soundNamed(&NSString::from_str("Glass")) {
-                    chime.play();
-                }
+                    (Chime::FocusEnd, format!("Pomodoro {done} done · {} break {break_min} min", if long { "long" } else { "short" }))
+                };
+                self.announce(chime, toast);
                 self.ivars().tab.set(Tab::Workspace);
                 self.refresh();
                 self.pin_open();
@@ -1188,6 +1201,17 @@ impl Controller {
         }
     }
 
+    /// Rings the chime and shows `toast` on the focus card until a one-shot timer clears it.
+    fn announce(&self, chime: Chime, toast: String) {
+        let sound = chime.sound();
+        if let Some(sound) = &sound {
+            sound.play();
+        }
+        *self.ivars().chime.borrow_mut() = sound;
+        *self.ivars().toast.borrow_mut() = Some((toast, Instant::now()));
+        unsafe { NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(TOAST_SECS, self.target(), sel!(toastExpired:), None, false) };
+    }
+
     fn render_focus(&self) {
         let card = &self.ui().focus;
         let state = self.ivars();
@@ -1211,8 +1235,15 @@ impl Controller {
                 Tomato::Empty
             });
         }
-        let task = self.focused_task().map(|i| state.tasks.borrow()[i].text.clone());
-        set(&card.task, task.as_deref().unwrap_or("Pick a task with ▶"));
+        let toast = state.toast.borrow().as_ref().filter(|(_, at)| at.elapsed().as_secs_f64() < TOAST_SECS).map(|(text, _)| text.clone());
+        if let Some(toast) = toast {
+            set(&card.task, &toast);
+            card.task.setTextColor(Some(&tone(CORAL)));
+        } else {
+            let task = self.focused_task().map(|i| state.tasks.borrow()[i].text.clone());
+            set(&card.task, task.as_deref().unwrap_or("Pick a task with ▶"));
+            card.task.setTextColor(Some(&white(0.55)));
+        }
         set(&card.badge, &if stopwatch {
             "Stopwatch".to_owned()
         } else if !state.on_break.get() {
