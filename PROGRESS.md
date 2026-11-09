@@ -1,4 +1,19 @@
-### [2026-11-09 14:58 UTC+07:00] — [Feature] Calendar events in the Week tab
+### [2026-11-09 14:56 UTC+07:00] — [Feature] Reminders in the Week tab and focus insights
+
+**Done:**
+Week tab: incomplete Apple Reminders due today or overdue sit in Today, those due tomorrow in Tomorrow, below the calendar events — a hollow circle in the list colour (click completes it), the title, and the due time (soft red when overdue); at most 3 then "+N more". Access is asked only from a "Show reminders" pill in Inbox. Workspace focus card: an insights strip with 7 daily bars of completed pomodoros (today coral), weekly focus minutes and the day streak; the card's spacing and countdown size were tightened to fit. Both built by Sonnet threads; accepted by expanded-panel PNGs (motion stepped by hand while the screen was locked) and unit tests; the merged main was rendered again. Idle CPU 0.0%.
+
+**Changed  files:**
+- `src/calendar.rs` — modified (reminders fetch/complete, pure `place`/`reminder_rows`)
+- `src/week_bars.rs` — created
+- `src/pomodoros.rs` — modified (`week`, `week_of`, `streak`; `done_today`/`count_done` removed)
+- `src/days.rs` — modified (`initial`)
+- `src/controller.rs`, `src/main.rs`, `Cargo.toml`, `macos/Info.plist` — modified
+
+**Flow explained:**
+`reload_events` also starts an async `fetchRemindersMatchingPredicate`; its completion converts to plain `Reminder`s off the main thread, hops to the main queue and posts `NotchpadRemindersFetched`, whose observer stores them and re-renders the Week tab. `refresh` reads `pomodoros.txt` once into `Week { done[7], minutes, streak }`; the count chip uses `done[6]` and `WeekBars` draws the array.
+
+### [2026-11-09 14:50 UTC+07:00] — [Feature] Calendar events in the Week tab
 
 **Done:**
 The Today and Tomorrow columns list that day's calendar events above the tasks: a dot in the calendar's colour, `HH:mm` or "All day", and a one-line title, at most 4 then "+N more". Read-only through EventKit. Access is never requested at launch: while undetermined, the Inbox column shows a "Show calendar events" pill that asks; denied shows nothing. Events re-fetch on launch, tab switch, expand and `EKEventStoreChangedNotification` — no polling, idle CPU 0.0%. Built by a Sonnet thread; accepted by fake-event state logs and unit tests (the real fetch and prompt need the bundled app and the user's click).
@@ -129,19 +144,3 @@ The open panel no longer leaves an empty black strip under the hardware notch. T
 
 **Flow explained:**
 `build_ui` gives the header a band of `max(safe_top, 32)` at the top of the content. The tabs group has a required constraint keeping its leading edge at least half the notch width plus 8 pt right of the centre, because the panel is centred on the notch. `screenParametersChanged:` recomputes the notch rects, updates both constants and passes the new rects to `NotchMotion`.
-
-### [2026-11-08 22:06 UTC+07:00] — [Feature] Clips: clipboard history in the notch
-
-**Done:**
-New Clips tab. Text, images and files you copy, new screenshots and screen recordings, and files dragged onto the notch hang as cards on a line, newest first, in a sideways-scrolling strip (12 kept). Clicking a card puts it back on the clipboard; dragging a card drops it into any app. Clear empties the list. Clips stay in memory only. Copies marked concealed or transient (password managers) are skipped. TIFF copies are stored as PNG, and previews are 240 pt thumbnails, so a full-screen screenshot doesn't stay decoded. Idle CPU stays at 0%, RSS 18 MB; the release binary grew from 390 KB to 423 KB.
-
-**Changed  files:**
-- `src/clips.rs` — created (`ClipHistory`: pasteboard and screenshot-folder polling, dedupe, copy back)
-- `src/clip_card.rs` — created (`ClipCard`: click to copy, drag source)
-- `src/panel.rs` — modified (`NotchShape` accepts file drags and reports `FileDrag` events)
-- `src/controller.rs` — modified (`Tab` enum with Clips, `render_clips`, `file_drag`, 0.5 s `pollClips:` timer)
-- `src/widgets.rs`, `src/task_row.rs` — modified (`snapshot` shared by both drag sources)
-- `src/main.rs` — modified (modules)
-
-**Flow explained:**
-Every 0.5 s `pollClips:` compares the general pasteboard's `changeCount` and, only when the screenshot folder's mtime changed, lists that folder (`com.apple.screencapture location`, else Desktop) for new files tagged `kMDItemIsScreenCapture` or named like screenshots. A new clip equal to an existing one moves that one to the front, so a clicked card (re-copied) also jumps to the front on the next poll. Cards are rebuilt only when the history changes, so a refresh never tears down a card mid-drag. A file dragged over the notch opens it on Clips; dropping adds the files, and the panel closes once the pointer leaves.
