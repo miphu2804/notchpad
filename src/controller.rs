@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Bool};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSClickGestureRecognizer, 
+use objc2_app_kit::{NSClickGestureRecognizer, NSSound, 
     NSAppearance, NSFontAttributeName, NSForegroundColorAttributeName, NSImageScaling, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
     NSApplication, NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
@@ -66,10 +66,6 @@ const CORAL: (u8, u8, u8) = (217, 112, 90);
 const INBOX: isize = 0;
 const TODAY: isize = 1;
 const TOMORROW: isize = 2;
-
-unsafe extern "C" {
-    fn NSBeep();
-}
 
 fn soft_red() -> Retained<NSColor> {
     rgba(255, 130, 120, 1.0)
@@ -544,7 +540,10 @@ define_class!(
                     state.break_min.set(if long { LONG_BREAK_MIN } else { SHORT_BREAK_MIN });
                     self.run_timer(self.session_secs());
                 }
-                unsafe { NSBeep() };
+                // A soft chime rather than the alert beep: this is good news, not an error.
+                if let Some(chime) = NSSound::soundNamed(&NSString::from_str("Glass")) {
+                    chime.play();
+                }
                 self.ivars().tab.set(Tab::Workspace);
                 self.refresh();
                 self.pin_open();
