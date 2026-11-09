@@ -18,9 +18,12 @@ use crate::widgets::rgba;
 
 pub type Rgb = (u8, u8, u8);
 
-pub const CORAL: Rgb = (217, 112, 90);
-pub const AMBER: Rgb = (232, 170, 86);
-pub const SAGE: Rgb = (110, 190, 150);
+pub const PURPLE: Rgb = (156, 139, 232);
+pub const AMBER: Rgb = (224, 162, 103);
+pub const SAGE: Rgb = (111, 201, 160);
+pub const PINK: Rgb = (232, 125, 160);
+/// The moons' light: a warm cream.
+pub const MOON: Rgb = (232, 215, 154);
 /// A finished task is drawn this many minutes tall next to focus minutes in the Pulse bars.
 pub const TASK_BAR_MIN: u32 = 10;
 
@@ -30,11 +33,11 @@ pub enum Plot {
     Blank,
     /// Active days this month out of the days so far, as a ring with `active/total` inside.
     Ring { active: u32, total: u32 },
-    /// `(column, row, level)` per day; the month labels as `(column, name)`.
-    Heatmap { cells: Vec<(usize, u32, u8)>, months: Vec<(usize, &'static str)>, hue: Rgb },
+    /// `(column, row, level)` per day; the week labels as `(column, text)`.
+    Heatmap { cells: Vec<(usize, u32, u8)>, weeks: Vec<(usize, String)>, hue: Rgb },
     /// One petal per day, oldest first: its level and whether focus (not tasks) led the day; the
-    /// month labels as `(day index, name)`.
-    Petals { days: Vec<(u8, bool)>, months: Vec<(usize, &'static str)>, active: u32 },
+    /// week labels as `(day index, text)`.
+    Petals { days: Vec<(u8, bool)>, weeks: Vec<(usize, String)>, active: u32 },
     /// `(focus minutes, task height in minutes)` per day, oldest first, with x labels as `(index, text)`.
     Pulse { bars: Vec<(u32, u32)>, labels: Vec<(usize, String)> },
     /// The month as a calendar: weekday of the 1st (Monday 0), a level per day (`None` once the
@@ -61,8 +64,8 @@ define_class!(
             match &*self.ivars().borrow() {
                 Plot::Blank => {}
                 Plot::Ring { active, total } => draw_ring(size, *active, *total),
-                Plot::Heatmap { cells, months, hue } => draw_heatmap(size, cells, months, *hue),
-                Plot::Petals { days, months, active } => draw_petals(size, days, months, *active),
+                Plot::Heatmap { cells, weeks, hue } => draw_heatmap(size, cells, weeks, *hue),
+                Plot::Petals { days, weeks, active } => draw_petals(size, days, weeks, *active),
                 Plot::Pulse { bars, labels } => draw_pulse(size, bars, labels),
                 Plot::Moon { lead, days, today } => draw_moon(size, *lead, days, *today),
             }
@@ -150,58 +153,56 @@ fn draw_ring(size: NSSize, active: u32, total: u32) {
         arc.setLineCapStyle(NSLineCapStyle::Round);
         // A wider, faint pass under the arc gives it a soft glow.
         arc.setLineWidth(11.0);
-        color(CORAL, 0.16).setStroke();
+        color(PURPLE, 0.16).setStroke();
         arc.stroke();
         arc.setLineWidth(6.0);
-        color(CORAL, 1.0).setStroke();
+        color(PURPLE, 1.0).setStroke();
         arc.stroke();
     }
     text(&format!("{active}/{total}"), cx, cy - 8.0, 0.5, 14.0, true, &white(0.95));
 }
 
-fn draw_heatmap(size: NSSize, cells: &[(usize, u32, u8)], months: &[(usize, &str)], hue: Rgb) {
-    const LEFT: f64 = 30.0;
+fn draw_heatmap(size: NSSize, cells: &[(usize, u32, u8)], weeks: &[(usize, String)], hue: Rgb) {
+    const LABELS: f64 = 30.0;
     const TOP: f64 = 18.0;
     const LEGEND: f64 = 22.0;
-    const GAP: f64 = 3.0;
-    let pitch = ((size.width - LEFT) / crate::insights::HEAT_COLS as f64).min((size.height - TOP - LEGEND) / 7.0);
+    const GAP: f64 = 4.0;
+    const SWATCH: f64 = 10.0;
+    let cols = crate::insights::HEAT_COLS as f64;
+    let pitch = ((size.width - LABELS) / cols).min((size.height - TOP - LEGEND) / 7.0).min(46.0);
     let cell = pitch - GAP;
+    // Few columns leave the grid narrow; it sits in the middle of the card.
+    let left = LABELS + (size.width - LABELS - cols * pitch) / 2.0;
     for (col, row, level) in cells {
-        fill_round(rect(LEFT + *col as f64 * pitch, TOP + *row as f64 * pitch, cell, cell), 3.0, &ramp(hue, *level));
+        fill_round(rect(left + *col as f64 * pitch, TOP + *row as f64 * pitch, cell, cell), 5.0, &ramp(hue, *level));
     }
     if let Some((col, row, _)) = cells.last() {
-        let today = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect(LEFT + *col as f64 * pitch - 1.0, TOP + *row as f64 * pitch - 1.0, cell + 2.0, cell + 2.0), 4.0, 4.0);
+        let today = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect(left + *col as f64 * pitch - 1.5, TOP + *row as f64 * pitch - 1.5, cell + 3.0, cell + 3.0), 6.0, 6.0);
         today.setLineWidth(1.2);
         white(0.75).setStroke();
         today.stroke();
     }
     let dim = white(0.4);
-    let mut last_label_end = f64::MIN;
-    for (col, name) in months {
-        let x = LEFT + *col as f64 * pitch;
-        // A label that would run into the previous one is dropped.
-        if x >= last_label_end {
-            text(name, x, 0.0, 0.0, 10.0, false, &dim);
-            last_label_end = x + 26.0;
-        }
+    for (col, label) in weeks {
+        text(label, left + *col as f64 * pitch + cell / 2.0, 0.0, 0.5, 10.0, false, &dim);
     }
     for (row, name) in [(0, "Mon"), (2, "Wed"), (4, "Fri")] {
-        text(name, 0.0, TOP + row as f64 * pitch + (cell - 12.0) / 2.0, 0.0, 9.0, false, &dim);
+        text(name, left - 8.0, TOP + row as f64 * pitch + (cell - 12.0) / 2.0, 1.0, 9.0, false, &dim);
     }
     // Legend, right-aligned under the grid: Less ▢▢▢▢▢ More.
     let y = size.height - LEGEND + 7.0;
-    let right = LEFT + crate::insights::HEAT_COLS as f64 * pitch - GAP;
-    let swatches = f64::from(LEVELS + 1) * (cell + GAP);
+    let right = left + cols * pitch - GAP;
+    let swatches = f64::from(LEVELS + 1) * (SWATCH + 3.0);
     text("More", right, y, 1.0, 10.0, false, &dim);
     let mut x = right - 30.0 - swatches;
     for level in 0..=LEVELS {
-        fill_round(rect(x, y + 1.0, cell, cell), 3.0, &ramp(hue, level));
-        x += cell + GAP;
+        fill_round(rect(x, y + 1.0, SWATCH, SWATCH), 3.0, &ramp(hue, level));
+        x += SWATCH + 3.0;
     }
     text("Less", right - 30.0 - swatches - 6.0, y, 1.0, 10.0, false, &dim);
 }
 
-fn draw_petals(size: NSSize, days: &[(u8, bool)], months: &[(usize, &str)], active: u32) {
+fn draw_petals(size: NSSize, days: &[(u8, bool)], weeks: &[(usize, String)], active: u32) {
     const LEGEND: f64 = 26.0;
     const LABELS: f64 = 16.0;
     let (cx, cy) = (size.width / 2.0, (size.height - LEGEND) / 2.0);
@@ -215,7 +216,7 @@ fn draw_petals(size: NSSize, days: &[(u8, bool)], months: &[(usize, &str)], acti
         guide.stroke();
     }
     let angle_of = |i: usize| TAU * i as f64 / days.len() as f64;
-    for (i, name) in months {
+    for (i, name) in weeks {
         let at = on_circle(cx, cy, outer + LABELS - 4.0, angle_of(*i));
         text(name, at.x, at.y - 6.0, 0.5, 9.0, false, &white(0.4));
     }
@@ -230,14 +231,14 @@ fn draw_petals(size: NSSize, days: &[(u8, bool)], months: &[(usize, &str)], acti
         if *level == 0 {
             white(0.1).setStroke();
         } else {
-            color(if *focus_led { CORAL } else { SAGE }, 0.4 + 0.6 * f64::from(*level) / f64::from(LEVELS)).setStroke();
+            color(if *focus_led { PURPLE } else { SAGE }, 0.4 + 0.6 * f64::from(*level) / f64::from(LEVELS)).setStroke();
         }
         petal.stroke();
     }
     text(&active.to_string(), cx, cy - 17.0, 0.5, 26.0, true, &white(0.95));
     text("active days", cx, cy + 11.0, 0.5, 10.0, false, &white(0.45));
     let y = size.height - LEGEND + 4.0;
-    for (x, name, hue) in [(cx - 50.0, "Focus", CORAL), (cx + 8.0, "Tasks", SAGE)] {
+    for (x, name, hue) in [(cx - 50.0, "Focus", PURPLE), (cx + 8.0, "Tasks", SAGE)] {
         fill_round(rect(x, y + 2.0, 8.0, 8.0), 4.0, &color(hue, 1.0));
         text(name, x + 13.0, y, 0.0, 10.0, false, &white(0.55));
     }
@@ -265,7 +266,7 @@ fn draw_pulse(size: NSSize, bars: &[(u32, u32)], labels: &[(usize, String)]) {
             fill_round(rect(x, base - 2.0, width, 2.0), 1.0, &white(0.12));
             continue;
         }
-        fill_round(rect(x, base - focus_h, width, focus_h.max(0.0)), 2.0, &color(CORAL, 1.0));
+        fill_round(rect(x, base - focus_h, width, focus_h.max(0.0)), 2.0, &color(PURPLE, 1.0));
         fill_round(rect(x, base - focus_h - task_h - if focus_h > 0.0 { 1.0 } else { 0.0 }, width, task_h), 2.0, &color(SAGE, 1.0));
     }
     for (i, label) in labels {
@@ -273,7 +274,7 @@ fn draw_pulse(size: NSSize, bars: &[(u32, u32)], labels: &[(usize, String)]) {
     }
     let dim = white(0.55);
     let mut x = size.width;
-    for (name, hue) in [(format!("Tasks ({TASK_BAR_MIN} min each)"), SAGE), ("Focus minutes".to_owned(), CORAL)] {
+    for (name, hue) in [(format!("Tasks ({TASK_BAR_MIN} min each)"), SAGE), ("Focus minutes".to_owned(), PURPLE)] {
         let label_width = text(&name, x, 0.0, 1.0, 10.0, false, &dim);
         fill_round(rect(x - label_width - 13.0, 2.0, 8.0, 8.0), 4.0, &color(hue, 1.0));
         x -= label_width + 28.0;
@@ -329,7 +330,7 @@ fn draw_moon(size: NSSize, lead: u32, days: &[Option<u8>], today: usize) {
         let (cx, top) = ((slot % 7) as f64 + 0.5, HEADER + (slot / 7) as f64 * pitch_y);
         let (cx, cy) = (left + cx * pitch_x, top + 2.0 + radius);
         match level {
-            Some(level) => draw_moon_disc(cx, cy, radius, *level, CORAL),
+            Some(level) => draw_moon_disc(cx, cy, radius, *level, MOON),
             None => {
                 let ring = NSBezierPath::bezierPathWithOvalInRect(rect(cx - radius, cy - radius, 2.0 * radius, 2.0 * radius));
                 white(0.07).setStroke();

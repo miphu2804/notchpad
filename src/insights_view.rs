@@ -16,14 +16,15 @@ use objc2_app_kit::{
 use objc2_foundation::{NSArray, NSDictionary, NSObject, NSString};
 
 use crate::days;
-use crate::insights::{self, Insights, MONTH_NAMES, Metric, YEAR, civil, days_in_month, level, weekday};
-use crate::insights_chart::{AMBER, CORAL, Chart, Plot, Rgb, SAGE, TASK_BAR_MIN};
+use crate::insights::{self, Insights, MONTH_NAMES, Metric, SPAN, civil, days_in_month, level, weekday};
+use crate::insights_chart::{AMBER, Chart, PINK, PURPLE, Plot, Rgb, SAGE, TASK_BAR_MIN};
 use crate::week_bars::{self, WeekBars};
 use crate::widgets::{self as w, SURFACE, rgba};
 
 /// The heatmap's tabs, in order; a tab's tag is its index.
-const METRICS: [(&str, Metric, Rgb); 3] = [("Focus", Metric::Focus, CORAL), ("Pomodoros", Metric::Pomodoros, AMBER), ("Tasks", Metric::Tasks, SAGE)];
+const METRICS: [(&str, Metric, Rgb); 3] = [("Focus", Metric::Focus, PURPLE), ("Pomodoros", Metric::Pomodoros, AMBER), ("Tasks", Metric::Tasks, SAGE)];
 const PULSE_DAYS: i64 = 30;
+const ROW_HEIGHT: f64 = 330.0;
 const GAP: f64 = 12.0;
 const CARD_INSET: f64 = 16.0;
 
@@ -156,12 +157,12 @@ impl InsightsView {
 
         self.render_heatmap_with(&data);
 
-        let year = data.recent(YEAR);
+        let span = data.recent(SPAN);
         let peak = data.peak(Metric::Score);
         parts.petals.set(Plot::Petals {
-            days: year.iter().map(|d| (level(d.score(), peak), d.focus_led())).collect(),
-            months: (0..YEAR as usize).filter(|i| civil(today - (YEAR - 1) + *i as i64).2 == 1).map(|i| (i, MONTH_NAMES[civil(today - (YEAR - 1) + i as i64).1 as usize - 1])).collect(),
-            active: year.iter().filter(|d| d.active()).count() as u32,
+            days: span.iter().map(|d| (level(d.score(), peak), d.focus_led())).collect(),
+            weeks: insights::week_labels(today).into_iter().map(|(monday, text)| (monday - (today - (SPAN - 1)), text)).filter(|(i, _)| (0..SPAN - 3).contains(i)).map(|(i, text)| (i as usize, text)).collect(),
+            active: span.iter().filter(|d| d.active()).count() as u32,
         });
 
         let recent = data.recent(PULSE_DAYS);
@@ -190,14 +191,14 @@ impl InsightsView {
         let (_, metric, hue) = METRICS[selected];
         let today = data.today();
         let peak = data.peak(metric);
-        let cells = (today - (YEAR - 1)..=today)
+        let cells = (today - (SPAN - 1)..=today)
             .map(|n| {
                 let (col, row) = insights::heat_cell(today, n);
                 (col, row, level(data.day(n).value(metric), peak))
             })
             .collect();
-        let months = insights::month_starts(today).into_iter().map(|(col, month)| (col, MONTH_NAMES[month as usize - 1])).collect();
-        parts.heat.set(Plot::Heatmap { cells, months, hue });
+        let weeks = insights::week_labels(today).into_iter().enumerate().map(|(col, (_, text))| (col, text)).collect();
+        parts.heat.set(Plot::Heatmap { cells, weeks, hue });
         for (i, pill) in parts.metric_pills.iter().enumerate() {
             if i == selected {
                 w::style_pill(pill, &rgba(255, 255, 255, 1.0), &NSColor::blackColor(), 12.0);
@@ -214,11 +215,11 @@ impl InsightsView {
         // Stat cards.
         let ring = Chart::new(Plot::Blank, mtm);
         size(&ring, 70.0, 70.0);
-        let (active_card, active_pct, _) = stat_card("Active days", "calendar", CORAL, Some(&ring), "this month", mtm);
+        let (active_card, active_pct, _) = stat_card("Active days", "calendar", PURPLE, Some(&ring), "this month", mtm);
         let (streak_card, streak, streak_note) = stat_card("Current streak", "flame", AMBER, None, "", mtm);
         let focus_bars = WeekBars::new(mtm);
         size(&focus_bars, week_bars::WIDTH, week_bars::HEIGHT);
-        let (focus_card, focus_time, _) = stat_card("Focus time", "timer", CORAL, Some(&focus_bars), "this week", mtm);
+        let (focus_card, focus_time, _) = stat_card("Focus time", "timer", PINK, Some(&focus_bars), "this week", mtm);
         let (best_card, best, best_note) = stat_card("Best day", "star", SAGE, None, "", mtm);
         let stats = w::stack(&[&active_card, &streak_card, &focus_card, &best_card], false, GAP, mtm);
         stats.setDistribution(NSStackViewDistribution::FillEqually);
@@ -233,19 +234,16 @@ impl InsightsView {
         let tabs = w::stack(&metric_pills.iter().map(|p| &**p as &NSView).collect::<Vec<_>>(), false, 6.0, mtm);
         let heat = Chart::new(Plot::Blank, mtm);
         let heat_card = card("Activity", Some(&tabs), &heat, mtm);
-        // The grid is 53 columns by 7 rows of squares; this keeps them square at any width.
-        heat.heightAnchor().constraintEqualToAnchor_multiplier_constant(&heat.widthAnchor(), 7.0 / 53.0, 36.0).setActive(true);
 
-        // Rings and moon calendar, side by side.
+        // Rings, then the moon calendar beside the pulse below.
         let petals = Chart::new(Plot::Blank, mtm);
-        let petals_card = card("Year rings", None, &petals, mtm);
+        let petals_card = card("Month rings", None, &petals, mtm);
+        let top = w::stack(&[&heat_card, &petals_card], false, GAP, mtm);
+        top.setDistribution(NSStackViewDistribution::FillEqually);
+        top.heightAnchor().constraintEqualToConstant(ROW_HEIGHT).setActive(true);
         let moon_month = w::label("", 11.0, unsafe { NSFontWeightMedium }, &rgba(255, 255, 255, 0.5), mtm);
         let moon = Chart::new(Plot::Blank, mtm);
         let moon_card = card("Moon calendar", Some(&moon_month), &moon, mtm);
-        let pair = w::stack(&[&petals_card, &moon_card], false, GAP, mtm);
-        // The rings need a square; the calendar takes the rest.
-        petals_card.widthAnchor().constraintEqualToAnchor_multiplier(&pair.widthAnchor(), 0.42).setActive(true);
-        pair.heightAnchor().constraintEqualToConstant(340.0).setActive(true);
 
         // Pulse card with the export button.
         let export = w::pill("Export PNG", 24.0, target, sel!(exportPulse:), mtm);
@@ -253,9 +251,12 @@ impl InsightsView {
         w::style_pill(&export, &rgba(255, 255, 255, 0.1), &rgba(255, 255, 255, 0.8), 12.0);
         let pulse = Chart::new(Plot::Blank, mtm);
         let pulse_card = card(&format!("Pulse · last {PULSE_DAYS} days"), Some(&export), &pulse, mtm);
-        pulse_card.heightAnchor().constraintEqualToConstant(220.0).setActive(true);
+        let bottom = w::stack(&[&moon_card, &pulse_card], false, GAP, mtm);
+        bottom.heightAnchor().constraintEqualToConstant(ROW_HEIGHT).setActive(true);
+        // The calendar needs seven narrow columns; the bars take the rest.
+        moon_card.widthAnchor().constraintEqualToAnchor_multiplier(&bottom.widthAnchor(), 0.36).setActive(true);
 
-        let rows = w::stack(&[&stats, &heat_card, &pair, &pulse_card], true, GAP, mtm);
+        let rows = w::stack(&[&stats, &top, &bottom], true, GAP, mtm);
         rows.setAlignment(NSLayoutAttribute::Width);
         let page = Chart::new(Plot::Blank, mtm);
         page.addSubview(&rows);
@@ -276,7 +277,7 @@ impl InsightsView {
         page.topAnchor().constraintEqualToAnchor(&clip.topAnchor()).setActive(true);
 
         let heading = w::label("No activity yet", 16.0, unsafe { NSFontWeightSemibold }, &rgba(255, 255, 255, 0.85), mtm);
-        let hint = w::label("Finish a pomodoro or tick off a task and your year shows up here.", 12.0, unsafe { NSFontWeightRegular }, &rgba(255, 255, 255, 0.45), mtm);
+        let hint = w::label("Finish a pomodoro or tick off a task and your days show up here.", 12.0, unsafe { NSFontWeightRegular }, &rgba(255, 255, 255, 0.45), mtm);
         let empty = w::stack(&[&heading, &hint], true, 6.0, mtm);
         empty.setAlignment(NSLayoutAttribute::CenterX);
         empty.setHidden(true);

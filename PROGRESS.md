@@ -1,7 +1,7 @@
 ### [2026-11-09 23:10 UTC+07:00] — [Feature] Insights page in the dashboard
 
 **Done:**
-- Insights tab in the dashboard window: stat cards (active days ring, streak, focus time, best day), a 53x7 heatmap with Focus/Pomodoros/Tasks tabs, year rings, 30-day pulse with Export PNG (save panel), moon calendar, and an empty state.
+- Insights tab in the dashboard window: stat cards (active days ring, streak, focus time, best day), a five-week heatmap with Focus/Pomodoros/Tasks tabs, month rings, 30-day pulse with Export PNG (save panel), moon calendar, and an empty state.
 - Pure `insights` module with per-day aggregates, streaks, best day and intensity levels, 14 unit tests (empty data, month-crossing streak, garbage lines).
 
 **Changed  files:**
@@ -9,7 +9,7 @@
 - `src/controller.rs`, `src/widgets.rs`, `src/main.rs`, `README.md` — modified
 
 **Flow explained:**
-`refresh()` calls `render_insights()` only while the Insights tab is visible; it builds `Insights` from the pomodoro log and tasks and hands it to `InsightsView`. `Chart` draws each plot with NSBezierPath and skips the redraw when the plot is unchanged, so there are no new timers. Verified with 85 tests, offscreen renders from a scratch HOME (60 and 300 days, empty), and 0.0% idle CPU.
+`refresh()` calls `render_insights()` only while the Insights tab is visible; it builds `Insights` from the pomodoro log and tasks and hands it to `InsightsView`. The heatmap and rings cover the last 36 days (`SPAN`, six week columns) instead of a year; the palette is purple (focus), green (tasks), orange (pomodoros), cream moons. `Chart` draws each plot with NSBezierPath and skips the redraw when the plot is unchanged, so there are no new timers. Verified with 85 tests, offscreen renders from a scratch HOME (60 and 300 days, empty), and 0.0% idle CPU.
 
 ### [2026-11-09 21:55 UTC+07:00] — [Feature] Notch alert cards, focus settings, quick-add hints
 

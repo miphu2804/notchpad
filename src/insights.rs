@@ -12,8 +12,9 @@ use crate::store::Task;
 const POMODORO_POINTS: u32 = 2;
 /// Intensity buckets above empty: a day is 0 (nothing) to `LEVELS`.
 pub const LEVELS: u8 = 4;
-/// The heatmap and the year rings look back this many days, today included.
-pub const YEAR: i64 = 365;
+/// The heatmap and the rings look back this many days, today included: five weeks and a day, so
+/// the grid always spans 6 week columns.
+pub const SPAN: i64 = 36;
 
 /// What one calendar day held.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
@@ -141,9 +142,9 @@ impl Insights {
         (self.today - count + 1..=self.today).map(|n| self.day(n)).collect()
     }
 
-    /// The largest value of `metric` in the last [`YEAR`] days: the top of the intensity scale.
+    /// The largest value of `metric` in the last [`SPAN`] days: the top of the intensity scale.
     pub fn peak(&self, metric: Metric) -> u32 {
-        self.recent(YEAR).iter().map(|d| d.value(metric)).max().unwrap_or(0)
+        self.recent(SPAN).iter().map(|d| d.value(metric)).max().unwrap_or(0)
     }
 }
 
@@ -200,20 +201,31 @@ pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 }
 
 pub const MONTH_NAMES: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-/// Columns of the heatmap: [`YEAR`] days that end on any weekday touch 53 weeks.
-pub const HEAT_COLS: usize = 53;
+/// Columns of the heatmap: [`SPAN`] days that end on any weekday touch 6 weeks.
+pub const HEAT_COLS: usize = 6;
 
-/// Column (week) and row (weekday, Monday on top) of day `n` in a heatmap of the [`YEAR`] days
+/// Column (week) and row (weekday, Monday on top) of day `n` in a heatmap of the [`SPAN`] days
 /// ending `today`. Column 0 starts on the Monday on or before the first day shown.
 pub fn heat_cell(today: i64, n: i64) -> (usize, u32) {
-    let first = today - (YEAR - 1);
+    let first = today - (SPAN - 1);
     let first_monday = first - i64::from(weekday(first));
     (((n - first_monday) / 7) as usize, weekday(n))
 }
 
-/// The heatmap column and month (1–12) of every 1st of a month inside the year shown.
-pub fn month_starts(today: i64) -> Vec<(usize, u32)> {
-    (today - (YEAR - 1)..=today).filter(|n| civil(*n).2 == 1).map(|n| (heat_cell(today, n).0, civil(n).1)).collect()
+/// A label for every week shown, as (the Monday's day number, text): the day of the month,
+/// with the month name in front of the first and of each week that starts in a new month.
+pub fn week_labels(today: i64) -> Vec<(i64, String)> {
+    let first_monday = today - (SPAN - 1) - i64::from(weekday(today - (SPAN - 1)));
+    let mut previous = 0;
+    (0..HEAT_COLS as i64)
+        .map(|col| {
+            let monday = first_monday + col * 7;
+            let (_, month, day) = civil(monday);
+            let text = if month == previous { day.to_string() } else { format!("{} {day}", MONTH_NAMES[month as usize - 1]) };
+            previous = month;
+            (monday, text)
+        })
+        .collect()
 }
 
 /// Monday is 0, Sunday 6.
@@ -337,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn peak_looks_back_one_year_only() {
+    fn peak_looks_back_one_span_only() {
         let log = "2024-01-01 09:00 90 done\n2026-11-01 09:00 25 done\n2026-11-02 09:00 50 done\n";
         let data = build(log, &[], "2026-11-09");
         assert_eq!(data.peak(Metric::Focus), 50);
@@ -358,7 +370,7 @@ mod tests {
             let today = at(today);
             assert_eq!(heat_cell(today, today), (HEAT_COLS - 1, weekday(today)));
             assert_eq!(heat_cell(today, today - 6).0, HEAT_COLS - 2 + usize::from(weekday(today) == 6));
-            assert_eq!(heat_cell(today, today - (YEAR - 1)).0, 0);
+            assert_eq!(heat_cell(today, today - (SPAN - 1)).0, 0);
         }
         // A Monday is the top of its column and Sunday the bottom of the same one.
         let today = at("2026-11-09");
@@ -367,14 +379,12 @@ mod tests {
     }
 
     #[test]
-    fn month_labels_sit_on_the_week_of_the_first() {
-        let today = at("2026-11-09");
-        let starts = month_starts(today);
-        assert_eq!(starts.len(), 12);
-        assert_eq!(starts[0].1, 12); // 1 Dec 2025 is the first 1st inside the year
-        // 1 Nov 2026 is a Sunday, so it sits in the week that began on Monday 26 Oct, two columns before today's.
-        assert_eq!(starts[11], (HEAT_COLS - 3, 11));
-        assert!(starts.windows(2).all(|w| w[0].0 < w[1].0));
+    fn week_labels_name_the_month_when_it_changes() {
+        let labels = week_labels(at("2026-11-09"));
+        let text: Vec<_> = labels.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(text, ["Oct 5", "12", "19", "26", "Nov 2", "9"]);
+        // Each label sits on the Monday that starts its column.
+        assert!(labels.iter().enumerate().all(|(col, (monday, _))| heat_cell(at("2026-11-09"), *monday).0 == col && weekday(*monday) == 0));
     }
 
     #[test]
