@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 
 use objc2::rc::{Retained, Weak};
-use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
 use objc2::{AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSClickGestureRecognizer, NSLineBreakMode, NSPasteboard, NSPasteboardTypeString, NSControlStateValueOn, NSForegroundColorAttributeName, NSStrikethroughStyleAttributeName, NSUnderlineStyle, NSSound, 
+use objc2_app_kit::{NSClickGestureRecognizer, NSControl, NSControlTextEditingDelegate, NSTextFieldDelegate, NSTextView, NSLineBreakMode, NSPasteboard, NSPasteboardTypeString, NSControlStateValueOn, NSForegroundColorAttributeName, NSStrikethroughStyleAttributeName, NSUnderlineStyle, NSSound, 
     NSAppearance, NSImageScaling, NSAppearanceCustomization, NSAppearanceNameDarkAqua,
     NSApplication, NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
@@ -109,6 +109,9 @@ struct TaskCard {
     /// The reminder or the "Deleted" line beside the list pills.
     note: Retained<NSTextField>,
     undo: Retained<NSButton>,
+    /// Completions for the word being typed, as pills on a strip over the bottom of the list.
+    hint_bar: Retained<NSView>,
+    hints: Retained<NSStackView>,
     /// One dot per entry of `PRIORITIES`, picking the priority of tasks added here.
     dots: Vec<Retained<NSButton>>,
     rows: Retained<NSStackView>,
@@ -231,6 +234,9 @@ pub struct State {
     task_toast: RefCell<Option<String>>,
     /// `YYYY-MM-DD HH:MM` of the last reminder check; empty until the first one.
     reminded_at: RefCell<String>,
+    /// What the hint strip offers for the word being typed, and which one Tab or Return takes.
+    hints: RefCell<Vec<String>>,
+    hint: Cell<usize>,
     /// The last deleted task and where it stood, while Undo can still restore it.
     undo: RefCell<Option<(usize, Task, Instant)>>,
     /// Last seven days of `pomodoros.txt`, read once per refresh.
@@ -254,6 +260,24 @@ define_class!(
     pub struct Controller;
 
     unsafe impl NSObjectProtocol for Controller {}
+
+    unsafe impl NSControlTextEditingDelegate for Controller {
+        /// Only the task input has this delegate.
+        #[unsafe(method(controlTextDidChange:))]
+        fn control_text_did_change(&self, _notification: &NSNotification) {
+            self.ivars().hint.set(0);
+            self.render_hints();
+        }
+
+        /// While hints show, ↑/↓ move between them, Tab or Return takes one and Esc hides them;
+        /// otherwise the field handles the key (Return adds the task).
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn control_do_command(&self, _control: &NSControl, _editor: &NSTextView, command: Sel) -> Bool {
+            Bool::new(self.hint_command(command))
+        }
+    }
+
+    unsafe impl NSTextFieldDelegate for Controller {}
 
     unsafe impl NSWindowDelegate for Controller {
         #[unsafe(method(windowWillClose:))]
@@ -403,6 +427,11 @@ define_class!(
         #[unsafe(method(moveToTomorrow:))]
         fn move_to_tomorrow(&self, item: &NSMenuItem) {
             self.reschedule(item.tag() as usize, days::key(1));
+        }
+
+        #[unsafe(method(pickHint:))]
+        fn pick_hint(&self, sender: &NSButton) {
+            self.take_hint(sender.tag() as usize);
         }
 
         #[unsafe(method(focusTask:))]
@@ -1241,6 +1270,77 @@ impl Controller {
         list_row::animate_changes(&card.rows, before);
     }
 
+    /// Handles a key the task input passes on while hints show; false lets the field handle it.
+    fn hint_command(&self, command: Sel) -> bool {
+        let count = self.ivars().hints.borrow().len();
+        if count == 0 {
+            return false;
+        }
+        let hint = self.ivars().hint.get();
+        if command == sel!(moveDown:) {
+            self.ivars().hint.set((hint + 1) % count);
+        } else if command == sel!(moveUp:) {
+            self.ivars().hint.set((hint + count - 1) % count);
+        } else if command == sel!(insertTab:) || command == sel!(insertNewline:) {
+            self.take_hint(hint);
+            return true;
+        } else if command == sel!(cancelOperation:) {
+            self.ivars().hints.borrow_mut().clear();
+        } else {
+            return false;
+        }
+        self.show_hints();
+        true
+    }
+
+    /// Offers completions for the word at the end of the task input; projects most recent first.
+    fn render_hints(&self) {
+        let text = self.ui().tasks.input.stringValue().to_string();
+        let mut projects: Vec<String> = Vec::new();
+        for task in self.ivars().tasks.borrow().iter().rev() {
+            if !task.project.is_empty() && !projects.contains(&task.project) {
+                projects.push(task.project.clone());
+            }
+        }
+        *self.ivars().hints.borrow_mut() = quick_add::suggestions(&text, &projects);
+        self.show_hints();
+    }
+
+    fn show_hints(&self) {
+        let card = &self.ui().tasks;
+        let hints = self.ivars().hints.borrow();
+        clear(&card.hints);
+        for (i, hint) in hints.iter().enumerate() {
+            let pill = w::pill(hint, 22.0, self.target(), sel!(pickHint:), self.mtm());
+            pill.setTag(i as isize);
+            w::fit_pill(&pill, 10.0);
+            let chosen = i == self.ivars().hint.get();
+            w::style_pill(&pill, &white(if chosen { 0.18 } else { 0.06 }), &white(if chosen { 0.95 } else { 0.65 }), 7.0);
+            card.hints.addArrangedSubview(&pill);
+        }
+        if !hints.is_empty() {
+            card.hints.addArrangedSubview(&w::spacer(self.mtm()));
+            card.hints.addArrangedSubview(&w::label("↑↓ · Tab", 11.0, unsafe { NSFontWeightMedium }, &white(0.35), self.mtm()));
+        }
+        card.hint_bar.setHidden(hints.is_empty());
+    }
+
+    /// Puts hint `index` in place of the word being typed and keeps typing after it.
+    fn take_hint(&self, index: usize) {
+        let Some(choice) = self.ivars().hints.borrow().get(index).cloned() else { return };
+        let input = &self.ui().tasks.input;
+        let text = quick_add::complete(&input.stringValue().to_string(), &choice);
+        input.setStringValue(&NSString::from_str(&text));
+        // A clicked pill may have taken the focus; refocusing selects all, so the caret goes last.
+        if input.currentEditor().is_none() {
+            self.ui().panel.makeFirstResponder(Some(input));
+        }
+        if let Some(editor) = input.currentEditor() {
+            editor.setSelectedRange(NSRange::new(text.encode_utf16().count(), 0));
+        }
+        self.render_hints();
+    }
+
     /// Rings the dot of the priority new tasks get and dims the others.
     fn render_priority_dots(&self) {
         let chosen = self.ivars().new_priority.get();
@@ -1263,6 +1363,7 @@ impl Controller {
         let title = with_meta(task, label, &white(0.5), mtm);
         let play = w::icon_button("play.fill", "", 10.0, &white(0.45), self.target(), sel!(focusTask:), mtm);
         play.setTag(index as isize);
+        play.setToolTip(Some(&NSString::from_str("Focus on this in the pomodoro")));
         play.setHidden(task.done);
         w::stack(&[&check, &title, &play], false, 10.0, mtm).into_super()
     }
@@ -1681,7 +1782,8 @@ impl Controller {
             view.widthAnchor().constraintEqualToAnchor(&top.widthAnchor()).setActive(true);
         }
 
-        let input = w::input("Add a task · try 6pm !high #work 30m", &white(0.9), 0, self.target(), sel!(addTask:), mtm);
+        let input = w::input("Add a task · type ! # or / for hints", &white(0.9), 0, self.target(), sel!(addTask:), mtm);
+        unsafe { input.setDelegate(Some(ProtocolObject::from_ref(self))) };
         let bottom = self.add_row(&input, &white(0.5), mtm);
         let dots: Vec<_> = PRIORITIES
             .iter()
@@ -1705,7 +1807,20 @@ impl Controller {
         line.bottomAnchor().constraintEqualToAnchor_constant(&bottom.topAnchor(), -8.0).setActive(true);
         bottom.bottomAnchor().constraintEqualToAnchor_constant(&card.bottomAnchor(), -10.0).setActive(true);
 
-        (card, TaskCard { todo, done, clear, note, undo, dots, rows, input })
+        // Over the bottom of the list, opaque, so it reads cleanly above the input while typing.
+        let hints = w::stack(&[], false, 4.0, mtm);
+        let hint_bar = w::filled(&tone(SURFACE), 0.0, mtm);
+        hint_bar.setTranslatesAutoresizingMaskIntoConstraints(false);
+        hint_bar.addSubview(&hints);
+        w::pin(&hints, &hint_bar, 0.0, None);
+        hint_bar.setHidden(true);
+        card.addSubview(&hint_bar);
+        hint_bar.leadingAnchor().constraintEqualToAnchor_constant(&card.leadingAnchor(), 14.0).setActive(true);
+        hint_bar.trailingAnchor().constraintEqualToAnchor_constant(&card.trailingAnchor(), -14.0).setActive(true);
+        hint_bar.bottomAnchor().constraintEqualToAnchor_constant(&line.topAnchor(), -6.0).setActive(true);
+        hint_bar.heightAnchor().constraintEqualToConstant(28.0).setActive(true);
+
+        (card, TaskCard { todo, done, clear, note, undo, hint_bar, hints, dots, rows, input })
     }
 
     /// Title row, then the clips hanging from a line in a sideways-scrolling strip, then a hint.
