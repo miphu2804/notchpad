@@ -1,3 +1,19 @@
+### [2026-11-09 14:43 UTC+07:00] — [Feature] Live activity wings and terminal selection
+
+**Done:**
+The collapsed notch grows two 34 pt wings while something is live: the playing track's artwork on the left with a coral waveform on the right, or the focus/break countdown on the right (coral/green). They spring in and out with the notch motion and hide when expanded. The now-playing helper now starts at launch so the wings work without opening the Music tab; it blocks on notifications, idle CPU 0.0%. The Terminal tab gained mouse selection (drag, double-click word, triple-click line, Shift under mouse reporting) and ⌘C. Both built by Sonnet threads; accepted by state logs and collapsed PNGs (screen was locked, so the open animation and a real drag were not exercised). Vietnamese IME input to the PTY verified by the shell receiving `echo tiếng Việt`.
+
+**Changed  files:**
+- `src/live_activity.rs` — created
+- `src/notch_motion.rs` — modified
+- `src/controller.rs` — modified
+- `src/main.rs` — modified
+- `src/terminal_view.rs` — modified
+- `src/terminal_session.rs` — modified
+
+**Flow explained:**
+`sync_activity` runs on every focus render (the existing session tick), each now-playing change and each expand/collapse; it fills the wing view and tells `NotchMotion::set_wings` the extra width, which springs the collapsed frame wider. Terminal mouse events map to grid cells via the pure `cell_at`, update alacritty's `Selection`, and the draw pass highlights the selected cells; ⌘C writes `selection_to_string()` to the pasteboard.
+
 ### [2026-11-09 14:35 UTC+07:00] — [Feature] Real PTY terminal tab
 
 **Done:**
@@ -126,20 +142,3 @@ Every 0.5 s `pollClips:` compares the general pasteboard's `changeCount` and, on
 
 **Flow explained:**
 The script runs `cargo build --release`, lays out `Contents/{MacOS,Resources}` with both binaries, the plist and the icon, signs with `codesign --sign -`, then optionally replaces the copy in `/Applications`. The icon is the `LogoMark` view rendered at 824 pt on a 1024 pt canvas and converted with `iconutil`.
-
-### [2026-11-08 21:33 UTC+07:00] — [Feature] Smooth animations: notch spring, tabs, rows, drops
-
-**Done:**
-The notch panel springs open (slight overshoot) and closed (no overshoot) instead of the old fixed `setFrame:display:animate:`. Content slides out from under the notch, fading and scaling (0.97 → 1) in once the frame is 55% open, and fades out before the frame closes, so it never squeezes. Tab switches crossfade. Task rows (Today card and Week columns) tint under the pointer, fade in where they land while other rows slide, and fade out before their gap closes. Pill buttons dim while pressed. Kanban columns ease their drop highlight in and out. Reduce Motion drops the spring, scale and row sliding but keeps short fades. Idle CPU stays 0% (the display link pauses at rest); RSS 54.8 → 55.1 MB; release binary 372 → 390 KB.
-
-**Changed  files:**
-- `src/notch_motion.rs` — created (`NotchMotion`, display-link spring for the panel frame and content fade)
-- `src/list_row.rs` — created (`ListRow` hover tint and hairline; `snapshot`/`animate_changes` for row in/out)
-- `src/pill_button.rs` — created (`PillButton`, press dim)
-- `src/controller.rs` — modified (`set_expanded` delegates to `NotchMotion`, hover check counts the expanded frame while opening, tab crossfade, rows wrapped in `ListRow`, Today separators became row hairlines, drop lookup goes through `ListRow`)
-- `src/drop_column.rs` — modified (highlight is a fading layer behind the content)
-- `src/widgets.rs` — modified (`fade`, `reduce_motion`, `pill` builds a `PillButton`)
-- `src/main.rs` — modified (modules)
-
-**Flow explained:**
-Hover still calls `set_expanded`, which now only sets the target on `NotchMotion`. A `CADisplayLink` on the panel wakes the spring and steps it each frame: it sets the window frame between the collapsed and expanded rects, keeps the content centred and pinned to the bottom edge, and sets the content's alpha and scale. When the frame and fade are at rest, the link pauses. Exit events are still checked against the real pointer, and while open the full expanded rect counts, so an exit during the spring polls `recheckHover:` rather than closing. Rows are rebuilt on every render as before. `list_row::snapshot` records the old rows by task text first, and `animate_changes` then puts the removed rows back as inert ghosts that fade out and then hide inside an implicit-animation group, and fades new rows in at their final frames while the stack animates the rest of the layout.
