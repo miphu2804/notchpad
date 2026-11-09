@@ -254,7 +254,9 @@ fn receive_callback_until(listener: TcpListener, expected_state: &str, cancel: &
         }
         match listener.accept() {
             Ok((mut stream, _)) => {
-                if stream.set_read_timeout(Some(Duration::from_millis(100))).is_err() {
+                // macOS hands out accepted sockets non-blocking like the listener, so a browser
+                // that connects before it writes would read as an error and get no page.
+                if stream.set_nonblocking(false).is_err() || stream.set_read_timeout(Some(Duration::from_millis(100))).is_err() {
                     continue;
                 }
                 let request = match read_callback_request(&mut stream) {
