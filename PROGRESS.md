@@ -1,3 +1,16 @@
+### [2026-11-09 13:55 UTC+07:00] — [Feature] Smart quick-add and right-click task menu
+
+**Done:**
+Typing `gym 6pm !high #health 45m tomorrow` in any add-task field now fills the time (18:00), priority, project, estimate and day, and keeps "gym" as the title. Times: `17:30`, `5pm`, `5:30pm`, `9h`, `9h30` (a preceding "at"/"lúc" is dropped). Priority: `!high`/`!!!`, `!med`/`!!`, `!low`/`!`. Estimate: `30m`, `45min`, `~1.5h`. Day: `today`, `tomorrow`, `tmr`. Plain numbers stay in the title. Right-clicking a task in the Today card or the Week board offers Move to Inbox / Today / Tomorrow and Delete; deleting keeps the focus card on the same task.
+
+**Changed  files:**
+- `src/quick_add.rs` — created (`parse`, 7 unit tests)
+- `src/controller.rs` — modified (`add_task` uses `quick_add::parse`; `task_menu`, `reschedule`, `deleteTask:`, `moveToInbox:`/`moveToToday:`/`moveToTomorrow:`)
+- `src/main.rs` — modified (module)
+
+**Flow explained:**
+`add_task` picks the field's default day (Inbox empty, Tomorrow column, else today) and passes the text to `quick_add::parse`, which takes recognised tokens out of the title. Each rendered `ListRow` gets an `NSMenu` whose items carry the task index in their tag; a right-click on any part of the row climbs the responder chain to that menu. Verified with a temporary hook on a scratch HOME: the menu actions delete and reschedule, remap focus and save `tasks.txt`.
+
 ### [2026-11-09 13:20 UTC+07:00] — [Feature] Header in the bands beside the notch
 
 **Done:**
