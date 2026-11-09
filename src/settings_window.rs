@@ -15,13 +15,14 @@ use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
 use crate::calendar::{self, Access};
+use crate::reminders;
 use crate::claude_mcp;
 use crate::linear;
 use crate::settings::{FOCUS_CHOICES, LONG_BREAK_CHOICES, REMIND_CHOICES, SECTIONS, SHORT_BREAK_CHOICES, Settings, Size};
 use crate::widgets::{self as w, rgba};
 
 const WIDTH: f64 = 680.0;
-const HEIGHT: f64 = 420.0;
+const HEIGHT: f64 = 470.0;
 const SIDEBAR: f64 = 170.0;
 const PANE: f64 = WIDTH - SIDEBAR;
 const MARGIN: f64 = 24.0;
@@ -46,7 +47,8 @@ const REMIND_ROW: isize = 3;
 const CLAUDE_CODE_ROW: isize = 10;
 const CLAUDE_DESKTOP_ROW: isize = 11;
 const CALENDAR_ROW: isize = 12;
-const LINEAR_ROW: isize = 13;
+const REMINDERS_ROW: isize = 13;
+const LINEAR_ROW: isize = 14;
 /// Generic secure-field tags used by integration rows that still have a field.
 const FIELD: isize = 200;
 const STATUS: isize = 100;
@@ -244,6 +246,14 @@ define_class!(
             self.refresh_integrations(-1, None);
         }
 
+        #[unsafe(method(toggleReminders:))]
+        fn toggle_reminders(&self, sender: &NSSwitch) {
+            let mut settings = self.ivars().settings.borrow().clone();
+            settings.reminders = sender.state() == NSControlStateValueOn;
+            self.commit(settings);
+            self.refresh_integrations(-1, None);
+        }
+
         /// Registers or removes the app as a login item. macOS refuses for a binary outside an
         /// app bundle; the switch then snaps back to the real state.
         #[unsafe(method(toggleLogin:))]
@@ -409,13 +419,22 @@ impl SettingsWindow {
             Row { symbol: "terminal", name: "Claude Code", blurb: Some(""), button: Some(("Add", sel!(addClaudeCode:))), ..Row::default() },
             Row { symbol: "bubble.left", name: "Claude Desktop", blurb: Some(""), button: Some(("Add", sel!(addClaudeDesktop:))), ..Row::default() },
         ];
-        let calendars = [Row {
-            symbol: "calendars",
-            name: "Show calendar events",
-            blurb: Some(""),
-            switch: Some((self.ivars().settings.borrow().calendar, sel!(toggleCalendar:))),
-            ..Row::default()
-        }];
+        let calendars = [
+            Row {
+                symbol: "calendars",
+                name: "Show calendar events",
+                blurb: Some(""),
+                switch: Some((self.ivars().settings.borrow().calendar, sel!(toggleCalendar:))),
+                ..Row::default()
+            },
+            Row {
+                symbol: "checklist",
+                name: "Sync tasks with Reminders",
+                blurb: Some(""),
+                switch: Some((self.ivars().settings.borrow().reminders, sel!(toggleReminders:))),
+                ..Row::default()
+            },
+        ];
         let linear = [Row {
             symbol: "linear",
             name: "Linear",
@@ -426,7 +445,7 @@ impl SettingsWindow {
         }];
         let calendar_note = "Add a Google account in System Settings › Internet Accounts. Notion Calendar events come from that same Google calendar.";
         let (mut top, mut base) = (80.0, CLAUDE_CODE_ROW);
-        for (caption, rows, note) in [("Claude", &claude[..], None), ("Calendars", &calendars[..], Some(calendar_note)), ("Linear", &linear[..], None)] {
+        for (caption, rows, note) in [("Claude", &claude[..], None), ("Calendars & Reminders", &calendars[..], Some(calendar_note)), ("Linear", &linear[..], None)] {
             let caption = w::label(&caption.to_uppercase(), 11.0, unsafe { NSFontWeightMedium }, &rgba(255, 255, 255, 0.45), mtm);
             caption.setFrame(rect(MARGIN + 4.0, from_top(HEIGHT, top, 14.0), PANE - 2.0 * MARGIN, 14.0));
             pane.addSubview(&caption);
@@ -580,6 +599,14 @@ impl SettingsWindow {
         };
         if let Some(label) = pane.viewWithTag(STATUS + CALENDAR_ROW).and_then(|v| v.downcast::<NSTextField>().ok()) {
             label.setStringValue(&NSString::from_str(calendar));
+        }
+        let reminders = if self.ivars().settings.borrow().reminders && reminders::access() == Access::Denied {
+            "Allow Notchpad in System Settings › Privacy › Reminders"
+        } else {
+            "Two-way with the Notchpad list, for iPhone"
+        };
+        if let Some(label) = pane.viewWithTag(STATUS + REMINDERS_ROW).and_then(|v| v.downcast::<NSTextField>().ok()) {
+            label.setStringValue(&NSString::from_str(reminders));
         }
         for (row, added, idle, done) in rows {
             let blurb = match &error {

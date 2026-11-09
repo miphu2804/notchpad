@@ -22,6 +22,8 @@ mod panel;
 mod pill_button;
 mod pomodoros;
 mod quick_add;
+mod reminders;
+mod reminders_sync;
 mod settings;
 mod settings_window;
 mod store;

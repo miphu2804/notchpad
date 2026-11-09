@@ -1,5 +1,5 @@
 //! Service icons: vendor app icons embedded from assets/integrations/ (see its README), the
-//! installed Claude app's own icon, and a glyph tile for Claude Code, which has no app icon.
+//! installed Claude and Reminders apps' own icons, and a glyph tile for Claude Code, which has no app icon.
 
 use block2::RcBlock;
 use objc2::{AnyThread, rc::Retained, runtime::Bool};
@@ -20,7 +20,8 @@ pub fn logo(name: &str) -> Option<Retained<NSImage>> {
         // Two smaller tiles, so the pair stays clear of the row's text column.
         "calendars" => Some(tiles(vec![png(GOOGLE_CALENDAR), png(NOTION)], 18.0)),
         // The Claude Desktop row keeps its generic bubble only when Claude isn't installed.
-        "bubble.left" => claude_icon(),
+        "bubble.left" => app_icon(CLAUDE_BUNDLE),
+        "checklist" => app_icon("com.apple.reminders"),
         "terminal" => Some(glyph_tile("terminal")),
         _ => None,
     }
@@ -44,11 +45,11 @@ fn tiles(icons: Vec<Retained<NSImage>>, size: f64) -> Retained<NSImage> {
     NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(width, SLOT), false, &draw)
 }
 
-/// The installed Claude app's icon, enlarged past the slot because macOS icons carry a
-/// transparent margin; `None` when Claude isn't installed.
-fn claude_icon() -> Option<Retained<NSImage>> {
+/// An installed app's icon, enlarged past the slot because macOS icons carry a transparent
+/// margin; `None` when the app isn't installed.
+fn app_icon(bundle: &str) -> Option<Retained<NSImage>> {
     let workspace = NSWorkspace::sharedWorkspace();
-    let app = workspace.URLForApplicationWithBundleIdentifier(&NSString::from_str(CLAUDE_BUNDLE))?;
+    let app = workspace.URLForApplicationWithBundleIdentifier(&NSString::from_str(bundle))?;
     let path = app.path()?;
     let icon = workspace.iconForFile(&path);
     let draw = RcBlock::new(move |_: NSRect| -> Bool {
