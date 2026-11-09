@@ -36,8 +36,9 @@ use crate::notch_motion::NotchMotion;
 use crate::task_row::TaskRow;
 use crate::quick_add;
 use crate::terminal_view::{self, TerminalView};
-use crate::pomodoros::{self, DAILY_GOAL};
+use crate::pomodoros::{self, DAILY_GOAL, Week};
 use crate::tomato_view::{Tomato, TomatoView};
+use crate::week_bars::{self, WeekBars};
 use crate::panel::{self, FileDrag, NotchPanel, NotchShape};
 use crate::store::{self, Task};
 use crate::widgets::{self as w, rgba};
@@ -104,6 +105,9 @@ struct FocusCard {
     ends: Retained<NSTextField>,
     pause: Retained<NSButton>,
     end: Retained<NSButton>,
+    bars: Retained<WeekBars>,
+    focused: Retained<NSTextField>,
+    streak: Retained<NSTextField>,
 }
 
 struct TaskCard {
@@ -228,8 +232,8 @@ pub struct State {
     paused: Cell<Option<Duration>>,
     on_break: Cell<bool>,
     break_min: Cell<u64>,
-    /// Focus sessions completed today, read from `pomodoros.txt`.
-    done_today: Cell<usize>,
+    /// Last seven days of `pomodoros.txt`, read once per refresh.
+    week: Cell<Week>,
     ticker: RefCell<Option<Retained<NSTimer>>>,
     /// Modification time of `tasks.txt` as last loaded or saved by this process.
     seen_mtime: Cell<Option<std::time::SystemTime>>,
@@ -519,8 +523,8 @@ define_class!(
                 self.stop_timer();
                 if !was_break {
                     pomodoros::append(&days::stamp(), DURATIONS_MIN[state.duration_idx.get()], true);
-                    let done = pomodoros::done_today(&days::key(0));
-                    state.done_today.set(done);
+                    self.reload_week();
+                    let done = self.done_today();
                     let long = done % CYCLE == 0;
                     state.on_break.set(true);
                     state.break_min.set(if long { LONG_BREAK_MIN } else { SHORT_BREAK_MIN });
@@ -582,7 +586,6 @@ impl Controller {
         let state = State {
             tasks: RefCell::new(store::load()),
             duration_idx: Cell::new(1), // 25 min
-            done_today: Cell::new(pomodoros::done_today(&days::key(0))),
             ..State::default()
         };
         let this = mtm.alloc::<Self>().set_ivars(state);
@@ -811,9 +814,19 @@ impl Controller {
         }
     }
 
+    fn reload_week(&self) {
+        let week_days = std::array::from_fn(|i| days::key(i as i64 - 6));
+        self.ivars().week.set(pomodoros::week(&week_days));
+    }
+
+    /// Focus sessions completed today.
+    fn done_today(&self) -> usize {
+        self.ivars().week.get().done[6] as usize
+    }
+
     fn refresh(&self) {
         // Re-read here (not per tick) so the count also rolls over at midnight.
-        self.ivars().done_today.set(pomodoros::done_today(&days::key(0)));
+        self.reload_week();
         self.render_tabs();
         self.render_focus();
         self.render_task_card();
@@ -971,7 +984,7 @@ impl Controller {
         let running = state.deadline.get().is_some();
         let active = self.session_active();
         let remaining = self.remaining_secs();
-        let done = state.done_today.get();
+        let done = self.done_today();
 
         set(&card.count, &format!("{done} / {DAILY_GOAL}"));
         for (i, tomato) in card.tomatoes.iter().enumerate() {
@@ -1007,6 +1020,10 @@ impl Controller {
         card.end.setAlphaValue(if active { 1.0 } else { 0.4 });
         let hint = (!active).then(|| NSString::from_str("Click to change the length"));
         card.time.setToolTip(hint.as_deref());
+        let week = state.week.get();
+        card.bars.set(week.done, std::array::from_fn(|i| days::initial(i as i64 - 6)));
+        set(&card.focused, &format!("{} focused", focus_time(week.minutes)));
+        set(&card.streak, &format!("{} day streak", week.streak));
         self.sync_activity();
     }
 
@@ -1468,8 +1485,8 @@ impl Controller {
         task.setAlignment(NSTextAlignment::Center);
         let (badge, badge_pill) = chip(&rgba(CORAL.0, CORAL.1, CORAL.2, 1.0), &rgba(CORAL.0, CORAL.1, CORAL.2, 0.22), 6.0, 3.0, mtm);
         badge.setFont(Some(&NSFont::systemFontOfSize_weight(11.0, unsafe { NSFontWeightMedium })));
-        let time = w::label("", 36.0, unsafe { NSFontWeightLight }, &white(0.95), mtm);
-        time.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(36.0, unsafe { NSFontWeightLight })));
+        let time = w::label("", 32.0, unsafe { NSFontWeightLight }, &white(0.95), mtm);
+        time.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(32.0, unsafe { NSFontWeightLight })));
         // With the timer tile gone, the idle countdown itself is the length control.
         let cycle = unsafe { NSClickGestureRecognizer::initWithTarget_action(mtm.alloc(), Some(self.target()), Some(sel!(cycleDuration:))) };
         time.addGestureRecognizer(&cycle);
@@ -1483,12 +1500,24 @@ impl Controller {
         end.widthAnchor().constraintEqualToConstant((inner - 8.0) / 2.0).setActive(true);
         let buttons = w::stack(&[&pause, &end], false, 8.0, mtm);
 
-        let column = w::stack(&[&header, &grid, &task, &badge_pill, &time, &ends, &buttons], true, 6.0, mtm);
+        let bars = WeekBars::new(mtm);
+        fixed_size(&bars, week_bars::WIDTH, week_bars::HEIGHT);
+        let focused = w::label("", 10.0, unsafe { NSFontWeightMedium }, &white(0.6), mtm);
+        let streak = w::label("", 10.0, unsafe { NSFontWeightMedium }, &white(0.6), mtm);
+        let flame = NSImageView::imageViewWithImage(&w::symbol("flame.fill"), mtm);
+        flame.setContentTintColor(Some(&coral));
+        let streak_line = w::stack(&[&flame, &streak], false, 3.0, mtm);
+        let stats = w::stack(&[&focused, &streak_line], true, 4.0, mtm);
+        stats.setAlignment(NSLayoutAttribute::Leading);
+        let insights = w::stack(&[&bars, &stats], false, 14.0, mtm);
+
+        let column = w::stack(&[&header, &grid, &task, &badge_pill, &time, &ends, &buttons, &insights], true, 2.0, mtm);
         column.setAlignment(NSLayoutAttribute::CenterX);
-        column.setCustomSpacing_afterView(10.0, &header);
-        column.setCustomSpacing_afterView(10.0, &task);
+        column.setCustomSpacing_afterView(7.0, &header);
+        column.setCustomSpacing_afterView(7.0, &task);
         column.setCustomSpacing_afterView(0.0, &time);
-        column.setCustomSpacing_afterView(10.0, &ends);
+        column.setCustomSpacing_afterView(7.0, &ends);
+        column.setCustomSpacing_afterView(8.0, &buttons);
         card.addSubview(&column);
         column.centerXAnchor().constraintEqualToAnchor(&card.centerXAnchor()).setActive(true);
         column.centerYAnchor().constraintEqualToAnchor(&card.centerYAnchor()).setActive(true);
@@ -1496,7 +1525,7 @@ impl Controller {
             view.widthAnchor().constraintEqualToConstant(inner).setActive(true);
         }
 
-        (card, FocusCard { count, tomatoes, task, badge, time, ends, pause, end })
+        (card, FocusCard { count, tomatoes, task, badge, time, ends, pause, end, bars, focused, streak })
     }
 
     fn build_task_card(&self, mtm: MainThreadMarker) -> (Retained<NSView>, TaskCard) {
@@ -1779,6 +1808,14 @@ fn chip(color: &NSColor, fill: &NSColor, h_pad: f64, v_pad: f64, mtm: MainThread
 /// `23:57`, for the focus card and the collapsed notch.
 fn mmss(secs: u64) -> String {
     format!("{:02}:{:02}", secs / 60, secs % 60)
+}
+
+/// `3h 20m`, or `45m` under an hour.
+fn focus_time(minutes: u64) -> String {
+    match minutes {
+        0..60 => format!("{minutes}m"),
+        _ => format!("{}h {:02}m", minutes / 60, minutes % 60),
+    }
 }
 
 /// `m:ss` for a position or duration in seconds.

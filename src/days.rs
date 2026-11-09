@@ -10,6 +10,11 @@ pub fn label(offset_days: i64) -> String {
     format(offset_days, "d MMM")
 }
 
+/// One-letter weekday (`M`) of the day `offset_days` from today.
+pub fn initial(offset_days: i64) -> char {
+    format(offset_days, "EEEEE").chars().next().unwrap_or(' ')
+}
+
 /// `YYYY-MM-DD HH:MM` now.
 pub fn stamp() -> String {
     format_at(0.0, "yyyy-MM-dd HH:mm")

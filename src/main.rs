@@ -21,6 +21,7 @@ mod terminal_palette;
 mod terminal_session;
 mod terminal_view;
 mod tomato_view;
+mod week_bars;
 mod widgets;
 
 use std::cell::RefCell;
