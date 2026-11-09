@@ -4,7 +4,8 @@
 //! where `done` is `0`/`1`, `day` is `YYYY-MM-DD` or empty for the Inbox, and the optional `ext`
 //! is the stable id of the task in an external service (`notion:<page>`, `linear:<ENG-1>`,
 //! `gcal:<event>`). The planning columns are `time` (`HH:MM`, 24-hour), `priority` (`low`,
-//! `medium`, `high`), `project` (short label) and `minutes` (estimated focus length). Every
+//! `medium`, `high`), `project` (short label) and `minutes` (estimated focus length), followed by
+//! `done_on` (`YYYY-MM-DD` the task was completed). Every
 //! optional column may be empty, and trailing empty columns are not written, so lines from
 //! before `ext` (three columns) or before the planning columns (four) still parse.
 //!
@@ -28,6 +29,20 @@ pub struct Task {
     pub project: String,
     /// Estimated focus length in minutes; 0 when unknown.
     pub minutes: u32,
+    /// `YYYY-MM-DD` the task was marked done; empty when not done or completed before this was recorded.
+    pub done_on: String,
+}
+
+impl Task {
+    /// Marks the task done or not done, keeping `done_on` in step. Re-marking a done task keeps its date.
+    pub fn set_done(&mut self, done: bool) {
+        if done && !self.done {
+            self.done_on = crate::days::key(0);
+        } else if !done {
+            self.done_on.clear();
+        }
+        self.done = done;
+    }
 }
 
 pub fn path() -> PathBuf {
@@ -75,7 +90,7 @@ pub fn save(tasks: &[Task]) -> io::Result<()> {
         .map(|t| {
             let minutes = if t.minutes == 0 { String::new() } else { t.minutes.to_string() };
             let done = if t.done { "1" } else { "0" };
-            let mut cols = vec![done, &t.day, &t.text, &t.ext, &t.time, &t.priority, &t.project, &minutes];
+            let mut cols = vec![done, &t.day, &t.text, &t.ext, &t.time, &t.priority, &t.project, &minutes, &t.done_on];
             while cols.len() > 3 && cols.last() == Some(&"") {
                 cols.pop();
             }
@@ -103,5 +118,6 @@ fn parse(line: &str) -> Task {
         priority: col(5),
         project: col(6),
         minutes: col(7).parse().unwrap_or(0),
+        done_on: col(8),
     }
 }

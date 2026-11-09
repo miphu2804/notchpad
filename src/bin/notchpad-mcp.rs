@@ -143,7 +143,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String, String> {
                 tasks[i].day = day;
             }
             if let Some(done) = args["done"].as_bool() {
-                tasks[i].done = done;
+                tasks[i].set_done(done);
             }
             apply_meta(&mut tasks[i], args)?;
             format!("updated {}", task_ref(i, &tasks[i]))
@@ -151,7 +151,7 @@ fn call_tool(name: &str, args: &Value) -> Result<String, String> {
         "plan_day" => plan_day(&mut tasks, args)?,
         "complete_task" => {
             let i = find(&tasks, args)?;
-            tasks[i].done = args["done"].as_bool().unwrap_or(true);
+            tasks[i].set_done(args["done"].as_bool().unwrap_or(true));
             format!("{} done={}", task_ref(i, &tasks[i]), tasks[i].done)
         }
         "move_task" => {

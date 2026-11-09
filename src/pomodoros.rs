@@ -5,7 +5,7 @@
 
 use std::{fs, io::Write, path::PathBuf};
 
-use crate::store;
+use crate::store::{self, Task};
 
 pub const DAILY_GOAL: usize = 8;
 
@@ -36,11 +36,22 @@ pub struct Week {
     /// Minutes focused in those seven days.
     pub minutes: u64,
     pub streak: u32,
+    /// Tasks completed in those seven days.
+    pub tasks_done: u32,
 }
 
 /// Insights for the seven days in `days` (`YYYY-MM-DD`, oldest first, today last).
-pub fn week(days: &[String; 7]) -> Week {
-    week_of(&fs::read_to_string(path()).unwrap_or_default(), days)
+pub fn week(days: &[String; 7], tasks: &[Task]) -> Week {
+    Week { tasks_done: tasks_done(tasks, days), ..week_of(&load_log(), days) }
+}
+
+/// The raw log text, empty when no session has been logged yet.
+pub fn load_log() -> String {
+    fs::read_to_string(path()).unwrap_or_default()
+}
+
+fn tasks_done(tasks: &[Task], days: &[String; 7]) -> u32 {
+    tasks.iter().filter(|t| t.done && days.contains(&t.done_on)).count() as u32
 }
 
 fn week_of(log: &str, days: &[String; 7]) -> Week {
@@ -58,7 +69,7 @@ fn week_of(log: &str, days: &[String; 7]) -> Week {
             minutes += mins.parse().unwrap_or(0);
         }
     }
-    Week { done, minutes, streak: streak(&done) }
+    Week { done, minutes, streak: streak(&done), ..Week::default() }
 }
 
 /// Consecutive days with a done session, ending today or, while today is empty, yesterday.
@@ -69,7 +80,8 @@ fn streak(done: &[u32; 7]) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{streak, week_of};
+    use super::{streak, tasks_done, week_of};
+    use crate::store::Task;
 
     fn days() -> [String; 7] {
         std::array::from_fn(|i| format!("2026-11-{:02}", 3 + i))
@@ -95,6 +107,19 @@ mod tests {
         assert_eq!(w.done, [2, 0, 0, 0, 0, 0, 1]);
         assert_eq!(w.minutes, 85);
         assert_eq!(w.streak, 1);
+    }
+
+    #[test]
+    fn tasks_done_counts_completions_within_the_week() {
+        let task = |done, done_on: &str| Task { done, done_on: done_on.to_owned(), ..Task::default() };
+        let tasks = [
+            task(true, "2026-11-03"),
+            task(true, "2026-11-09"),
+            task(true, "2026-11-02"), // before the window
+            task(true, ""),           // done before dates were recorded
+            task(false, "2026-11-05"),
+        ];
+        assert_eq!(tasks_done(&tasks, &days()), 2);
     }
 
     #[test]
