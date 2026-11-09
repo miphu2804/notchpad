@@ -31,7 +31,7 @@ use crate::panel::{self, FileDrag, NotchPanel, NotchShape};
 use crate::store::{self, Task};
 use crate::widgets::{self as w, rgba};
 
-const WIDTH: f64 = 840.0;
+const WIDTH: f64 = 720.0;
 const HEIGHT: f64 = 330.0;
 /// The window extends this far above the screen. The pointer pressed against the top
 /// edge sits at exactly the screen's max Y, which would otherwise count as outside the
@@ -760,7 +760,7 @@ impl Controller {
             header.addSubview(group);
             group.centerYAnchor().constraintEqualToAnchor(&header.centerYAnchor()).setActive(true);
         }
-        brand.leadingAnchor().constraintEqualToAnchor_constant(&header.leadingAnchor(), 18.0).setActive(true);
+        brand.leadingAnchor().constraintEqualToAnchor_constant(&header.leadingAnchor(), 14.0).setActive(true);
         tabs.trailingAnchor().constraintEqualToAnchor_constant(&header.trailingAnchor(), -14.0).setActive(true);
         // The panel is centred on the screen, so the header's centre is the notch's centre.
         let notch_gap = tabs.leadingAnchor().constraintGreaterThanOrEqualToAnchor_constant(&header.centerXAnchor(), notch_gap(collapsed, safe_top));
@@ -804,8 +804,9 @@ impl Controller {
         }
         let quit = w::icon_button("xmark", "", 10.0, &white(0.55), self.target(), sel!(quit:), mtm);
 
-        let brand = w::stack(&[&logo, &name], false, 8.0, mtm);
-        let tabs = w::stack(&[&tab_workspace, &tab_week, &tab_clips, &quit], false, 6.0, mtm);
+        // Close sits top-left, as on macOS windows, leaving the space right of the notch to the tabs.
+        let brand = w::stack(&[&quit, &logo, &name], false, 8.0, mtm);
+        let tabs = w::stack(&[&tab_workspace, &tab_week, &tab_clips], false, 6.0, mtm);
         (brand, tabs, tab_workspace, tab_week, tab_clips)
     }
 
