@@ -1,4 +1,5 @@
 mod chime;
+mod claude_mcp;
 mod clip_card;
 mod clips;
 mod controller;
