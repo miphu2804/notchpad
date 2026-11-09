@@ -8,14 +8,14 @@ use std::time::{Duration, Instant};
 use block2::RcBlock;
 
 use objc2::rc::{Retained, Weak};
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSClickGestureRecognizer, NSSound, 
     NSAppearance, NSImageScaling, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
     NSApplication, NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
     NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
-    NSLayoutConstraintOrientation, NSMainMenuWindowLevel, NSMenu, NSMenuItem, NSScreen, NSScrollView, NSStackView,
+    NSLayoutConstraintOrientation, NSMainMenuWindowLevel, NSMenu, NSMenuItem, NSAutoresizingMaskOptions, NSScreen, NSScrollView, NSWindow, NSWindowDelegate, NSStackView,
     NSStackViewDistribution, NSTextAlignment, NSTextDidChangeNotification, NSTextDidEndEditingNotification, NSTextField, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
@@ -249,6 +249,10 @@ pub struct State {
     ticker: RefCell<Option<Retained<NSTimer>>>,
     /// Modification time of `tasks.txt` as last loaded or saved by this process.
     seen_mtime: Cell<Option<std::time::SystemTime>>,
+    /// Made on first use. While it is open it hosts the panel's content view, and hover
+    /// must not pull the notch open over an empty frame.
+    dashboard: OnceCell<Retained<NSWindow>>,
+    dashboard_open: Cell<bool>,
 }
 
 define_class!(
@@ -258,6 +262,13 @@ define_class!(
     pub struct Controller;
 
     unsafe impl NSObjectProtocol for Controller {}
+
+    unsafe impl NSWindowDelegate for Controller {
+        #[unsafe(method(windowWillClose:))]
+        fn window_will_close(&self, _notification: &NSNotification) {
+            self.hide_dashboard();
+        }
+    }
 
     impl Controller {
         #[unsafe(method(mouseEntered:))]
@@ -618,6 +629,11 @@ define_class!(
             self.refresh();
         }
 
+        #[unsafe(method(openDashboard:))]
+        fn open_dashboard(&self, _sender: &AnyObject) {
+            self.show_dashboard();
+        }
+
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: &AnyObject) {
             self.save_notes_now();
@@ -758,6 +774,9 @@ impl Controller {
     }
 
     fn set_expanded(&self, on: bool) {
+        if on && self.ivars().dashboard_open.get() {
+            return;
+        }
         if self.ivars().expanded.replace(on) != on {
             self.ui().motion.set_open(on);
             self.sync_music_timer();
@@ -1289,6 +1308,67 @@ impl Controller {
         TaskRow::new(index, &content, mtm).into_super()
     }
 
+    /// Right-click menu of the header background.
+    fn header_menu(&self) -> Retained<NSMenu> {
+        let mtm = self.mtm();
+        let menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::new());
+        menu.setAutoenablesItems(false);
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(), &NSString::from_str("Open dashboard window"), Some(sel!(openDashboard:)), &NSString::new(),
+            )
+        };
+        unsafe { item.setTarget(Some(self.target())) };
+        menu.addItem(&item);
+        menu
+    }
+
+    /// Hosts the notch's content view in a normal window for when the panel feels too tight.
+    fn show_dashboard(&self) {
+        let mtm = self.mtm();
+        let ui = self.ui();
+        let window = self.ivars().dashboard.get_or_init(|| {
+            let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Resizable | NSWindowStyleMask::Miniaturizable;
+            let window = unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    mtm.alloc(), NSRect::new(NSPoint::ZERO, NSSize::new(900.0, 600.0)), style, NSBackingStoreType::Buffered, false,
+                )
+            };
+            unsafe { window.setReleasedWhenClosed(false) };
+            window.setTitle(&NSString::from_str("Notchpad"));
+            window.setContentMinSize(NSSize::new(WIDTH, HEIGHT));
+            // The content is drawn for the notch's black and dark appearance.
+            window.setBackgroundColor(Some(&NSColor::blackColor()));
+            window.setAppearance(unsafe { NSAppearance::appearanceNamed(NSAppearanceNameDarkAqua) }.as_deref());
+            window.setDelegate(Some(ProtocolObject::from_ref(self)));
+            window.center();
+            window
+        });
+        if !self.ivars().dashboard_open.replace(true) {
+            // The motion would otherwise fade the content out as the notch collapses.
+            ui.motion.drive_content(false);
+            // A frame-based host: as the window's own content view, AppKit would switch the
+            // view to constraints and it would stretch with the notch on the way back.
+            let host = window.contentView().expect("window has a content view");
+            ui.content.setFrame(host.bounds());
+            ui.content.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+            host.addSubview(&ui.content);
+            self.ivars().pinned.set(false);
+            self.set_expanded(false);
+        }
+        window.makeKeyAndOrderFront(None);
+        #[allow(deprecated)]
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    }
+
+    /// Puts the content view back in the notch exactly as `build_ui` left it.
+    fn hide_dashboard(&self) {
+        let ui = self.ui();
+        attach_to_notch(&ui.content, &ui.panel.contentView().expect("panel has a content view"));
+        self.ivars().dashboard_open.set(false);
+        ui.motion.drive_content(true);
+    }
+
     /// Right-click menu for the task at `index`; each item carries the index in its tag.
     fn task_menu(&self, index: usize) -> Retained<NSMenu> {
         let mtm = self.mtm();
@@ -1424,16 +1504,16 @@ impl Controller {
         background.addTrackingArea(&tracking);
 
         // Fixed-size content laid out once at full size; hidden while collapsed.
-        let ear = panel::ear(HEIGHT + TOP_SLOP);
-        let content = NSView::initWithFrame(mtm.alloc(), NSRect::new(NSPoint::new(ear, 0.0), NSSize::new(WIDTH, HEIGHT)));
+        let content = NSView::new(mtm);
         content.setHidden(true);
-        background.addSubview(&content);
+        attach_to_notch(&content, &background);
 
         // The header sits in the menu-bar band: close top-left as on macOS windows, then two
         // tab groups, one each side of the hardware notch.
         let head = self.build_header(mtm);
         let header = NSView::new(mtm);
         header.setTranslatesAutoresizingMaskIntoConstraints(false);
+        unsafe { header.setMenu(Some(&self.header_menu())) };
         content.addSubview(&header);
         header.leadingAnchor().constraintEqualToAnchor(&content.leadingAnchor()).setActive(true);
         header.trailingAnchor().constraintEqualToAnchor(&content.trailingAnchor()).setActive(true);
@@ -1890,6 +1970,14 @@ impl Controller {
 }
 
 /// Rounded label on a tinted fill, returned with the pill that holds it.
+/// The content view sits at its fixed size inside the notch shape; `NotchMotion` centres it.
+fn attach_to_notch(content: &NSView, background: &NSView) {
+    let ear = panel::ear(HEIGHT + TOP_SLOP);
+    content.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
+    content.setFrame(NSRect::new(NSPoint::new(ear, 0.0), NSSize::new(WIDTH, HEIGHT)));
+    background.addSubview(content);
+}
+
 fn chip(color: &NSColor, fill: &NSColor, h_pad: f64, v_pad: f64, mtm: MainThreadMarker) -> (Retained<NSTextField>, Retained<NSView>) {
     let label = w::label("", 11.0, unsafe { NSFontWeightMedium }, color, mtm);
     let pill = w::filled(fill, 8.0, mtm);
