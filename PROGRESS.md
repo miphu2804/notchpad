@@ -1,3 +1,19 @@
+### [2026-11-09 13:48 UTC+07:00] — [Feature] Pomodoro tomatoes and Terminal tab
+
+**Done:**
+The focus card is now "Today's pomodoros": 8 pixel tomatoes (ripe red when done, green while running, grey ahead), an "N / 8" chip, a "Focus · n of 4" or "Break · short/long" badge, the countdown with "ends at", and Start/Pause/Resume plus End. Sessions log to `pomodoros.txt` (`YYYY-MM-DD HH:MM <min> done|ended`); breaks are 5 min, or 15 after the 4th focus. Clicking the idle countdown cycles the length, since the timer tile was dropped at the user's request. A new "Terminal" tab runs `zsh -lc` commands in the background with streamed output, stderr in red, `[exit N]`, in-process `cd`, ↑↓ history, Escape to kill, Clear and Open in Terminal. Built by two Sonnet threads; accepted by renders of both tabs on a scratch HOME. Idle CPU 0.0%, footprint 24.9 MB.
+
+**Changed  files:**
+- `src/tomato_view.rs` — created
+- `src/pomodoros.rs` — created
+- `src/shell.rs` — created
+- `src/controller.rs` — modified
+- `src/days.rs` — modified
+- `src/main.rs` — modified
+
+**Flow explained:**
+The focus timer ticks only while running; on finish it appends a `done` line and starts a break, and End appends `ended`. The count re-reads the log on each refresh. Terminal: Return calls `run_command`, which handles `cd` and the interactive-program hint in `Shell::submit`, or spawns the child in its own process group; two reader threads send chunks over mpsc, and a 0.1 s timer that exists only while a command runs drains them into the output view, trimmed to 2000 lines.
+
 ### [2026-11-09 14:45 UTC+07:00] — [Feature] Notes tab, and header tabs on both sides of the notch
 
 **Done:**
@@ -125,19 +141,3 @@ Header owl replaced by a vector logo (two interlinked rounded-hexagon rings, vio
 
 **Flow explained:**
 Dragging a row puts its store index on the pasteboard. The column under the pointer highlights, and on drop calls `Controller::drop_task`, which moves the task in the list, sets its day, keeps the focus index pointing at the same task, saves, and re-renders on the next run-loop pass so the drag source is not torn down mid-session.
-
-### [2026-11-08 21:05 UTC+07:00] — [Feature] MCP server and task-sync groundwork
-
-**Done:**
-`notchpad-mcp` stdio server (list_tasks, add_task upsert-by-ext, complete_task, move_task), registered in the user-scope Claude Code config. Store gained an optional 4th `ext` column (old lines still load) and atomic saves. The app now reloads `tasks.txt` on external change (2s timer). `/sync-tasks` command and README section describe the Claude-driven sync. Not yet run end-to-end: Notion and Linear need authorization, Google Calendar connector has no URL.
-
-**Changed  files:**
-- `src/bin/notchpad-mcp.rs` — created
-- `src/store.rs` — modified (`ext`, `modified()`, atomic save)
-- `src/controller.rs` — modified (`ext` on new tasks, `reload:` timer, `seen_mtime`)
-- `Cargo.toml` — modified (serde_json, explicit bins)
-- `.claude/commands/sync-tasks.md`, `README.md` — created
-
-**Flow explained:**
-Claude pulls items via a service connector and calls `add_task` with `ext`; the server rewrites `tasks.txt`; the app sees the new mtime and re-renders.
-
