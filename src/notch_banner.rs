@@ -14,7 +14,10 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use crate::panel::{self, NotchShape};
 use crate::widgets::{self as w, rgba};
 
-const WIDTH: f64 = 360.0;
+/// The card hugs its text and buttons between these widths, so the content sits balanced in it
+/// rather than leaving a wide empty right side.
+const MIN_WIDTH: f64 = 300.0;
+const MAX_WIDTH: f64 = 420.0;
 const BODY: f64 = 72.0;
 /// Extra body height for the button row.
 const ACTIONS: f64 = 34.0;
@@ -107,13 +110,25 @@ impl NotchBanner {
 
     /// Shows `notice` hanging from `notch`, the collapsed notch frame. Replaces any card showing.
     pub fn show(&self, notch: NSRect, notice: &Notice) {
+        self.title.setStringValue(&NSString::from_str(notice.title));
+        self.subtitle.setStringValue(&NSString::from_str(notice.subtitle));
+        let button_widths: Vec<f64> = [&self.snooze, &self.done].iter().map(|b| b.intrinsicContentSize().width + 28.0).collect();
+        let buttons = if notice.actions { button_widths.iter().sum::<f64>() + 8.0 } else { 0.0 };
+        let text = self.title.intrinsicContentSize().width.max(self.subtitle.intrinsicContentSize().width);
+        let width = (TEXT_X + text.max(buttons) + PAD + 4.0).clamp(MIN_WIDTH, MAX_WIDTH);
+        // Icon to the end of the longer of text and buttons, centred in the card; at the cap the
+        // text truncates instead.
+        let content = (TEXT_X - PAD + text.max(buttons) + 4.0).min(width - 2.0 * PAD);
+        let left = ((width - content) / 2.0).round();
+        let text_x = left + TEXT_X - PAD;
+
         let body = BODY + if notice.actions { ACTIONS } else { 0.0 };
         let height = notch.size.height + body;
         let ear = panel::ear(height);
         let mid = notch.origin.x + notch.size.width / 2.0;
         let top = notch.origin.y + notch.size.height;
-        self.panel.setFrame_display(NSRect::new(NSPoint::new(mid - WIDTH / 2.0 - ear, top - height), NSSize::new(WIDTH + 2.0 * ear, height)), false);
-        self.body.setFrame(NSRect::new(NSPoint::new(ear, 0.0), NSSize::new(WIDTH, body)));
+        self.panel.setFrame_display(NSRect::new(NSPoint::new(mid - width / 2.0 - ear, top - height), NSSize::new(width + 2.0 * ear, height)), false);
+        self.body.setFrame(NSRect::new(NSPoint::new(ear, 0.0), NSSize::new(width, body)));
         if let Some(backdrop) = self.body.subviews().firstObject() {
             backdrop.setFrame(self.body.bounds());
         }
@@ -122,21 +137,18 @@ impl NotchBanner {
         let at = |view: &NSView, x: f64, y: f64, width: f64, height: f64| view.setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(width, height)));
         // The icon centres on the text block, which sits at the top when there are buttons.
         let text_mid = if notice.actions { text_top - 19.0 } else { body / 2.0 };
-        at(&self.badge, PAD, text_mid - ICON / 2.0, ICON, ICON);
+        at(&self.badge, left, text_mid - ICON / 2.0, ICON, ICON);
         w::paint(&self.badge, notice.tint, 12.0);
         self.icon.setImage(Some(&w::symbol(notice.symbol)));
-        let text_width = WIDTH - TEXT_X - PAD;
-        at(&self.title, TEXT_X, text_mid + 1.0, text_width, 20.0);
-        at(&self.subtitle, TEXT_X, text_mid - 18.0, text_width, 16.0);
-        self.title.setStringValue(&NSString::from_str(notice.title));
-        self.subtitle.setStringValue(&NSString::from_str(notice.subtitle));
+        let text_width = width - text_x - PAD;
+        at(&self.title, text_x, text_mid + 1.0, text_width, 20.0);
+        at(&self.subtitle, text_x, text_mid - 18.0, text_width, 16.0);
 
-        let mut x = TEXT_X;
-        for button in [&self.snooze, &self.done] {
+        let mut x = text_x;
+        for (button, button_width) in [&self.snooze, &self.done].into_iter().zip(button_widths) {
             button.setHidden(!notice.actions);
-            let width = button.intrinsicContentSize().width + 28.0;
-            at(button, x, 12.0, width, BUTTON_HEIGHT);
-            x += width + 8.0;
+            at(button, x, 12.0, button_width, BUTTON_HEIGHT);
+            x += button_width + 8.0;
         }
 
         self.panel.setAlphaValue(1.0);
