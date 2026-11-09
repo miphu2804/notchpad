@@ -69,6 +69,10 @@ const CARD_ROW_GAP: f64 = 15.0;
 /// Quiet period after the last keystroke before the note is written to disk.
 const NOTES_SAVE_DELAY: f64 = 0.5;
 const DURATIONS_MIN: [u64; 4] = [15, 25, 45, 60];
+/// One step past the presets in `duration_idx`: count up with no deadline.
+const STOPWATCH: usize = DURATIONS_MIN.len();
+const EXTRA_SECS: u64 = 5 * 60;
+const PLUS_WIDTH: f64 = 40.0;
 const SHORT_BREAK_MIN: u64 = 5;
 const LONG_BREAK_MIN: u64 = 15;
 /// A long break follows every this many focus sessions.
@@ -106,6 +110,7 @@ struct FocusCard {
     ends: Retained<NSTextField>,
     pause: Retained<NSButton>,
     end: Retained<NSButton>,
+    plus: Retained<NSButton>,
     bars: Retained<WeekBars>,
     focused: Retained<NSTextField>,
     streak: Retained<NSTextField>,
@@ -228,8 +233,14 @@ pub struct State {
     /// Task index chosen with ▶; falls back to the first open task of today.
     focus: Cell<Option<usize>>,
     duration_idx: Cell<usize>,
+    /// `Instant` is `CLOCK_UPTIME_RAW` on macOS (checked in std's `sys/time/unix.rs`), which stops
+    /// while the Mac sleeps: a countdown therefore pauses across sleep instead of expiring in it.
     deadline: Cell<Option<Instant>>,
-    /// Time left on a paused session; the ticker is off while this is set.
+    /// Stopwatch only: when the running count started, shifted back by any time already counted.
+    since: Cell<Option<Instant>>,
+    /// Seconds added with +5 to the current session, so the log records the real length.
+    extra_secs: Cell<u64>,
+    /// Time left on a paused session (elapsed, for the stopwatch); the ticker is off while this is set.
     paused: Cell<Option<Duration>>,
     on_break: Cell<bool>,
     break_min: Cell<u64>,
@@ -482,15 +493,38 @@ define_class!(
         #[unsafe(method(toggleTimer:))]
         fn toggle_timer(&self, _sender: &AnyObject) {
             let state = self.ivars();
-            if state.deadline.get().is_some() {
-                let left = state.deadline.get().map(|d| d.saturating_duration_since(Instant::now()));
+            if self.running() {
+                let held = match (state.deadline.get(), state.since.get()) {
+                    (Some(deadline), _) => deadline.saturating_duration_since(Instant::now()),
+                    (None, since) => since.map_or(Duration::ZERO, |s| s.elapsed()),
+                };
+                let extra = state.extra_secs.get();
                 self.stop_timer();
-                state.paused.set(left);
+                state.paused.set(Some(held));
+                state.extra_secs.set(extra);
                 self.render_focus();
+            } else if self.stopwatch() {
+                self.run_stopwatch(state.paused.take().unwrap_or_default());
             } else {
                 let secs = state.paused.take().map_or_else(|| self.session_secs(), |left| left.as_secs() + 1);
                 self.run_timer(secs);
             }
+        }
+
+        /// +5: lengthens the running or paused countdown; the stopwatch has no length.
+        #[unsafe(method(addFive:))]
+        fn add_five(&self, _sender: &AnyObject) {
+            let state = self.ivars();
+            let extra = Duration::from_secs(EXTRA_SECS);
+            if let Some(deadline) = state.deadline.get() {
+                state.deadline.set(Some(deadline + extra));
+            } else if let (Some(left), false) = (state.paused.get(), self.stopwatch()) {
+                state.paused.set(Some(left + extra));
+            } else {
+                return;
+            }
+            state.extra_secs.set(state.extra_secs.get() + EXTRA_SECS);
+            self.render_focus();
         }
 
         /// End: a focus stopped early is logged; a break is simply skipped.
@@ -498,8 +532,15 @@ define_class!(
         fn end_timer(&self, _sender: &AnyObject) {
             let state = self.ivars();
             if !state.on_break.get() && self.session_active() {
-                let elapsed = self.session_secs() - self.remaining_secs().min(self.session_secs());
-                pomodoros::append(&days::stamp(), elapsed / 60, false);
+                let elapsed = if self.stopwatch() {
+                    self.shown_secs()
+                } else {
+                    self.session_secs() - self.remaining_secs().min(self.session_secs())
+                };
+                if let Some(minutes) = end_log_minutes(self.stopwatch(), elapsed) {
+                    pomodoros::append(&days::stamp(), minutes, self.stopwatch());
+                    self.reload_week();
+                }
             }
             state.on_break.set(false);
             self.stop_timer();
@@ -510,20 +551,24 @@ define_class!(
             if self.session_active() {
                 return;
             }
-            let next = (self.ivars().duration_idx.get() + 1) % DURATIONS_MIN.len();
+            let next = next_duration(self.ivars().duration_idx.get());
             self.ivars().duration_idx.set(next);
             self.render_focus();
         }
 
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: &NSTimer) {
-            let Some(deadline) = self.ivars().deadline.get() else { return };
+            let Some(deadline) = self.ivars().deadline.get() else {
+                self.render_focus(); // stopwatch
+                return;
+            };
             if Instant::now() >= deadline {
                 let state = self.ivars();
                 let was_break = state.on_break.replace(false);
+                let planned_min = self.session_secs() / 60; // before stop_timer clears the +5 extras
                 self.stop_timer();
                 if !was_break {
-                    pomodoros::append(&days::stamp(), DURATIONS_MIN[state.duration_idx.get()], true);
+                    pomodoros::append(&days::stamp(), planned_min, true);
                     self.reload_week();
                     let done = self.done_today();
                     let long = done % CYCLE == 0;
@@ -850,11 +895,35 @@ impl Controller {
     /// Length of the current session: a break, or the chosen focus length.
     fn session_secs(&self) -> u64 {
         let state = self.ivars();
-        if state.on_break.get() { state.break_min.get() * 60 } else { DURATIONS_MIN[state.duration_idx.get()] * 60 }
+        if state.on_break.get() {
+            state.break_min.get() * 60 + state.extra_secs.get()
+        } else {
+            DURATIONS_MIN.get(state.duration_idx.get()).map_or(0, |m| m * 60) + state.extra_secs.get()
+        }
+    }
+
+    fn stopwatch(&self) -> bool {
+        self.ivars().duration_idx.get() == STOPWATCH
+    }
+
+    fn running(&self) -> bool {
+        self.ivars().deadline.get().is_some() || self.ivars().since.get().is_some()
     }
 
     fn session_active(&self) -> bool {
-        self.ivars().deadline.get().is_some() || self.ivars().paused.get().is_some()
+        self.running() || self.ivars().paused.get().is_some()
+    }
+
+    /// What the big clock and the notch wing show: time left, or time counted for the stopwatch.
+    fn shown_secs(&self) -> u64 {
+        let state = self.ivars();
+        if !self.stopwatch() {
+            return self.remaining_secs();
+        }
+        match (state.since.get(), state.paused.get()) {
+            (Some(since), _) => since.elapsed().as_secs(),
+            (None, paused) => paused.map_or(0, |p| p.as_secs()),
+        }
     }
 
     /// Seconds left, rounded up so the display shows the full length when it starts.
@@ -869,6 +938,17 @@ impl Controller {
 
     fn run_timer(&self, secs: u64) {
         self.ivars().deadline.set(Some(Instant::now() + Duration::from_secs(secs)));
+        self.start_ticker();
+    }
+
+    /// Counts up from `elapsed`; there is no deadline.
+    fn run_stopwatch(&self, elapsed: Duration) {
+        let now = Instant::now();
+        self.ivars().since.set(Some(now.checked_sub(elapsed).unwrap_or(now)));
+        self.start_ticker();
+    }
+
+    fn start_ticker(&self) {
         let timer = unsafe {
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(1.0, self.target(), sel!(tick:), None, true)
         };
@@ -879,6 +959,8 @@ impl Controller {
     /// Drops the deadline, any pause and the ticker, so nothing runs while idle.
     fn stop_timer(&self) {
         self.ivars().deadline.set(None);
+        self.ivars().since.set(None);
+        self.ivars().extra_secs.set(0);
         self.ivars().paused.set(None);
         if let Some(timer) = self.ivars().ticker.borrow_mut().take() {
             timer.invalidate();
@@ -983,9 +1065,10 @@ impl Controller {
         let card = &self.ui().focus;
         let state = self.ivars();
         let set = |field: &NSTextField, text: &str| field.setStringValue(&NSString::from_str(text));
-        let running = state.deadline.get().is_some();
+        let running = self.running();
         let active = self.session_active();
-        let remaining = self.remaining_secs();
+        let stopwatch = self.stopwatch();
+        let remaining = self.shown_secs();
         let done = self.done_today();
 
         set(&card.count, &format!("{done} / {DAILY_GOAL}"));
@@ -1000,7 +1083,9 @@ impl Controller {
         }
         let task = self.focused_task().map(|i| state.tasks.borrow()[i].text.clone());
         set(&card.task, task.as_deref().unwrap_or("Pick a task with ▶"));
-        set(&card.badge, &if !state.on_break.get() {
+        set(&card.badge, &if stopwatch {
+            "Stopwatch".to_owned()
+        } else if !state.on_break.get() {
             format!("Focus · {} of {CYCLE}", done % CYCLE + 1)
         } else if state.break_min.get() == LONG_BREAK_MIN {
             "Break · long".to_owned()
@@ -1008,9 +1093,13 @@ impl Controller {
             "Break · short".to_owned()
         });
         set(&card.time, &mmss(remaining));
+        // Recomputed on every tick, never cached: `Instant` skips sleep, so the end moves later by
+        // the time the Mac slept and the label is only right if it is derived again after wake.
         set(&card.ends, &match (running, active) {
+            (true, _) if stopwatch => "counting up".to_owned(),
             (true, _) => format!("ends at {}", days::clock_in(remaining)),
             (false, true) => "paused".to_owned(),
+            (false, false) if stopwatch => "∞ no limit".to_owned(),
             (false, false) => format!("{} min", remaining / 60),
         });
         card.pause.setTitle(&NSString::from_str(match (running, active) {
@@ -1020,6 +1109,8 @@ impl Controller {
         }));
         card.end.setEnabled(active);
         card.end.setAlphaValue(if active { 1.0 } else { 0.4 });
+        card.plus.setEnabled(active && !stopwatch);
+        card.plus.setAlphaValue(if active && !stopwatch { 1.0 } else { 0.4 });
         let hint = (!active).then(|| NSString::from_str("Click to change the length"));
         card.time.setToolTip(hint.as_deref());
         let week = state.week.get();
@@ -1033,7 +1124,7 @@ impl Controller {
     fn sync_activity(&self) {
         let state = self.ivars();
         let ui = self.ui();
-        let countdown = self.session_active().then(|| mmss(self.remaining_secs()));
+        let countdown = self.session_active().then(|| mmss(self.shown_secs()));
         let activity = Activity {
             music: state.now_playing.borrow().track.as_ref().filter(|t| t.playing).map(|t| t.artwork.clone()),
             countdown: countdown.as_deref().map(|text| (text, state.on_break.get())),
@@ -1496,11 +1587,15 @@ impl Controller {
 
         let pause = w::pill("Pause", 28.0, self.target(), sel!(toggleTimer:), mtm);
         w::style_pill(&pause, &coral, &white(1.0), 14.0);
-        pause.widthAnchor().constraintEqualToConstant((inner - 8.0) / 2.0).setActive(true);
+        let button_width = (inner - 16.0 - PLUS_WIDTH) / 2.0;
+        pause.widthAnchor().constraintEqualToConstant(button_width).setActive(true);
         let end = w::pill("End", 28.0, self.target(), sel!(endTimer:), mtm);
         w::style_pill(&end, &rgba(62, 60, 68, 1.0), &white(0.85), 14.0);
-        end.widthAnchor().constraintEqualToConstant((inner - 8.0) / 2.0).setActive(true);
-        let buttons = w::stack(&[&pause, &end], false, 8.0, mtm);
+        end.widthAnchor().constraintEqualToConstant(button_width).setActive(true);
+        let plus = w::pill("+5", 28.0, self.target(), sel!(addFive:), mtm);
+        w::style_pill(&plus, &rgba(62, 60, 68, 1.0), &white(0.85), 14.0);
+        plus.widthAnchor().constraintEqualToConstant(PLUS_WIDTH).setActive(true);
+        let buttons = w::stack(&[&pause, &end, &plus], false, 8.0, mtm);
 
         let bars = WeekBars::new(mtm);
         fixed_size(&bars, week_bars::WIDTH, week_bars::HEIGHT);
@@ -1527,7 +1622,7 @@ impl Controller {
             view.widthAnchor().constraintEqualToConstant(inner).setActive(true);
         }
 
-        (card, FocusCard { count, tomatoes, task, badge, time, ends, pause, end, bars, focused, streak })
+        (card, FocusCard { count, tomatoes, task, badge, time, ends, pause, end, plus, bars, focused, streak })
     }
 
     fn build_task_card(&self, mtm: MainThreadMarker) -> (Retained<NSView>, TaskCard) {
@@ -1808,6 +1903,16 @@ fn chip(color: &NSColor, fill: &NSColor, h_pad: f64, v_pad: f64, mtm: MainThread
 }
 
 /// `23:57`, for the focus card and the collapsed notch.
+/// The preset after `idx`, then the stopwatch, then back to the first.
+fn next_duration(idx: usize) -> usize {
+    (idx + 1) % (STOPWATCH + 1)
+}
+
+/// Minutes to log when a session is ended early. A countdown always logs; a stopwatch only from one minute.
+fn end_log_minutes(stopwatch: bool, elapsed_secs: u64) -> Option<u64> {
+    (!stopwatch || elapsed_secs >= 60).then_some(elapsed_secs / 60)
+}
+
 fn mmss(secs: u64) -> String {
     format!("{:02}:{:02}", secs / 60, secs % 60)
 }
@@ -1974,6 +2079,23 @@ fn frames_at_top(frame: NSRect, width: f64, height: f64) -> (NSRect, NSRect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duration_cycle_visits_the_stopwatch_then_wraps() {
+        let cycle: Vec<usize> = std::iter::successors(Some(0), |&i| Some(next_duration(i))).take(6).collect();
+        assert_eq!(cycle, vec![0, 1, 2, 3, STOPWATCH, 0]);
+    }
+
+    #[test]
+    fn stopwatch_logs_only_from_one_minute() {
+        assert_eq!((end_log_minutes(true, 59), end_log_minutes(true, 60), end_log_minutes(true, 185)), (None, Some(1), Some(3)));
+        assert_eq!((end_log_minutes(false, 20), end_log_minutes(false, 600)), (Some(0), Some(10)));
+    }
+
+    #[test]
+    fn elapsed_clock_keeps_counting_past_an_hour() {
+        assert_eq!((mmss(0), mmss(3725)), ("00:00".to_owned(), "62:05".to_owned()));
+    }
 
     #[test]
     fn countdown_pads_minutes_and_seconds() {
