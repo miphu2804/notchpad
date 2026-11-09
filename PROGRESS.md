@@ -1,3 +1,18 @@
+### [2026-11-10 01:19 UTC+07:00] — [Feature] Reminders sync, Shortcuts capture and OSS docs
+
+**Done:**
+- Tasks sync two-way with a Reminders list named "Notchpad" (opt-in switch; access asked only when turned on). Never deletes on a reset or a lost task file; clearing completed reminders keeps done tasks.
+- `notchpad-mcp add "<quick-add line>"` adds a task, for Shortcuts Run Shell Script and Mail/Message automations.
+- README restructured to a standard open-source layout; CONTRIBUTING.md and SECURITY.md added.
+
+**Changed  files:**
+- `src/reminders_sync.rs`, `src/reminders.rs` — created
+- `src/controller.rs`, `src/settings.rs`, `src/settings_window.rs`, `src/calendar.rs`, `src/brand_logos.rs`, `src/main.rs`, `src/bin/notchpad-mcp.rs`, `Cargo.toml`, `macos/Info.plist` — modified
+- `README.md` — modified; `CONTRIBUTING.md`, `SECURITY.md` — created
+
+**Flow explained:**
+- The 2 s reload tick starts a Reminders fetch when the switch is on, access is granted, and the task file changed or 30 s passed. The fetch completes on an EventKit queue; on the main thread `reminders_sync::reconcile` compares tasks, reminders and the last snapshot (`reminders.txt`) to decide pulls, pushes, deletes and new links, then `Reminders::apply` writes them and the snapshot is saved. A pass is skipped if `tasks.txt` changed on disk meanwhile.
+
 ### [2026-11-10 00:51 UTC+07:00] — [Fix] Verify the integrations, alerts and Insights pass
 
 **Done:**
@@ -106,19 +121,3 @@ The Settings window receives an `on_insights` callback backed by a weak controll
 - Verified: 89 tests pass; real Settings window screenshot inspected at `/tmp/notchpad-finish/logos/vendor-icons.png`. Both Add buttons dispatched through AppKit in a scratch HOME and changed to Added; Claude Code's CLI was stubbed, while Desktop wrote its real JSON format in the scratch directory. Temporary render/action hooks removed.
 - Still unverified: real Claude configuration, Calendar permission/events, and Linear sync with a real key.
 
-### [2026-11-09 22:16 UTC+07:00] — [Feature] Settings › Integrations: Claude, calendars, Linear
-
-**Done:**
-- New Integrations pane (`puzzlepiece.extension`) in three groups, one commit each.
-- Claude: **Add** for Claude Code (`claude mcp add --scope user`, `claude` found on PATH, `~/.claude/local`, `~/.local/bin`, Homebrew) and for Claude Desktop (JSON merge with `.bak`; invalid JSON is refused). Status reads `~/.claude.json` and the Desktop config.
-- Calendars: `calendar=1` setting; EventKit read of today's events, shown read-only above the tasks. Access is requested only when the switch is turned on.
-- Linear: key in the Keychain (`notchpad.linear`), `linear=1` flag in settings, `curl` with the config on stdin, import every 10 min on the existing 2 s tick (no new timer), completion calls `issueUpdate`.
-
-**Changed  files:**
-- `src/claude_mcp.rs`, `src/calendar.rs`, `src/linear.rs` — created
-- `src/settings_window.rs`, `src/settings.rs`, `src/controller.rs`, `src/days.rs`, `src/main.rs`, `Cargo.toml`, `Cargo.lock`, `macos/Info.plist`, `README.md` — modified
-
-**Flow explained:**
-- Switch on → `apply_settings` asks EventKit once, then `reloadEvents:` reads today's events (also on `EKEventStoreChanged` and at midnight); `render_task_card` prepends up to 3 event rows.
-- The reload tick starts a Linear fetch on a thread when due; the thread sends the parsed issues over a channel and pings `linearSynced:`, which dedupes by `ext` and saves. Ticking a `linear:` task done spawns a thread that looks up the team's completed state and updates the issue.
-- Verified: 89 tests (JSON merge, command args, claude lookup, GraphQL parsing, dedupe, curl request against a loopback server), pane rendered with a scratch HOME, 0.0% idle CPU. Not verified: a real Linear sync, a real calendar prompt and events, clicking Add.
