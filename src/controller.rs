@@ -1634,12 +1634,12 @@ fn chip(color: &NSColor, fill: &NSColor, h_pad: f64, v_pad: f64, mtm: MainThread
     (label, pill)
 }
 
-/// `m:ss` for a position or duration in seconds.
 /// `23:57`, for the focus card and the collapsed notch.
 fn mmss(secs: u64) -> String {
     format!("{:02}:{:02}", secs / 60, secs % 60)
 }
 
+/// `m:ss` for a position or duration in seconds.
 fn clock(seconds: f64) -> String {
     let seconds = seconds as u64;
     format!("{}:{:02}", seconds / 60, seconds % 60)
