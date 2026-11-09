@@ -26,7 +26,7 @@ const SIZE_MENU_WIDTH: f64 = 96.0;
 
 /// Sidebar rows, top to bottom: SF Symbol and name.
 const PANES: [(&str, &str); 2] = [("square.grid.2x2", "Sections"), ("rectangle.topthird.inset.filled", "Notch")];
-const WINGS: [(&str, &str); 2] = [("music.note", "Show music while playing"), ("timer", "Show focus countdown")];
+const WINGS: [(&str, &str); 2] = [("play.circle", "Show what's playing"), ("timer", "Show focus countdown")];
 
 struct Parts {
     window: Retained<NSWindow>,
