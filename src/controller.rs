@@ -12,7 +12,7 @@ use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
     NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
-    NSLayoutConstraintOrientation, NSMainMenuWindowLevel, NSScreen, NSScrollView, NSStackView,
+    NSLayoutConstraintOrientation, NSMainMenuWindowLevel, NSMenu, NSMenuItem, NSScreen, NSScrollView, NSStackView,
     NSStackViewDistribution, NSStackViewGravity, NSTextAlignment, NSTextField, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
@@ -27,6 +27,7 @@ use crate::list_row::{self, ListRow};
 use crate::logo::LogoMark;
 use crate::notch_motion::NotchMotion;
 use crate::task_row::TaskRow;
+use crate::quick_add;
 use crate::panel::{self, FileDrag, NotchPanel, NotchShape};
 use crate::store::{self, Task};
 use crate::widgets::{self as w, rgba};
@@ -172,12 +173,14 @@ define_class!(
             let text = field.stringValue().to_string();
             let text = text.trim();
             if !text.is_empty() {
-                let day = match field.tag() {
-                    INBOX => String::new(),
-                    TOMORROW => days::key(1),
-                    _ => days::key(0),
+                let (today, tomorrow) = (days::key(0), days::key(1));
+                let default_day = match field.tag() {
+                    INBOX => "",
+                    TOMORROW => &tomorrow,
+                    _ => &today,
                 };
-                self.ivars().tasks.borrow_mut().push(Task { text: text.to_owned(), day, ..Task::default() });
+                let task = quick_add::parse(text, default_day, &today, &tomorrow);
+                self.ivars().tasks.borrow_mut().push(task);
                 self.save_and_refresh();
             }
             field.setStringValue(&NSString::new());
@@ -189,6 +192,41 @@ define_class!(
                 task.done = !task.done;
             }
             self.save_and_refresh();
+        }
+
+        #[unsafe(method(deleteTask:))]
+        fn delete_task(&self, item: &NSMenuItem) {
+            let index = item.tag() as usize;
+            {
+                let mut tasks = self.ivars().tasks.borrow_mut();
+                if index >= tasks.len() {
+                    return;
+                }
+                tasks.remove(index);
+            }
+            // The focus card refers to tasks by index, so follow the shift.
+            let focus = self.ivars().focus.get().and_then(|f| match f {
+                f if f == index => None,
+                f if f > index => Some(f - 1),
+                f => Some(f),
+            });
+            self.ivars().focus.set(focus);
+            self.save_and_refresh();
+        }
+
+        #[unsafe(method(moveToInbox:))]
+        fn move_to_inbox(&self, item: &NSMenuItem) {
+            self.reschedule(item.tag() as usize, String::new());
+        }
+
+        #[unsafe(method(moveToToday:))]
+        fn move_to_today(&self, item: &NSMenuItem) {
+            self.reschedule(item.tag() as usize, days::key(0));
+        }
+
+        #[unsafe(method(moveToTomorrow:))]
+        fn move_to_tomorrow(&self, item: &NSMenuItem) {
+            self.reschedule(item.tag() as usize, days::key(1));
         }
 
         #[unsafe(method(focusTask:))]
@@ -554,6 +592,7 @@ impl Controller {
         let fit = rows_that_fit(&tasks, shown, MAX_CARD_ROWS);
         for (k, &i) in shown.iter().take(fit).enumerate() {
             let row = ListRow::new(&tasks[i].text, &self.card_row(i, &tasks[i]), &ink(0.07), self.mtm());
+            unsafe { row.setMenu(Some(&self.task_menu(i))) };
             if k > 0 {
                 row.add_rule(&ink(0.08), CARD_ROW_GAP, self.mtm());
             }
@@ -598,6 +637,7 @@ impl Controller {
             let fit = rows_that_fit(&tasks, &shown, MAX_COLUMN_ROWS);
             for &i in shown.iter().take(fit) {
                 let row = ListRow::new(&tasks[i].text, &self.week_row(i, &tasks[i]), &white(0.07), self.mtm());
+                unsafe { row.setMenu(Some(&self.task_menu(i))) };
                 add_full_width(&ui.list, &row, None);
             }
             self.add_overflow_note(&ui.list, shown.len(), fit, "", &white(0.4));
@@ -612,6 +652,35 @@ impl Controller {
         let title = with_meta(task, w::label(&task.text, 13.0, unsafe { NSFontWeightRegular }, &white(0.9), mtm), &white(0.45), mtm);
         let content = w::stack(&[&check, &title], false, 8.0, mtm);
         TaskRow::new(index, &content, mtm).into_super()
+    }
+
+    /// Right-click menu for the task at `index`; each item carries the index in its tag.
+    fn task_menu(&self, index: usize) -> Retained<NSMenu> {
+        let mtm = self.mtm();
+        let menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::new());
+        menu.setAutoenablesItems(false);
+        let add = |title: &str, action| {
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(mtm.alloc(), &NSString::from_str(title), Some(action), &NSString::new())
+            };
+            unsafe { item.setTarget(Some(self.target())) };
+            item.setTag(index as isize);
+            menu.addItem(&item);
+        };
+        add("Move to Inbox", sel!(moveToInbox:));
+        add("Move to Today", sel!(moveToToday:));
+        add("Move to Tomorrow", sel!(moveToTomorrow:));
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        add("Delete", sel!(deleteTask:));
+        menu
+    }
+
+    /// Sets the day of the task at `index` (empty = Inbox), keeping its place in the list.
+    fn reschedule(&self, index: usize, day: String) {
+        if let Some(task) = self.ivars().tasks.borrow_mut().get_mut(index) {
+            task.day = day;
+        }
+        self.save_and_refresh();
     }
 
     /// Moves a dragged task into `column`, placed above the first row whose middle is
@@ -840,7 +909,7 @@ impl Controller {
             view.widthAnchor().constraintEqualToAnchor(&top.widthAnchor()).setActive(true);
         }
 
-        let input = w::input("Add a task…", &ink(0.9), TODAY, self.target(), sel!(addTask:), mtm);
+        let input = w::input("Add a task · try 6pm !high #work 30m", &ink(0.9), TODAY, self.target(), sel!(addTask:), mtm);
         let bottom = self.add_row(&input, &ink(0.5), mtm);
         let line = w::filled(&ink(0.1), 0.0, mtm);
         card.addSubview(&line);
