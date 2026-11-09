@@ -8,12 +8,12 @@ use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSButton, NSCellImagePosition,
-    NSControlStateValueOn, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSImageView,
-    NSSwitch, NSTextAlignment, NSView, NSWindow, NSWindowStyleMask,
+    NSControlSize, NSControlStateValueOn, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSImageView,
+    NSPopUpButton, NSSwitch, NSTextAlignment, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
 
-use crate::settings::{SECTIONS, Settings};
+use crate::settings::{SECTIONS, Settings, Size};
 use crate::widgets::{self as w, rgba};
 
 const WIDTH: f64 = 640.0;
@@ -22,6 +22,7 @@ const SIDEBAR: f64 = 170.0;
 const PANE: f64 = WIDTH - SIDEBAR;
 const MARGIN: f64 = 24.0;
 const ROW: f64 = 50.0;
+const SIZE_MENU_WIDTH: f64 = 96.0;
 
 /// Sidebar rows, top to bottom: SF Symbol and name.
 const PANES: [(&str, &str); 2] = [("square.grid.2x2", "Sections"), ("rectangle.topthird.inset.filled", "Notch")];
@@ -60,6 +61,13 @@ define_class!(
                 // Refused: the header needs one section. The switch stays enabled and snaps back.
                 sender.setState(NSControlStateValueOn);
             }
+        }
+
+        #[unsafe(method(setSize:))]
+        fn set_size(&self, sender: &NSPopUpButton) {
+            let mut settings = self.ivars().settings.borrow().clone();
+            settings.sizes[sender.tag() as usize] = Size::ALL[sender.indexOfSelectedItem() as usize];
+            self.commit(settings);
         }
 
         #[unsafe(method(toggleWing:))]
@@ -152,15 +160,16 @@ impl SettingsWindow {
         let wings: Vec<_> = WINGS.iter().zip([settings.wing_music, settings.wing_focus])
             .map(|((symbol, name), on)| (*symbol, *name, None, on, sel!(toggleWing:)))
             .collect();
-        let panes = vec![self.pane("Sections", &sections, mtm), self.pane("Collapsed notch", &wings, mtm)];
+        let panes = vec![self.pane("Sections", &sections, Some(settings.sizes), mtm), self.pane("Collapsed notch", &wings, None, mtm)];
         for pane in &panes {
             content.addSubview(pane);
         }
         Parts { window, rows, panes }
     }
 
-    /// A large title over one card of switch rows: symbol, name, optional dim description.
-    fn pane(&self, title: &str, rows: &[(&str, &str, Option<&str>, bool, objc2::runtime::Sel)], mtm: MainThreadMarker) -> Retained<NSView> {
+    /// A large title over one card of switch rows: symbol, name, optional dim description and,
+    /// when `sizes` is given, a panel-size menu left of each switch.
+    fn pane(&self, title: &str, rows: &[(&str, &str, Option<&str>, bool, objc2::runtime::Sel)], sizes: Option<[Size; SECTIONS.len()]>, mtm: MainThreadMarker) -> Retained<NSView> {
         let pane = frame_view(SIDEBAR, 0.0, PANE, HEIGHT, mtm);
         let heading = w::label(title, 24.0, unsafe { NSFontWeightBold }, &rgba(255, 255, 255, 1.0), mtm);
         heading.setFrame(rect(MARGIN, from_top(HEIGHT, 36.0, 32.0), PANE - 2.0 * MARGIN, 32.0));
@@ -181,7 +190,8 @@ impl SettingsWindow {
             row.addSubview(&icon);
 
             let name = w::label(name, 13.0, unsafe { NSFontWeightMedium }, &rgba(255, 255, 255, 0.95), mtm);
-            let text_width = card_width - 48.0 - 66.0;
+            let menu_width = if sizes.is_some() { SIZE_MENU_WIDTH + 8.0 } else { 0.0 };
+            let text_width = card_width - 48.0 - 66.0 - menu_width;
             match blurb {
                 Some(blurb) => {
                     name.setFrame(rect(48.0, ROW - 9.0 - 16.0, text_width, 16.0));
@@ -202,6 +212,22 @@ impl SettingsWindow {
                 switch.setAction(Some(*action));
             }
             row.addSubview(&switch);
+
+            if let Some(sizes) = sizes {
+                let menu_frame = rect(card_width - 14.0 - 38.0 - 8.0 - SIZE_MENU_WIDTH, (ROW - 22.0) / 2.0, SIZE_MENU_WIDTH, 22.0);
+                let menu = NSPopUpButton::initWithFrame_pullsDown(mtm.alloc(), menu_frame, false);
+                menu.setControlSize(NSControlSize::Small);
+                for size in Size::ALL {
+                    menu.addItemWithTitle(&NSString::from_str(size.name()));
+                }
+                menu.selectItemAtIndex(Size::ALL.iter().position(|s| *s == sizes[i]).unwrap_or(0) as isize);
+                menu.setTag(i as isize);
+                unsafe {
+                    menu.setTarget(Some(target));
+                    menu.setAction(Some(sel!(setSize:)));
+                }
+                row.addSubview(&menu);
+            }
 
             if i + 1 < rows.len() {
                 let rule = frame_view(48.0, 0.0, card_width - 48.0, 1.0, mtm);

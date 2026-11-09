@@ -47,6 +47,10 @@ pub struct Ivars {
     wing: Cell<f64>,
     wing_velocity: Cell<f64>,
     wing_target: Cell<f64>,
+    /// Height of the expanded frame as drawn; springs to the expanded rect's height when a
+    /// section with another panel size is shown.
+    height: Cell<f64>,
+    height_velocity: Cell<f64>,
     last_frame: Cell<Option<f64>>,
     /// False while the content lives in the dashboard window: fading and hiding it would blank that window.
     drives_content: Cell<bool>,
@@ -104,6 +108,8 @@ impl NotchMotion {
             wing: Cell::new(0.0),
             wing_velocity: Cell::new(0.0),
             wing_target: Cell::new(0.0),
+            height: Cell::new(expanded.size.height),
+            height_velocity: Cell::new(0.0),
             last_frame: Cell::new(None),
             drives_content: Cell::new(true),
         };
@@ -115,11 +121,17 @@ impl NotchMotion {
     }
 
     /// Replace both animation endpoints without travelling across the desktop or
-    /// changing the current open/close progress.
+    /// changing the current open/close progress. A new expanded height springs into place.
     pub fn set_rects(&self, collapsed: NSRect, expanded: NSRect) {
-        self.ivars().collapsed.set(collapsed);
-        self.ivars().expanded.set(expanded);
-        self.apply();
+        let s = self.ivars();
+        s.collapsed.set(collapsed);
+        s.expanded.set(expanded);
+        s.reduce_motion.set(w::reduce_motion());
+        if s.height.get() == expanded.size.height {
+            self.apply();
+        } else {
+            self.wake();
+        }
     }
 
     /// Hands the content to, or takes it back from, another window. Taking it back
@@ -180,6 +192,11 @@ impl NotchMotion {
         };
         s.wing.set(wing);
         s.wing_velocity.set(wing_velocity);
+        let goal = s.expanded.get().size.height;
+        let (height, height_velocity) =
+            if reduce { (goal, 0.0) } else { integrate(&CLOSE, (s.height.get(), s.height_velocity.get()), goal, dt) };
+        s.height.set(height);
+        s.height_velocity.set(height_velocity);
         let mut fade = s.fade.get();
         if s.open.get() {
             s.target.set(1.0);
@@ -216,8 +233,12 @@ impl NotchMotion {
             && (s.progress.get() - goal).abs() < 1e-3
             && s.velocity.get().abs() < 1e-2
             && (s.wing.get() - s.wing_target.get()).abs() < 1e-2
-            && s.wing_velocity.get().abs() < 1e-2;
+            && s.wing_velocity.get().abs() < 1e-2
+            && (s.height.get() - s.expanded.get().size.height).abs() < 0.5
+            && s.height_velocity.get().abs() < 1e-1;
         if at_rest {
+            s.height.set(s.expanded.get().size.height);
+            s.height_velocity.set(0.0);
             s.wing.set(s.wing_target.get());
             s.wing_velocity.set(0.0);
             s.progress.set(goal);
@@ -252,7 +273,7 @@ impl NotchMotion {
         let (a, b) = (self.ivars().collapsed.get(), self.ivars().expanded.get());
         let lerp = |from: f64, to: f64| from + (to - from) * progress;
         let width = lerp(a.size.width + self.ivars().wing.get(), b.size.width).round();
-        let height = lerp(a.size.height, b.size.height).round();
+        let height = lerp(a.size.height, self.ivars().height.get()).round();
         let mid = a.origin.x + a.size.width / 2.0;
         let top = a.origin.y + a.size.height;
         NSRect::new(NSPoint::new(mid - width / 2.0, top - height), NSSize::new(width, height))
