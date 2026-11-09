@@ -30,7 +30,7 @@ use crate::days;
 use crate::drop_column::DropColumn;
 use crate::export;
 use crate::list_row::{self, ListRow};
-use crate::live_activity::{Activity, LiveActivity, WING};
+use crate::live_activity::{Activity, LiveActivity};
 use crate::now_playing::{Command, NowPlaying};
 use crate::note_view::{self, NoteView};
 use crate::notch_motion::NotchMotion;
@@ -1178,7 +1178,7 @@ impl Controller {
             countdown: countdown.as_deref().map(|text| (text, state.on_break.get())),
         };
         ui.activity.show(&activity, !state.expanded.get());
-        let wings = if activity.is_live() { WING } else { 0.0 };
+        let wings = activity.wing();
         if state.wings.replace(wings) != wings {
             ui.motion.set_wings(2.0 * wings);
         }

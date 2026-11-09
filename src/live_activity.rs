@@ -1,6 +1,6 @@
 //! What the collapsed notch shows beside the hardware cut-out while something is live:
 //! artwork and moving waveform bars for music, the countdown for a focus or break session.
-//! The panel grows by [`WING`] on each side to make room; this view fills those wings.
+//! The panel grows by [`Activity::wing`] on each side to make room; this view fills those wings.
 
 use std::cell::Cell;
 
@@ -16,8 +16,11 @@ use objc2_quartz_core::{CABasicAnimation, CALayer, CAMediaTiming, CAMediaTimingF
 use crate::panel;
 use crate::widgets::{self as w, rgba};
 
-/// Width the panel gains on each side of the hardware notch.
-pub const WING: f64 = 34.0;
+/// Width the panel gains on each side of the hardware notch for music.
+const WING: f64 = 34.0;
+/// Wider while a countdown shows: `mm:ss` doesn't fit in [`WING`] beside the hardware notch.
+const TIME_WING: f64 = 50.0;
+const TIME_WIDTH: f64 = 44.0;
 const ART: f64 = 22.0;
 /// Space between the notch's rounded corner and the artwork.
 const ART_INSET: f64 = 8.0;
@@ -45,6 +48,17 @@ pub struct Activity<'a> {
 impl Activity<'_> {
     pub fn is_live(&self) -> bool {
         self.music.is_some() || self.countdown.is_some()
+    }
+
+    /// Width the panel gains on each side of the hardware notch.
+    pub fn wing(&self) -> f64 {
+        if self.countdown.is_some() {
+            TIME_WING
+        } else if self.music.is_some() {
+            WING
+        } else {
+            0.0
+        }
     }
 }
 
@@ -104,9 +118,12 @@ impl LiveActivity {
         // Digits keep one width, so the text does not jitter as the seconds change.
         let time = NSTextField::labelWithString(&NSString::new(), mtm);
         time.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(12.0, unsafe { NSFontWeightMedium })));
-        time.setAlignment(NSTextAlignment::Center);
-        // Label height is its line height; centre it on the artwork row. Wider than the wing because the cell insets would truncate five digits.
-        time.setFrame(NSRect::new(NSPoint::new(right_edge - 7.0, y + (ART - 16.0) / 2.0), NSSize::new(WING + 8.0, 16.0)));
+        time.setAlignment(NSTextAlignment::Right);
+        // Pinned to the right edge with the artwork's inset, so the digits end clear of the
+        // panel's corner and start clear of the hardware notch once the panel grows by TIME_WING.
+        // Label height is its line height; centre it on the artwork row.
+        let time_x = collapsed.size.width - ear - ART_INSET - TIME_WIDTH;
+        time.setFrame(NSRect::new(NSPoint::new(time_x, y + (ART - 16.0) / 2.0), NSSize::new(TIME_WIDTH, 16.0)));
         time.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
 
         for child in [&*art, &*bars] {
