@@ -1,29 +1,24 @@
-//! The Insights page of the dashboard window: stat cards, a yearly heatmap, year rings, the last
-//! month's pulse and a moon calendar, in a scroll view. All numbers come from [`Insights`]; the
-//! charts are drawn by [`Chart`]. The page redraws only when `show` is given different data
-//! or a heatmap tab is picked, so it costs nothing while idle.
+//! The Insights page of the dashboard window: stat cards, then month rings beside a moon calendar,
+//! in a scroll view for short windows. All numbers come from [`Insights`]; the charts are drawn by
+//! [`Chart`]. The page redraws only when `show` is given different data, so it costs nothing while idle.
 
-use std::cell::{Cell, OnceCell, RefCell};
+use std::cell::{OnceCell, RefCell};
 
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication, NSBitmapImageFileType, NSButton, NSColor,
-    NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSModalResponseOK,
-    NSSavePanel, NSScrollView, NSStackView, NSStackViewDistribution, NSTextAlignment, NSTextField, NSView,
+    NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular,
+    NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSScrollView, NSStackView, NSStackViewDistribution, NSTextAlignment, NSTextField,
+    NSView,
 };
-use objc2_foundation::{NSArray, NSDictionary, NSObject, NSString};
+use objc2_foundation::{NSObject, NSString};
 
 use crate::days;
-use crate::insights::{self, Day, Insights, MONTH_NAMES, Metric, SPAN, civil, days_in_month, level, weekday};
+use crate::insights::{Day, Insights, MONTH_NAMES, SPAN, civil, days_in_month, level, weekday};
 use crate::insights_chart::{AMBER, Chart, PINK, PURPLE, Plot, Rgb, SAGE};
 use crate::week_bars::{self, WeekBars};
 use crate::widgets::{self as w, SURFACE, rgba};
 
-/// The heatmap's tabs, in order; a tab's tag is its index.
-const METRICS: [(&str, Metric, Rgb); 3] = [("Focus", Metric::Focus, PURPLE), ("Pomodoros", Metric::Pomodoros, AMBER), ("Tasks", Metric::Tasks, SAGE)];
-const PULSE_DAYS: i64 = 30;
 const ROW_HEIGHT: f64 = 330.0;
 const GAP: f64 = 12.0;
 const CARD_INSET: f64 = 16.0;
@@ -41,12 +36,7 @@ struct Parts {
     focus_bars: Retained<WeekBars>,
     best: Retained<NSTextField>,
     best_note: Retained<NSTextField>,
-    heat: Retained<Chart>,
-    metric_pills: Vec<Retained<NSButton>>,
     petals: Retained<Chart>,
-    pulse_card: Retained<NSView>,
-    export: Retained<NSButton>,
-    pulse: Retained<Chart>,
     moon_month: Retained<NSTextField>,
     moon: Retained<Chart>,
 }
@@ -54,7 +44,6 @@ struct Parts {
 pub struct Ivars {
     parts: OnceCell<Parts>,
     data: RefCell<Insights>,
-    metric: Cell<usize>,
 }
 
 define_class!(
@@ -64,39 +53,12 @@ define_class!(
     #[name = "InsightsView"]
     pub struct InsightsView;
 
-    impl InsightsView {
-        #[unsafe(method(selectMetric:))]
-        fn select_metric(&self, sender: &NSButton) {
-            self.ivars().metric.set(sender.tag() as usize);
-            self.render_heatmap();
-        }
-
-        /// Saves the Pulse card as a PNG at a path the user picks; nothing is written otherwise.
-        #[unsafe(method(exportPulse:))]
-        fn export_pulse(&self, _sender: &AnyObject) {
-            let parts = self.parts();
-            let Some(png) = png_of(&parts.pulse_card, &parts.export) else { return };
-            // The dashboard may sit behind other windows, and the save sheet opens with it.
-            #[allow(deprecated)] // `activate()` needs macOS 14
-            NSApplication::sharedApplication(self.mtm()).activateIgnoringOtherApps(true);
-            let panel = NSSavePanel::savePanel(self.mtm());
-            panel.setNameFieldStringValue(&NSString::from_str(&format!("notchpad-pulse-{}.png", days::key(0))));
-            #[allow(deprecated)] // `setAllowedContentTypes` needs UTType
-            panel.setAllowedFileTypes(Some(&NSArray::from_retained_slice(&[NSString::from_str("png")])));
-            if panel.runModal() != NSModalResponseOK {
-                return;
-            }
-            let Some(path) = panel.URL().and_then(|url| url.path()) else { return };
-            if !png.writeToFile_atomically(&path, true) {
-                eprintln!("notchpad: could not write {path}");
-            }
-        }
-    }
+    impl InsightsView {}
 );
 
 impl InsightsView {
     pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let ivars = Ivars { parts: OnceCell::new(), data: RefCell::new(Insights::default()), metric: Cell::new(0) };
+        let ivars = Ivars { parts: OnceCell::new(), data: RefCell::new(Insights::default()) };
         let this = mtm.alloc::<Self>().set_ivars(ivars);
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         let parts = this.build(mtm);
@@ -157,8 +119,6 @@ impl InsightsView {
             }
         }
 
-        self.render_heatmap_with(&data);
-
         let span = data.recent(SPAN);
         let effort = |d: &Day| d.effort().iter().sum::<u32>();
         let busiest = span.iter().map(effort).max().unwrap_or(0).max(1);
@@ -170,13 +130,7 @@ impl InsightsView {
             active: span.iter().filter(|d| d.active()).count() as u32,
         });
 
-        let recent = data.recent(PULSE_DAYS);
-        parts.pulse.set(Plot::Pulse {
-            days: recent.iter().map(Day::shares).collect(),
-            // A label a week apart, ending on today.
-            labels: (0..recent.len()).rev().step_by(7).map(|i| (i, date_label(today - (PULSE_DAYS - 1 - i as i64), today))).collect(),
-        });
-        let peak = data.peak(Metric::Score);
+        let peak = data.peak();
 
         let (year_now, month, day_of_month) = civil(today);
         let first = today - i64::from(day_of_month - 1);
@@ -188,35 +142,7 @@ impl InsightsView {
         });
     }
 
-    fn render_heatmap(&self) {
-        self.render_heatmap_with(&self.ivars().data.borrow());
-    }
-
-    fn render_heatmap_with(&self, data: &Insights) {
-        let parts = self.parts();
-        let selected = self.ivars().metric.get();
-        let (_, metric, hue) = METRICS[selected];
-        let today = data.today();
-        let peak = data.peak(metric);
-        let cells = (today - (SPAN - 1)..=today)
-            .map(|n| {
-                let (col, row) = insights::heat_cell(today, n);
-                (col, row, level(data.day(n).value(metric), peak))
-            })
-            .collect();
-        let weeks = insights::week_labels(today).into_iter().enumerate().map(|(col, (_, text))| (col, text)).collect();
-        parts.heat.set(Plot::Heatmap { cells, weeks, hue });
-        for (i, pill) in parts.metric_pills.iter().enumerate() {
-            if i == selected {
-                w::style_pill(pill, &rgba(255, 255, 255, 1.0), &NSColor::blackColor(), 12.0);
-            } else {
-                w::style_pill(pill, &rgba(255, 255, 255, 0.1), &rgba(255, 255, 255, 0.8), 12.0);
-            }
-        }
-    }
-
     fn build(&self, mtm: MainThreadMarker) -> Parts {
-        let target: &AnyObject = self.as_ref();
         let dark = unsafe { NSAppearance::appearanceNamed(NSAppearanceNameDarkAqua) };
 
         // Stat cards.
@@ -231,42 +157,18 @@ impl InsightsView {
         let stats = w::stack(&[&active_card, &streak_card, &focus_card, &best_card], false, GAP, mtm);
         stats.setDistribution(NSStackViewDistribution::FillEqually);
 
-        // Heatmap card, with the metric tabs in its title row.
-        let metric_pills: Vec<_> = METRICS.iter().enumerate().map(|(i, (name, _, _))| {
-            let pill = w::pill(name, 24.0, target, sel!(selectMetric:), mtm);
-            pill.setTag(i as isize);
-            w::fit_pill(&pill, 10.0);
-            pill
-        }).collect();
-        let tabs = w::stack(&metric_pills.iter().map(|p| &**p as &NSView).collect::<Vec<_>>(), false, 6.0, mtm);
-        let heat = Chart::new(Plot::Blank, mtm);
-        let heat_card = card("Activity", Some(&tabs), &heat, mtm);
-
-        // Rings, then the moon calendar beside the pulse below.
+        // Month rings beside the moon calendar.
         let petals = Chart::new(Plot::Blank, mtm);
         let petals_card = card("Month rings", None, &petals, mtm);
-        let top = w::stack(&[&heat_card, &petals_card], false, GAP, mtm);
-        top.setDistribution(NSStackViewDistribution::FillEqually);
-        top.heightAnchor().constraintEqualToConstant(ROW_HEIGHT).setActive(true);
+        petals.setToolTip(Some(&NSString::from_str("Estimated contribution: pomodoros = min(focus minutes, sessions × 25); deep focus = remaining minutes; tasks = completed tasks × 10. Colours show shares, not measured task time.")));
         let moon_month = w::label("", 11.0, unsafe { NSFontWeightMedium }, &rgba(255, 255, 255, 0.5), mtm);
         let moon = Chart::new(Plot::Blank, mtm);
         let moon_card = card("Moon calendar", Some(&moon_month), &moon, mtm);
+        let charts = w::stack(&[&petals_card, &moon_card], false, GAP, mtm);
+        charts.setDistribution(NSStackViewDistribution::FillEqually);
+        charts.heightAnchor().constraintEqualToConstant(ROW_HEIGHT).setActive(true);
 
-        // Pulse card with the export button.
-        let export = w::pill("Export PNG", 24.0, target, sel!(exportPulse:), mtm);
-        w::fit_pill(&export, 10.0);
-        w::style_pill(&export, &rgba(255, 255, 255, 0.1), &rgba(255, 255, 255, 0.8), 12.0);
-        let pulse = Chart::new(Plot::Blank, mtm);
-        let contribution_note = NSString::from_str("Estimated contribution: pomodoros = min(focus minutes, sessions × 25); deep focus = remaining minutes; tasks = completed tasks × 10. Colours show shares, not measured task time.");
-        petals.setToolTip(Some(&contribution_note));
-        pulse.setToolTip(Some(&contribution_note));
-        let pulse_card = card(&format!("Pulse · last {PULSE_DAYS} days"), Some(&export), &pulse, mtm);
-        let bottom = w::stack(&[&moon_card, &pulse_card], false, GAP, mtm);
-        bottom.heightAnchor().constraintEqualToConstant(ROW_HEIGHT).setActive(true);
-        // The calendar needs seven narrow columns; the bars take the rest.
-        moon_card.widthAnchor().constraintEqualToAnchor_multiplier(&bottom.widthAnchor(), 0.36).setActive(true);
-
-        let rows = w::stack(&[&stats, &top, &bottom], true, GAP, mtm);
+        let rows = w::stack(&[&stats, &charts], true, GAP, mtm);
         rows.setAlignment(NSLayoutAttribute::Width);
         let page = Chart::new(Plot::Blank, mtm);
         page.addSubview(&rows);
@@ -302,8 +204,8 @@ impl InsightsView {
         empty.centerYAnchor().constraintEqualToAnchor(&body.centerYAnchor()).setActive(true);
 
         Parts {
-            body, scroll, empty, ring, active_pct, streak, streak_note, focus_time, focus_note, focus_bars, best, best_note, heat, metric_pills,
-            petals, pulse_card, export, pulse, moon_month, moon,
+            body, scroll, empty, ring, active_pct, streak, streak_note, focus_time, focus_note, focus_bars, best, best_note, petals, moon_month,
+            moon,
         }
     }
 }
@@ -379,16 +281,6 @@ fn stat_card(title: &str, symbol: &str, hue: Rgb, chart: Option<&NSView>, note: 
     }
     column.trailingAnchor().constraintLessThanOrEqualToAnchor_constant(&card.trailingAnchor(), -CARD_INSET).setActive(true);
     (card, value, note)
-}
-
-/// `view` as drawn now, without `hidden`, as PNG data.
-fn png_of(view: &NSView, hidden: &NSView) -> Option<Retained<objc2_foundation::NSData>> {
-    let bounds = view.bounds();
-    let rep = view.bitmapImageRepForCachingDisplayInRect(bounds)?;
-    hidden.setHidden(true);
-    view.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
-    hidden.setHidden(false);
-    unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) }
 }
 
 fn plural(count: u32, word: &str) -> String {
