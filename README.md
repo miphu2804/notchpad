@@ -2,7 +2,12 @@
 
 A small native macOS app that lives in the MacBook notch: today's tasks, a focus timer and quick capture, one hover away.
 
-![Platform: macOS 14+](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Install for Mac](https://img.shields.io/badge/Install_for_Mac-Download-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/miphu2804/notchgo/releases/latest)
+
+![macOS 14+](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white)
+![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-arm64-555555)
+![Rust](https://img.shields.io/badge/Rust-AppKit-B7410E?logo=rust&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ## Features
 
@@ -15,7 +20,7 @@ A small native macOS app that lives in the MacBook notch: today's tasks, a focus
 
 ## Requirements
 
-- macOS 14 or later.
+- macOS 14 or later. The release build is for Apple Silicon; build from source for an Intel Mac.
 - A MacBook with a notch. On a display without one, NotchGo draws its own notch at the top of the screen.
 - To build from source: a Rust toolchain (edition 2024) and the Xcode command line tools.
 
