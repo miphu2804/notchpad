@@ -1,3 +1,15 @@
+### [2026-11-09 19:45 UTC+07:00] — [Feature] Current pomodoro tomato ripens as the session runs
+
+**Done:**
+- The tomato for the running focus session blends from green through orange to red with the time elapsed, instead of jumping from green to red at the end. The stopwatch has no end, so its tomato stays green.
+
+**Changed  files:**
+- `src/tomato_view.rs` — modified
+- `src/controller.rs` — modified
+
+**Flow explained:**
+`render_focus` (every timer tick) → ripeness = 1 − remaining ÷ session length → `Tomato::Growing(ripeness)` → `ripen` blends body, highlight and shade between the green, orange and red stops. Verified by a scratch render at 0, ¼, ½, ¾ and 1.
+
 ### [2026-11-09 19:35 UTC+07:00] — [Fix] Signed builds keep permissions; block glyphs fill the cell
 
 **Done:**
@@ -145,18 +157,4 @@ The Terminal tab is now a real terminal: the user's login shell in a PTY, emulat
 
 **Flow explained:**
 `TerminalSession` spawns the PTY and alacritty's event loop; its listener hops to the main queue via `dispatch2` to mark `TerminalView` dirty, so nothing polls. `TerminalView` draws the grid per row, maps keys through `terminal_keys`, and resizes the PTY to its bounds. While the view is first responder the panel stays open.
-
-### [2026-11-09 14:05 UTC+07:00] — [Feature] System-wide Now Playing, pomodoro chime, terminal Escape fix
-
-**Done:**
-The Music tab now follows whatever macOS shows as Now Playing (YouTube in Chrome, Music, Spotify, …) with title, artist, artwork, position and prev/play-pause/next. macOS 15.4+ blocks MediaRemote for unentitled apps, so a small helper dylib runs inside Apple-signed `/usr/bin/perl` and streams JSON lines. Built by a Sonnet thread; accepted by a render with live YouTube data. Pomodoro end now plays the Glass chime instead of the alert beep and still opens the notch (checked with a 1 s session). The terminal prompt stays enabled while a command runs so Escape reaches it and kills the command (checked with synthetic key events). Idle CPU 0.0%, footprint 28.9 MB.
-
-**Changed  files:**
-- `build.rs` — created
-- `macos/now_playing_helper.m` — created
-- `src/now_playing.rs` — modified
-- `src/controller.rs` — modified
-
-**Flow explained:**
-`build.rs` compiles the helper with clang; `now_playing.rs` embeds it, writes it to the app's support folder on first use of the Music tab, and runs `perl` with it. The helper registers for MediaRemote notifications and prints a JSON line per change; a reader thread queues parsed tracks and pokes the controller on the main thread, which re-renders. Controls are words written to the helper's stdin; it exits when stdin closes.
 
