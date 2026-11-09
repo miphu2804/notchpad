@@ -4,7 +4,7 @@ A small, native macOS app that lives in the notch. It holds today's tasks, a pom
 
 [![Install for Mac](https://img.shields.io/badge/Install_for_Mac-Download-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/miphu2804/notchpad/releases/latest/download/Notchpad.zip)
 
-Apple Silicon, macOS 14 or later. It is written in Rust with AppKit, runs at 0% CPU while idle, and makes no network requests.
+Apple Silicon, macOS 14 or later. It is written in Rust with AppKit, runs at 0% CPU while idle, and makes no network requests unless you connect Linear.
 
 ## Features
 
@@ -15,6 +15,9 @@ Apple Silicon, macOS 14 or later. It is written in Rust with AppKit, runs at 0% 
 - **Terminal.** A real shell in the notch.
 - **Alerts.** When a focus session or a break ends, and before and at a timed task's time, a small card drops out of the notch with a chime. A task reminder has **Snooze 5 min** and **Done**; clicking the card dismisses it. The card never takes the keyboard from the app you're in. Timed tasks also get a system notification.
 - **Focus settings.** Settings › Focus sets the focus length, short and long breaks, how early task reminders come (or turns them off) and whether alerts chime.
+- **Claude.** Settings › Integrations › Claude adds the `notchpad` MCP server to Claude Code (runs `claude mcp add --scope user`) or to Claude Desktop (merges into `claude_desktop_config.json`, keeping a `.bak`; restart Claude Desktop afterwards). A config that is not valid JSON is never overwritten.
+- **Calendars.** Turn on **Show calendar events** and today's events appear read-only above your tasks. They come from the macOS calendars through EventKit, so add a Google account in System Settings › Internet Accounts; Notion Calendar events arrive through that same Google calendar. macOS asks for calendar access only when you turn the switch on, and nothing is ever written to a calendar.
+- **Linear.** Paste a personal API key under Settings › Integrations › Linear and click **Connect**. Your open assigned issues become tasks (`linear:<identifier>`) when the app opens and every 10 minutes, placed on their due date or today; completing one in Notchpad moves the issue to its team's completed state. The key is kept only in the macOS Keychain; requests go through `curl` with the key on stdin.
 - **More.** A JSON backup export, a dashboard window, and today's tasks copied as a Markdown checklist. Right-click the header for these.
 
 ## Install
@@ -42,10 +45,10 @@ This builds `Notchpad.app` (ad-hoc signed) and copies it to `/Applications`. `ca
 
 ## Task sync (Notion, Linear, Google Calendar)
 
-Sync runs through Claude: Claude uses the service's MCP connector together with the `notchpad` MCP server. The app itself holds no tokens and has no network code.
+Claude can sync Notion, Linear and Google Calendar: it uses the service's MCP connector together with the `notchpad` MCP server. The app itself only talks to Linear when you connect it in Settings (see Features); everything else on this page runs through Claude.
 
 - **Store.** `~/Library/Application Support/notchpad/tasks.txt`, one task per line, tab separated. `ext` is the stable external id (`linear:ENG-12`, `notion:<page-id>`, `gcal:<event-id>`). The app reloads the file within about 2 s of an external write.
-- **Server.** Register it with `claude mcp add --scope user notchpad -- $PWD/target/release/notchpad-mcp`. Tools: `list_tasks`, `add_task` (upserts when `ext` is given), `complete_task`, `move_task`, `update_task`, `plan_day`.
+- **Server.** Register it with Settings › Integrations › Claude, or by hand: `claude mcp add --scope user notchpad -- $PWD/target/release/notchpad-mcp`. Tools: `list_tasks`, `add_task` (upserts when `ext` is given), `complete_task`, `move_task`, `update_task`, `plan_day`.
 - **Inbox.** A task without a day sits in the Inbox, which the notch does not show. `add_task` puts tasks there unless given a day; `move_task` or `plan_day` brings them into today.
 - **Conflict rule.** A task done on either side stays done. The `day` set in Notchpad wins over the service's date. The title comes from the service. Tasks are deduplicated by `ext`, so re-running never creates duplicates.
 - **Run it.** Authorize the connectors in Claude Code (`/mcp`), then run `/sync-tasks` (`.claude/commands/sync-tasks.md`).

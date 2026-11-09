@@ -1,3 +1,20 @@
+### [2026-11-09 22:16 UTC+07:00] — [Feature] Settings › Integrations: Claude, calendars, Linear
+
+**Done:**
+- New Integrations pane (`puzzlepiece.extension`) in three groups, one commit each.
+- Claude: **Add** for Claude Code (`claude mcp add --scope user`, `claude` found on PATH, `~/.claude/local`, `~/.local/bin`, Homebrew) and for Claude Desktop (JSON merge with `.bak`; invalid JSON is refused). Status reads `~/.claude.json` and the Desktop config.
+- Calendars: `calendar=1` setting; EventKit read of today's events, shown read-only above the tasks. Access is requested only when the switch is turned on.
+- Linear: key in the Keychain (`notchpad.linear`), `linear=1` flag in settings, `curl` with the config on stdin, import every 10 min on the existing 2 s tick (no new timer), completion calls `issueUpdate`.
+
+**Changed  files:**
+- `src/claude_mcp.rs`, `src/calendar.rs`, `src/linear.rs` — created
+- `src/settings_window.rs`, `src/settings.rs`, `src/controller.rs`, `src/days.rs`, `src/main.rs`, `Cargo.toml`, `Cargo.lock`, `macos/Info.plist`, `README.md` — modified
+
+**Flow explained:**
+- Switch on → `apply_settings` asks EventKit once, then `reloadEvents:` reads today's events (also on `EKEventStoreChanged` and at midnight); `render_task_card` prepends up to 3 event rows.
+- The reload tick starts a Linear fetch on a thread when due; the thread sends the parsed issues over a channel and pings `linearSynced:`, which dedupes by `ext` and saves. Ticking a `linear:` task done spawns a thread that looks up the team's completed state and updates the issue.
+- Verified: 89 tests (JSON merge, command args, claude lookup, GraphQL parsing, dedupe, curl request against a loopback server), pane rendered with a scratch HOME, 0.0% idle CPU. Not verified: a real Linear sync, a real calendar prompt and events, clicking Add.
+
 ### [2026-11-09 21:55 UTC+07:00] — [Feature] Notch alert cards, focus settings, quick-add hints
 
 **Done:**
@@ -136,24 +153,3 @@ The 2 s `reload:` tick calls `remind_tasks`, which works only when the minute ch
 **Flow explained:**
 `Settings::load()` runs at startup. `render_tabs` hides the pills of hidden sections and falls back to the first visible tab. `sync_activity` reads the wing flags. `SettingsWindow` saves each change and calls back into the controller, which applies it live. `LiveActivity::animate_bars` only adds or removes the CA animation when the shown state changes.
 
-### [2026-11-09 15:18 UTC+07:00] — [Feature] Task alerts, timer +5/stopwatch, JSON export, dashboard window
-
-**Done:**
-Closed the remaining feature gaps, one Sonnet thread per feature, each accepted and merged with `--no-ff`. Tasks with a day and time get a local notification at that time; the next 7 days are synced after each save, and authorization is asked on the first timed save, only in the bundled app. Focus timer: +5 min (also while paused), and a stopwatch duration that counts up and logs its minutes on End. Completed tasks are stamped with a `done_on` day, which is an optional 9th column so old files still load. The insights strip shows tasks done this week. The header's right-click menu holds "Open dashboard window", which moves the same content view into a resizable window, and "Export backup (JSON)…", which writes tasks, notes and the pomodoro log through a save panel. Closing the window or pressing the header ✕ returns the view to the notch. Verified with 57 unit tests and a hook that opened the dashboard, pressed ✕ and expanded the notch: the window closed, the app kept running, and the notch PNG matched the original. Idle CPU 0.0% after the install.
-
-**Changed  files:**
-- `src/task_alerts.rs` — created
-- `src/export.rs` — created
-- `src/controller.rs` — modified
-- `src/pomodoros.rs` — modified
-- `src/store.rs` — modified
-- `src/bin/notchpad-mcp.rs` — modified
-- `src/main.rs` — modified
-- `src/notch_motion.rs` — modified
-- `Cargo.toml`, `Cargo.lock` — modified
-
-**Flow explained:**
-- Save tasks → `task_alerts::sync` turns the pure `due_alerts` into `UNCalendarNotificationTrigger` requests with stable FNV ids.
-- Timer: the `STOPWATCH` index runs `run_stopwatch` from `since`; `next_duration` and `end_log_minutes` stay pure.
-- Header menu → `openDashboard:` → `show_dashboard`, which reparents `ui.content`. Closing calls `windowWillClose:` → `hide_dashboard` → `attach_to_notch`.
-- `exportBackup:` → `NSSavePanel` → `export::write`.
