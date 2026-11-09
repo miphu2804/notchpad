@@ -10,9 +10,11 @@ mod note_view;
 mod notch_motion;
 mod panel;
 mod pill_button;
+mod pomodoros;
 mod quick_add;
 mod store;
 mod task_row;
+mod tomato_view;
 mod widgets;
 
 use std::cell::RefCell;

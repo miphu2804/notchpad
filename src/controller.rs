@@ -29,6 +29,8 @@ use crate::note_view::{self, NoteView};
 use crate::notch_motion::NotchMotion;
 use crate::task_row::TaskRow;
 use crate::quick_add;
+use crate::pomodoros::{self, DAILY_GOAL};
+use crate::tomato_view::{Tomato, TomatoView};
 use crate::panel::{self, FileDrag, NotchPanel, NotchShape};
 use crate::store::{self, Task};
 use crate::widgets::{self as w, rgba};
@@ -42,7 +44,6 @@ const TOP_SLOP: f64 = 1.0;
 /// MacBook Pro 14" (M4 Pro) notch, used on displays without one.
 const DEFAULT_NOTCH: (f64, f64) = (185.0, 32.0);
 const FOCUS_CARD_WIDTH: f64 = 236.0;
-const PROGRESS_WIDTH: f64 = 150.0;
 const MUSIC_PROGRESS_WIDTH: f64 = 340.0;
 const ICON_TAB_WIDTH: f64 = 32.0;
 const ARTWORK_SIZE: f64 = 120.0;
@@ -53,6 +54,12 @@ const CARD_ROW_GAP: f64 = 15.0;
 /// Quiet period after the last keystroke before the note is written to disk.
 const NOTES_SAVE_DELAY: f64 = 0.5;
 const DURATIONS_MIN: [u64; 4] = [15, 25, 45, 60];
+const SHORT_BREAK_MIN: u64 = 5;
+const LONG_BREAK_MIN: u64 = 15;
+/// A long break follows every this many focus sessions.
+const CYCLE: usize = 4;
+const TOMATO_SIZE: f64 = 33.0;
+const CORAL: (u8, u8, u8) = (217, 112, 90);
 
 /// Week columns, also used as the add-field tag that picks the new task's day.
 const INBOX: isize = 0;
@@ -78,12 +85,16 @@ struct Column {
 }
 
 struct FocusCard {
-    title: Retained<NSTextField>,
-    time: Retained<NSTextField>,
-    status: Retained<NSTextField>,
-    progress: Retained<NSLayoutConstraint>,
-    start: Retained<NSButton>,
+    /// Timer icon tile; cycles the focus length while idle.
     set_time: Retained<NSButton>,
+    count: Retained<NSTextField>,
+    tomatoes: Vec<Retained<TomatoView>>,
+    task: Retained<NSTextField>,
+    badge: Retained<NSTextField>,
+    time: Retained<NSTextField>,
+    ends: Retained<NSTextField>,
+    pause: Retained<NSButton>,
+    end: Retained<NSButton>,
 }
 
 struct TaskCard {
@@ -187,6 +198,12 @@ pub struct State {
     focus: Cell<Option<usize>>,
     duration_idx: Cell<usize>,
     deadline: Cell<Option<Instant>>,
+    /// Time left on a paused session; the ticker is off while this is set.
+    paused: Cell<Option<Duration>>,
+    on_break: Cell<bool>,
+    break_min: Cell<u64>,
+    /// Focus sessions completed today, read from `pomodoros.txt`.
+    done_today: Cell<usize>,
     ticker: RefCell<Option<Retained<NSTimer>>>,
     /// Modification time of `tasks.txt` as last loaded or saved by this process.
     seen_mtime: Cell<Option<std::time::SystemTime>>,
@@ -399,22 +416,28 @@ define_class!(
 
         #[unsafe(method(toggleTimer:))]
         fn toggle_timer(&self, _sender: &AnyObject) {
-            if self.ivars().deadline.get().is_some() {
+            let state = self.ivars();
+            if state.deadline.get().is_some() {
+                let left = state.deadline.get().map(|d| d.saturating_duration_since(Instant::now()));
                 self.stop_timer();
+                state.paused.set(left);
+                self.render_focus();
             } else {
-                self.start_timer();
+                let secs = state.paused.take().map_or_else(|| self.session_secs(), |left| left.as_secs() + 1);
+                self.run_timer(secs);
             }
         }
 
-        /// ✓ on the focus card: the focused task is done.
-        #[unsafe(method(finishFocus:))]
-        fn finish_focus(&self, _sender: &AnyObject) {
-            if let Some(i) = self.focused_task() {
-                self.ivars().tasks.borrow_mut()[i].done = true;
-                self.ivars().focus.set(None);
+        /// End: a focus stopped early is logged; a break is simply skipped.
+        #[unsafe(method(endTimer:))]
+        fn end_timer(&self, _sender: &AnyObject) {
+            let state = self.ivars();
+            if !state.on_break.get() && self.session_active() {
+                let elapsed = self.session_secs() - self.remaining_secs().min(self.session_secs());
+                pomodoros::append(&days::stamp(), elapsed / 60, false);
             }
+            state.on_break.set(false);
             self.stop_timer();
-            self.save_and_refresh();
         }
 
         #[unsafe(method(cycleDuration:))]
@@ -428,7 +451,18 @@ define_class!(
         fn tick(&self, _timer: &NSTimer) {
             let Some(deadline) = self.ivars().deadline.get() else { return };
             if Instant::now() >= deadline {
+                let state = self.ivars();
+                let was_break = state.on_break.replace(false);
                 self.stop_timer();
+                if !was_break {
+                    pomodoros::append(&days::stamp(), DURATIONS_MIN[state.duration_idx.get()], true);
+                    let done = pomodoros::done_today(&days::key(0));
+                    state.done_today.set(done);
+                    let long = done % CYCLE == 0;
+                    state.on_break.set(true);
+                    state.break_min.set(if long { LONG_BREAK_MIN } else { SHORT_BREAK_MIN });
+                    self.run_timer(self.session_secs());
+                }
                 unsafe { NSBeep() };
                 self.ivars().tab.set(Tab::Workspace);
                 self.refresh();
@@ -481,6 +515,7 @@ impl Controller {
         let state = State {
             tasks: RefCell::new(store::load()),
             duration_idx: Cell::new(1), // 25 min
+            done_today: Cell::new(pomodoros::done_today(&days::key(0))),
             ..State::default()
         };
         let this = mtm.alloc::<Self>().set_ivars(state);
@@ -670,6 +705,8 @@ impl Controller {
     }
 
     fn refresh(&self) {
+        // Re-read here (not per tick) so the count also rolls over at midnight.
+        self.ivars().done_today.set(pomodoros::done_today(&days::key(0)));
         self.render_tabs();
         self.render_focus();
         self.render_task_card();
@@ -688,8 +725,27 @@ impl Controller {
         }
     }
 
-    fn start_timer(&self) {
-        let secs = DURATIONS_MIN[self.ivars().duration_idx.get()] * 60;
+    /// Length of the current session: a break, or the chosen focus length.
+    fn session_secs(&self) -> u64 {
+        let state = self.ivars();
+        if state.on_break.get() { state.break_min.get() * 60 } else { DURATIONS_MIN[state.duration_idx.get()] * 60 }
+    }
+
+    fn session_active(&self) -> bool {
+        self.ivars().deadline.get().is_some() || self.ivars().paused.get().is_some()
+    }
+
+    /// Seconds left, rounded up so the display shows the full length when it starts.
+    fn remaining_secs(&self) -> u64 {
+        let state = self.ivars();
+        match (state.deadline.get(), state.paused.get()) {
+            (Some(deadline), _) => deadline.saturating_duration_since(Instant::now()).as_secs() + 1,
+            (None, Some(left)) => left.as_secs() + 1,
+            (None, None) => self.session_secs(),
+        }
+    }
+
+    fn run_timer(&self, secs: u64) {
         self.ivars().deadline.set(Some(Instant::now() + Duration::from_secs(secs)));
         let timer = unsafe {
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(1.0, self.target(), sel!(tick:), None, true)
@@ -698,8 +754,10 @@ impl Controller {
         self.render_focus();
     }
 
+    /// Drops the deadline, any pause and the ticker, so nothing runs while idle.
     fn stop_timer(&self) {
         self.ivars().deadline.set(None);
+        self.ivars().paused.set(None);
         if let Some(timer) = self.ivars().ticker.borrow_mut().take() {
             timer.invalidate();
         }
@@ -807,24 +865,46 @@ impl Controller {
     fn render_focus(&self) {
         let card = &self.ui().focus;
         let state = self.ivars();
-        let total = DURATIONS_MIN[state.duration_idx.get()] * 60;
-        let (remaining, running) = match state.deadline.get() {
-            Some(deadline) => (deadline.saturating_duration_since(Instant::now()).as_secs() + 1, true),
-            None => (total, false),
-        };
-        let title = match self.focused_task() {
-            Some(i) => state.tasks.borrow()[i].text.clone(),
-            None => "Pick a task with ▶".to_owned(),
-        };
-        card.title.setStringValue(&NSString::from_str(&title));
-        card.time.setStringValue(&NSString::from_str(&format!("{:02}:{:02}", remaining / 60, remaining % 60)));
-        card.status.setStringValue(&NSString::from_str(if running { "Focusing" } else { "Ready" }));
-        let elapsed = total.saturating_sub(remaining) as f64 / total as f64;
-        card.progress.setConstant(PROGRESS_WIDTH * if running { elapsed } else { 0.0 });
-        card.start.setTitle(&NSString::from_str(if running { "  Stop" } else { "  Start" }));
-        card.start.setImage(Some(&w::symbol(if running { "stop.fill" } else { "play.fill" })));
-        card.set_time.setTitle(&NSString::from_str(&format!(" Set time · {}m", DURATIONS_MIN[state.duration_idx.get()])));
-        card.set_time.setEnabled(!running);
+        let set = |field: &NSTextField, text: &str| field.setStringValue(&NSString::from_str(text));
+        let running = state.deadline.get().is_some();
+        let active = self.session_active();
+        let remaining = self.remaining_secs();
+        let done = state.done_today.get();
+
+        set(&card.count, &format!("{done} / {DAILY_GOAL}"));
+        for (i, tomato) in card.tomatoes.iter().enumerate() {
+            tomato.set(if i < done {
+                Tomato::Ripe
+            } else if i == done && active && !state.on_break.get() {
+                Tomato::Growing
+            } else {
+                Tomato::Empty
+            });
+        }
+        let task = self.focused_task().map(|i| state.tasks.borrow()[i].text.clone());
+        set(&card.task, task.as_deref().unwrap_or("Pick a task with ▶"));
+        set(&card.badge, &if !state.on_break.get() {
+            format!("Focus · {} of {CYCLE}", done % CYCLE + 1)
+        } else if state.break_min.get() == LONG_BREAK_MIN {
+            "Break · long".to_owned()
+        } else {
+            "Break · short".to_owned()
+        });
+        set(&card.time, &format!("{:02}:{:02}", remaining / 60, remaining % 60));
+        set(&card.ends, &match (running, active) {
+            (true, _) => format!("ends at {}", days::clock_in(remaining)),
+            (false, true) => "paused".to_owned(),
+            (false, false) => format!("{} min", remaining / 60),
+        });
+        card.pause.setTitle(&NSString::from_str(match (running, active) {
+            (true, _) => "Pause",
+            (false, true) => "Resume",
+            (false, false) => "Start",
+        }));
+        card.end.setEnabled(active);
+        card.end.setAlphaValue(if active { 1.0 } else { 0.4 });
+        card.set_time.setEnabled(!active);
+        card.set_time.setToolTip(Some(&NSString::from_str(&format!("Set time · {}m", DURATIONS_MIN[state.duration_idx.get()]))));
     }
 
     fn render_task_card(&self) {
@@ -1158,48 +1238,71 @@ impl Controller {
     }
 
     fn build_focus_card(&self, mtm: MainThreadMarker) -> (Retained<NSView>, FocusCard) {
-        let card = w::filled(&rgba(169, 165, 203, 1.0), 18.0, mtm);
-        card.setAppearance(unsafe { NSAppearance::appearanceNamed(NSAppearanceNameAqua) }.as_deref());
+        let card = w::filled(&rgba(34, 33, 38, 1.0), 18.0, mtm);
+        card.setAppearance(unsafe { NSAppearance::appearanceNamed(NSAppearanceNameDarkAqua) }.as_deref());
         card.widthAnchor().constraintEqualToConstant(FOCUS_CARD_WIDTH).setActive(true);
+        let inner = FOCUS_CARD_WIDTH - 28.0;
+        let coral = rgba(CORAL.0, CORAL.1, CORAL.2, 1.0);
 
-        let title = w::label("", 13.0, unsafe { NSFontWeightSemibold }, &ink(0.85), mtm);
-        title.setAlignment(NSTextAlignment::Center);
-        let time = w::label("", 46.0, unsafe { NSFontWeightLight }, &ink(0.75), mtm);
-        time.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(46.0, unsafe { NSFontWeightLight })));
-        let status = w::label("", 11.0, unsafe { NSFontWeightMedium }, &ink(0.5), mtm);
+        let set_time = w::icon_button("timer", "", 12.0, &white(1.0), self.target(), sel!(cycleDuration:), mtm);
+        w::paint(&set_time, &coral, 6.0);
+        fixed_size(&set_time, 22.0, 22.0);
+        let heading = w::label("Today's pomodoros", 12.0, unsafe { NSFontWeightSemibold }, &white(0.92), mtm);
+        let (count, count_chip) = chip(&white(0.9), &rgba(0, 0, 0, 0.4), 7.0, 3.0, mtm);
+        // Too long for the card, so it lives here instead.
+        count_chip.setToolTip(Some(&NSString::from_str("Completed pomodoros count toward today; ended early are logged, not counted.")));
+        count.setContentCompressionResistancePriority_forOrientation(751.0, NSLayoutConstraintOrientation::Horizontal);
+        count.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(11.0, unsafe { NSFontWeightMedium })));
+        let header = w::stack(&[&set_time, &heading, &w::spacer(mtm), &count_chip], false, 8.0, mtm);
 
-        let track = w::filled(&ink(0.12), 1.5, mtm);
-        track.widthAnchor().constraintEqualToConstant(PROGRESS_WIDTH).setActive(true);
-        track.heightAnchor().constraintEqualToConstant(3.0).setActive(true);
-        let fill = w::filled(&ink(0.6), 1.5, mtm);
-        track.addSubview(&fill);
-        fill.leadingAnchor().constraintEqualToAnchor(&track.leadingAnchor()).setActive(true);
-        fill.topAnchor().constraintEqualToAnchor(&track.topAnchor()).setActive(true);
-        fill.bottomAnchor().constraintEqualToAnchor(&track.bottomAnchor()).setActive(true);
-        let progress = fill.widthAnchor().constraintEqualToConstant(0.0);
-        progress.setActive(true);
+        let tomatoes: Vec<_> = (0..DAILY_GOAL).map(|_| TomatoView::new(mtm)).collect();
+        let rows: Vec<_> = tomatoes
+            .chunks(DAILY_GOAL / 2)
+            .map(|row| {
+                let views: Vec<&NSView> = row.iter().map(|t| &***t).collect();
+                for view in &views {
+                    fixed_size(view, TOMATO_SIZE, TOMATO_SIZE);
+                }
+                let stack = w::stack(&views, false, 0.0, mtm);
+                stack.setDistribution(NSStackViewDistribution::EqualSpacing);
+                stack
+            })
+            .collect();
+        for row in &rows {
+            row.widthAnchor().constraintEqualToConstant(inner).setActive(true);
+        }
+        let grid = w::stack(&[&rows[0], &rows[1]], true, 4.0, mtm);
 
-        let start = w::icon_button("play.fill", "  Start", 12.0, &white(1.0), self.target(), sel!(toggleTimer:), mtm);
-        start.setImagePosition(NSCellImagePosition::ImageLeading);
-        start.setImageHugsTitle(true);
-        w::paint(&start, &ink(0.38), 15.0);
-        fixed_size(&start, 150.0, 30.0);
-        let check = w::icon_button("checkmark", "", 12.0, &ink(0.7), self.target(), sel!(finishFocus:), mtm);
-        w::paint(&check, &ink(0.12), 15.0);
-        fixed_size(&check, 30.0, 30.0);
-        let buttons = w::stack(&[&start, &check], false, 8.0, mtm);
-        let set_time = w::icon_button("slider.horizontal.3", "", 11.0, &ink(0.55), self.target(), sel!(cycleDuration:), mtm);
-        set_time.setImagePosition(NSCellImagePosition::ImageLeading);
+        let task = w::label("", 11.0, unsafe { NSFontWeightRegular }, &white(0.55), mtm);
+        task.setAlignment(NSTextAlignment::Center);
+        let (badge, badge_pill) = chip(&rgba(CORAL.0, CORAL.1, CORAL.2, 1.0), &rgba(CORAL.0, CORAL.1, CORAL.2, 0.22), 6.0, 3.0, mtm);
+        badge.setFont(Some(&NSFont::systemFontOfSize_weight(11.0, unsafe { NSFontWeightMedium })));
+        let time = w::label("", 36.0, unsafe { NSFontWeightLight }, &white(0.95), mtm);
+        time.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(36.0, unsafe { NSFontWeightLight })));
+        let ends = w::label("", 11.0, unsafe { NSFontWeightRegular }, &white(0.55), mtm);
 
-        let column = w::stack(&[&title, &time, &status, &track, &buttons, &set_time], true, 8.0, mtm);
+        let pause = w::pill("Pause", 28.0, self.target(), sel!(toggleTimer:), mtm);
+        w::style_pill(&pause, &coral, &white(1.0), 14.0);
+        pause.widthAnchor().constraintEqualToConstant((inner - 8.0) / 2.0).setActive(true);
+        let end = w::pill("End", 28.0, self.target(), sel!(endTimer:), mtm);
+        w::style_pill(&end, &rgba(62, 60, 68, 1.0), &white(0.85), 14.0);
+        end.widthAnchor().constraintEqualToConstant((inner - 8.0) / 2.0).setActive(true);
+        let buttons = w::stack(&[&pause, &end], false, 8.0, mtm);
+
+        let column = w::stack(&[&header, &grid, &task, &badge_pill, &time, &ends, &buttons], true, 6.0, mtm);
         column.setAlignment(NSLayoutAttribute::CenterX);
-        column.setCustomSpacing_afterView(14.0, &track);
+        column.setCustomSpacing_afterView(10.0, &header);
+        column.setCustomSpacing_afterView(10.0, &task);
+        column.setCustomSpacing_afterView(0.0, &time);
+        column.setCustomSpacing_afterView(10.0, &ends);
         card.addSubview(&column);
         column.centerXAnchor().constraintEqualToAnchor(&card.centerXAnchor()).setActive(true);
         column.centerYAnchor().constraintEqualToAnchor(&card.centerYAnchor()).setActive(true);
-        title.widthAnchor().constraintLessThanOrEqualToConstant(FOCUS_CARD_WIDTH - 32.0).setActive(true);
+        for view in [&**header, &**grid, &**buttons, &**task] {
+            view.widthAnchor().constraintEqualToConstant(inner).setActive(true);
+        }
 
-        (card, FocusCard { title, time, status, progress, start, set_time })
+        (card, FocusCard { set_time, count, tomatoes, task, badge, time, ends, pause, end })
     }
 
     fn build_task_card(&self, mtm: MainThreadMarker) -> (Retained<NSView>, TaskCard) {
@@ -1449,6 +1552,19 @@ impl Controller {
         input.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
         w::stack(&[&plus, input], false, 6.0, mtm)
     }
+}
+
+/// Rounded label on a tinted fill, returned with the pill that holds it.
+fn chip(color: &NSColor, fill: &NSColor, h_pad: f64, v_pad: f64, mtm: MainThreadMarker) -> (Retained<NSTextField>, Retained<NSView>) {
+    let label = w::label("", 11.0, unsafe { NSFontWeightMedium }, color, mtm);
+    let pill = w::filled(fill, 8.0, mtm);
+    pill.addSubview(&label);
+    label.setTranslatesAutoresizingMaskIntoConstraints(false);
+    label.leadingAnchor().constraintEqualToAnchor_constant(&pill.leadingAnchor(), h_pad).setActive(true);
+    label.trailingAnchor().constraintEqualToAnchor_constant(&pill.trailingAnchor(), -h_pad).setActive(true);
+    label.topAnchor().constraintEqualToAnchor_constant(&pill.topAnchor(), v_pad).setActive(true);
+    label.bottomAnchor().constraintEqualToAnchor_constant(&pill.bottomAnchor(), -v_pad).setActive(true);
+    (label, pill)
 }
 
 /// `m:ss` for a position or duration in seconds.
