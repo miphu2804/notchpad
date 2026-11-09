@@ -12,9 +12,12 @@ mod panel;
 mod pill_button;
 mod pomodoros;
 mod quick_add;
-mod shell;
 mod store;
 mod task_row;
+mod terminal_keys;
+mod terminal_palette;
+mod terminal_session;
+mod terminal_view;
 mod tomato_view;
 mod widgets;
 

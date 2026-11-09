@@ -13,6 +13,8 @@ name = "notchpad-mcp"
 path = "src/bin/notchpad-mcp.rs"
 
 [dependencies]
+alacritty_terminal = "0.26.0"
+dispatch2 = "0.3.1"
 objc2 = "0.6.5"
 objc2-app-kit = "0.3.2"
 objc2-core-graphics = "0.3.2"
