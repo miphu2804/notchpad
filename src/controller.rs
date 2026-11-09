@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Bool};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{
+use objc2_app_kit::{NSClickGestureRecognizer, 
     NSAppearance, NSFontAttributeName, NSForegroundColorAttributeName, NSImageScaling, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
     NSApplication, NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
@@ -94,8 +94,6 @@ struct Column {
 }
 
 struct FocusCard {
-    /// Timer icon tile; cycles the focus length while idle.
-    set_time: Retained<NSButton>,
     count: Retained<NSTextField>,
     tomatoes: Vec<Retained<TomatoView>>,
     task: Retained<NSTextField>,
@@ -522,6 +520,9 @@ define_class!(
 
         #[unsafe(method(cycleDuration:))]
         fn cycle_duration(&self, _sender: &AnyObject) {
+            if self.session_active() {
+                return;
+            }
             let next = (self.ivars().duration_idx.get() + 1) % DURATIONS_MIN.len();
             self.ivars().duration_idx.set(next);
             self.render_focus();
@@ -1068,8 +1069,8 @@ impl Controller {
         }));
         card.end.setEnabled(active);
         card.end.setAlphaValue(if active { 1.0 } else { 0.4 });
-        card.set_time.setEnabled(!active);
-        card.set_time.setToolTip(Some(&NSString::from_str(&format!("Set time · {}m", DURATIONS_MIN[state.duration_idx.get()]))));
+        let hint = (!active).then(|| NSString::from_str("Click to change the length"));
+        card.time.setToolTip(hint.as_deref());
     }
 
     fn render_task_card(&self) {
@@ -1393,7 +1394,7 @@ impl Controller {
         let clips = pill("Clips", sel!(showClips:));
         let music = icon_pill("music.note", sel!(showMusic:));
         let notes = icon_pill("note.text", sel!(showNotes:));
-        let terminal = icon_pill("terminal", sel!(showTerminal:));
+        let terminal = pill("Terminal", sel!(showTerminal:));
         Header {
             quit: w::icon_button("xmark", "", 10.0, &white(0.55), self.target(), sel!(quit:), mtm),
             left: w::stack(&[&workspace, &week], false, 6.0, mtm),
@@ -1414,16 +1415,13 @@ impl Controller {
         let inner = FOCUS_CARD_WIDTH - 28.0;
         let coral = rgba(CORAL.0, CORAL.1, CORAL.2, 1.0);
 
-        let set_time = w::icon_button("timer", "", 12.0, &white(1.0), self.target(), sel!(cycleDuration:), mtm);
-        w::paint(&set_time, &coral, 6.0);
-        fixed_size(&set_time, 22.0, 22.0);
         let heading = w::label("Today's pomodoros", 12.0, unsafe { NSFontWeightSemibold }, &white(0.92), mtm);
         let (count, count_chip) = chip(&white(0.9), &rgba(0, 0, 0, 0.4), 7.0, 3.0, mtm);
         // Too long for the card, so it lives here instead.
         count_chip.setToolTip(Some(&NSString::from_str("Completed pomodoros count toward today; ended early are logged, not counted.")));
         count.setContentCompressionResistancePriority_forOrientation(751.0, NSLayoutConstraintOrientation::Horizontal);
         count.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(11.0, unsafe { NSFontWeightMedium })));
-        let header = w::stack(&[&set_time, &heading, &w::spacer(mtm), &count_chip], false, 8.0, mtm);
+        let header = w::stack(&[&heading, &w::spacer(mtm), &count_chip], false, 8.0, mtm);
 
         let tomatoes: Vec<_> = (0..DAILY_GOAL).map(|_| TomatoView::new(mtm)).collect();
         let rows: Vec<_> = tomatoes
@@ -1449,6 +1447,9 @@ impl Controller {
         badge.setFont(Some(&NSFont::systemFontOfSize_weight(11.0, unsafe { NSFontWeightMedium })));
         let time = w::label("", 36.0, unsafe { NSFontWeightLight }, &white(0.95), mtm);
         time.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(36.0, unsafe { NSFontWeightLight })));
+        // With the timer tile gone, the idle countdown itself is the length control.
+        let cycle = unsafe { NSClickGestureRecognizer::initWithTarget_action(mtm.alloc(), Some(self.target()), Some(sel!(cycleDuration:))) };
+        time.addGestureRecognizer(&cycle);
         let ends = w::label("", 11.0, unsafe { NSFontWeightRegular }, &white(0.55), mtm);
 
         let pause = w::pill("Pause", 28.0, self.target(), sel!(toggleTimer:), mtm);
@@ -1472,7 +1473,7 @@ impl Controller {
             view.widthAnchor().constraintEqualToConstant(inner).setActive(true);
         }
 
-        (card, FocusCard { set_time, count, tomatoes, task, badge, time, ends, pause, end })
+        (card, FocusCard { count, tomatoes, task, badge, time, ends, pause, end })
     }
 
     fn build_task_card(&self, mtm: MainThreadMarker) -> (Retained<NSView>, TaskCard) {
