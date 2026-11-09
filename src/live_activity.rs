@@ -43,6 +43,8 @@ pub struct Activity<'a> {
     pub music: Option<Option<Retained<NSImage>>>,
     /// `mm:ss` and whether it is a break, while a session runs or is paused.
     pub countdown: Option<(&'a str, bool)>,
+    /// The countdown is ASCII-styled text, which wants a fixed-pitch font.
+    pub mono: bool,
 }
 
 impl Activity<'_> {
@@ -144,6 +146,13 @@ impl LiveActivity {
         self.time.setHidden(activity.countdown.is_none());
         if let Some((text, on_break)) = activity.countdown {
             let (r, g, b) = if on_break { BREAK_GREEN } else { CORAL };
+            // Digits keep one width in either font; the ASCII spinner needs the fixed-pitch one to stay in the wing.
+            let font = if activity.mono {
+                NSFont::monospacedSystemFontOfSize_weight(11.0, unsafe { NSFontWeightMedium })
+            } else {
+                NSFont::monospacedDigitSystemFontOfSize_weight(12.0, unsafe { NSFontWeightMedium })
+            };
+            self.time.setFont(Some(&font));
             self.time.setStringValue(&NSString::from_str(text));
             self.time.setTextColor(Some(&rgba(r, g, b, 1.0)));
         }
