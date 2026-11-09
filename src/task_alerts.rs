@@ -2,7 +2,8 @@
 //!
 //! `due_alerts` decides which tasks need a notification (pure, unit-tested); `sync` replaces the
 //! pending `notchpad.task.*` requests with them. Authorization is requested only once a timed task
-//! actually needs it, never at launch.
+//! actually needs it, never at launch. `reminders_between` picks the in-notch reminders the
+//! controller pops open while the app runs.
 
 use block2::RcBlock;
 use objc2::{rc::Retained, runtime::Bool};
@@ -53,6 +54,37 @@ pub fn due_alerts(tasks: &[Task], now_day: &str, now_minutes: u32, days_ahead: i
             })
         })
         .collect()
+}
+
+/// How long before a timed task the notch first reminds of it.
+pub const LEAD_MIN: u32 = 10;
+
+/// Open tasks of `today` whose reminder minute falls in `(after, upto]`: one [`LEAD_MIN`] before
+/// the task's time, one at it. A range rather than a minute, so a reminder whose minute passed
+/// between two checks (a busy main thread, a short sleep) still shows; the caller bounds it.
+pub fn reminders_between(tasks: &[Task], today: &str, after: u32, upto: u32) -> Vec<String> {
+    let mut due: Vec<(u32, String)> = tasks
+        .iter()
+        .filter(|t| !t.done && t.day == today)
+        .filter_map(|t| {
+            let (hour, minute) = clock(&t.time)?;
+            let at = hour * 60 + minute;
+            if after < at && at <= upto {
+                Some((at, format!("{} · due now", t.text)))
+            } else if at >= LEAD_MIN && after < at - LEAD_MIN && at - LEAD_MIN <= upto {
+                Some((at, format!("{} · in {LEAD_MIN} min", t.text)))
+            } else {
+                None
+            }
+        })
+        .collect();
+    due.sort_by_key(|(at, _)| *at);
+    due.into_iter().map(|(_, text)| text).collect()
+}
+
+/// `HH:MM` as minutes past midnight; `None` for empty or malformed text.
+pub fn minutes(text: &str) -> Option<u32> {
+    clock(text).map(|(h, m)| h * 60 + m)
 }
 
 /// Replaces the pending task notifications with those `tasks` need. Silently does nothing in an
@@ -211,6 +243,39 @@ mod tests {
         assert_eq!(a[0].id, b[0].id);
         assert_ne!(a[0].id, c[0].id);
         assert!(a[0].id.starts_with(ID_PREFIX));
+    }
+
+    #[test]
+    fn reminds_ahead_and_at_the_time_once() {
+        let mut done = task("2026-11-09", "18:00", "done");
+        done.done = true;
+        let tasks = [
+            task("2026-11-09", "18:00", "gym"),
+            task("2026-11-10", "18:00", "tomorrow"),
+            task("2026-11-09", "", "untimed"),
+            task("", "18:00", "inbox"),
+            done,
+        ];
+        let at = |after, upto| reminders_between(&tasks, "2026-11-09", after, upto);
+        assert!(at(17 * 60 + 48, 17 * 60 + 49).is_empty());
+        assert_eq!(at(17 * 60 + 49, 17 * 60 + 50), ["gym · in 10 min"]);
+        assert!(at(17 * 60 + 50, 17 * 60 + 59).is_empty());
+        assert_eq!(at(17 * 60 + 59, 18 * 60), ["gym · due now"]);
+        assert!(at(18 * 60, 18 * 60 + 1).is_empty());
+    }
+
+    #[test]
+    fn a_gap_between_checks_keeps_only_the_latest_per_task_in_time_order() {
+        let tasks = [task("2026-11-09", "09:05", "b"), task("2026-11-09", "09:00", "a")];
+        assert_eq!(reminders_between(&tasks, "2026-11-09", 8 * 60 + 49, 9 * 60), ["a · due now", "b · in 10 min"]);
+    }
+
+    #[test]
+    fn early_morning_task_has_no_lead_reminder_from_yesterday() {
+        let tasks = [task("2026-11-09", "00:05", "early")];
+        assert_eq!(reminders_between(&tasks, "2026-11-09", 0, 5), ["early · due now"]);
+        assert_eq!(minutes("00:05"), Some(5));
+        assert_eq!(minutes("bad"), None);
     }
 
     #[test]

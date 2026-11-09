@@ -1,4 +1,4 @@
-//! The two-note bell that marks the end of a focus session or a break. It is synthesised
+//! The two-note bell that marks the end of a focus session or a break, or a task reminder. It is synthesised
 //! into an in-memory WAV, so the app ships no sound files.
 
 use std::f64::consts::TAU;
@@ -21,6 +21,8 @@ pub enum Chime {
     FocusEnd,
     /// Falling G5 → D5: the break is over, time to settle back in.
     BreakEnd,
+    /// A5 twice: a timed task is coming up or due.
+    Reminder,
 }
 
 impl Chime {
@@ -29,6 +31,7 @@ impl Chime {
         match self {
             Chime::FocusEnd => [(587.33, 0.0), (880.0, 0.2)],
             Chime::BreakEnd => [(783.99, 0.0), (587.33, 0.2)],
+            Chime::Reminder => [(880.0, 0.0), (880.0, 0.18)],
         }
     }
 
