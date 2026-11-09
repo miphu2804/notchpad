@@ -1,0 +1,225 @@
+//! macOS notifications for tasks scheduled at a time of day.
+//!
+//! `due_alerts` decides which tasks need a notification (pure, unit-tested); `sync` replaces the
+//! pending `notchpad.task.*` requests with them. Authorization is requested only once a timed task
+//! actually needs it, never at launch.
+
+use block2::RcBlock;
+use objc2::{rc::Retained, runtime::Bool};
+use objc2_foundation::{NSArray, NSBundle, NSDateComponents, NSError, NSString};
+use objc2_user_notifications::{
+    UNAuthorizationOptions, UNAuthorizationStatus, UNCalendarNotificationTrigger, UNMutableNotificationContent, UNNotificationRequest,
+    UNNotificationSettings, UNNotificationSound, UNUserNotificationCenter,
+};
+use std::ptr::NonNull;
+
+use crate::{days, store::Task};
+
+const ID_PREFIX: &str = "notchpad.task.";
+/// Only the next week is scheduled; every save re-syncs, so later tasks join the window as it moves.
+const DAYS_AHEAD: i64 = 7;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Alert {
+    pub id: String,
+    pub day: String,
+    pub hour: u32,
+    pub minute: u32,
+    pub title: String,
+    pub body: String,
+}
+
+/// Undone tasks with a `day` and a `time` that is still ahead, from now until `days_ahead` days out.
+pub fn due_alerts(tasks: &[Task], now_day: &str, now_minutes: u32, days_ahead: i64) -> Vec<Alert> {
+    let Some(today) = day_number(now_day) else { return Vec::new() };
+    tasks
+        .iter()
+        .filter(|t| !t.done)
+        .filter_map(|t| {
+            let offset = day_number(&t.day)? - today;
+            let (hour, minute) = clock(&t.time)?;
+            let ahead = offset > 0 || (offset == 0 && hour * 60 + minute > now_minutes);
+            if !ahead || offset > days_ahead {
+                return None;
+            }
+            let project = if t.project.is_empty() { String::new() } else { format!(" · #{}", t.project) };
+            Some(Alert {
+                id: format!("{ID_PREFIX}{:016x}", fnv1a(&format!("{}\t{}\t{}", t.day, t.time, t.text))),
+                day: t.day.clone(),
+                hour,
+                minute,
+                title: t.text.clone(),
+                body: format!("Scheduled for {}{project}", t.time),
+            })
+        })
+        .collect()
+}
+
+/// Replaces the pending task notifications with those `tasks` need. Silently does nothing in an
+/// unbundled binary, where `UNUserNotificationCenter` would throw.
+pub fn sync(tasks: &[Task]) {
+    if NSBundle::mainBundle().bundleIdentifier().is_none() {
+        return;
+    }
+    let now = days::stamp();
+    let (now_day, clock_now) = now.split_once(' ').unwrap_or_default();
+    let now_minutes = clock(clock_now).map_or(0, |(h, m)| h * 60 + m);
+    let alerts = due_alerts(tasks, now_day, now_minutes, DAYS_AHEAD);
+
+    let center = UNUserNotificationCenter::currentNotificationCenter();
+    let handler = RcBlock::new({
+        let center = center.clone();
+        move |settings: NonNull<UNNotificationSettings>| {
+            let status = unsafe { settings.as_ref() }.authorizationStatus();
+            if status == UNAuthorizationStatus::NotDetermined && !alerts.is_empty() {
+                request_then_schedule(&center, alerts.clone());
+            } else if matches!(status, UNAuthorizationStatus::Authorized | UNAuthorizationStatus::Provisional | UNAuthorizationStatus::Ephemeral) {
+                schedule(&center, &alerts);
+            }
+        }
+    });
+    center.getNotificationSettingsWithCompletionHandler(&handler);
+}
+
+fn request_then_schedule(center: &Retained<UNUserNotificationCenter>, alerts: Vec<Alert>) {
+    let done = RcBlock::new({
+        let center = center.clone();
+        move |granted: Bool, _error: *mut NSError| {
+            if granted.as_bool() {
+                schedule(&center, &alerts);
+            }
+        }
+    });
+    center.requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound, &done);
+}
+
+/// Drops every pending task request, then adds `alerts`; ids are stable, so this is idempotent.
+fn schedule(center: &Retained<UNUserNotificationCenter>, alerts: &[Alert]) {
+    let alerts = alerts.to_vec();
+    let pending = RcBlock::new({
+        let center = center.clone();
+        move |requests: NonNull<NSArray<UNNotificationRequest>>| {
+            let stale: Vec<Retained<NSString>> = unsafe { requests.as_ref() }
+                .iter()
+                .map(|r| r.identifier())
+                .filter(|id| id.to_string().starts_with(ID_PREFIX))
+                .collect();
+            center.removePendingNotificationRequestsWithIdentifiers(&NSArray::from_retained_slice(&stale));
+            for alert in &alerts {
+                add(&center, alert);
+            }
+        }
+    });
+    center.getPendingNotificationRequestsWithCompletionHandler(&pending);
+}
+
+fn add(center: &UNUserNotificationCenter, alert: &Alert) {
+    let content = UNMutableNotificationContent::new();
+    content.setTitle(&NSString::from_str(&alert.title));
+    content.setBody(&NSString::from_str(&alert.body));
+    content.setSound(Some(&UNNotificationSound::defaultSound()));
+
+    // Calendar components, not a time interval, so a time-zone change still fires at wall-clock time.
+    let when = NSDateComponents::new();
+    let mut ymd = alert.day.split('-').filter_map(|p| p.parse::<isize>().ok());
+    when.setYear(ymd.next().unwrap_or(0));
+    when.setMonth(ymd.next().unwrap_or(0));
+    when.setDay(ymd.next().unwrap_or(0));
+    when.setHour(alert.hour as isize);
+    when.setMinute(alert.minute as isize);
+    let trigger = UNCalendarNotificationTrigger::triggerWithDateMatchingComponents_repeats(&when, false);
+
+    let request = UNNotificationRequest::requestWithIdentifier_content_trigger(&NSString::from_str(&alert.id), &content, Some(&trigger));
+    center.addNotificationRequest_withCompletionHandler(&request, None);
+}
+
+/// `HH:MM` as (hour, minute); `None` for empty or malformed text.
+fn clock(text: &str) -> Option<(u32, u32)> {
+    let (h, m) = text.split_once(':')?;
+    let (h, m) = (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?);
+    (h < 24 && m < 60).then_some((h, m))
+}
+
+/// Days since 1970-01-01 of a `YYYY-MM-DD` key (Howard Hinnant's civil-date algorithm); `None` if malformed.
+fn day_number(key: &str) -> Option<i64> {
+    let mut parts = key.split('-').map(|p| p.parse::<i64>().ok());
+    let (y, m, d) = (parts.next()??, parts.next()??, parts.next()??);
+    if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+/// FNV-1a: unlike `DefaultHasher` it is specified, so ids survive toolchain upgrades.
+fn fnv1a(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(day: &str, time: &str, text: &str) -> Task {
+        Task { day: day.into(), time: time.into(), text: text.into(), ..Task::default() }
+    }
+
+    fn ids(tasks: &[Task], now_minutes: u32) -> Vec<String> {
+        due_alerts(tasks, "2026-11-09", now_minutes, 7).into_iter().map(|a| a.title).collect()
+    }
+
+    #[test]
+    fn skips_past_done_inbox_and_untimed() {
+        let mut done = task("2026-11-10", "09:00", "done");
+        done.done = true;
+        let tasks = [
+            task("2026-11-08", "09:00", "yesterday"),
+            task("2026-11-09", "08:00", "earlier today"),
+            task("2026-11-09", "10:00", "exactly now"),
+            task("", "09:00", "inbox"),
+            task("2026-11-10", "", "no time"),
+            done,
+        ];
+        assert!(ids(&tasks, 600).is_empty());
+    }
+
+    #[test]
+    fn keeps_later_today_and_window_edge() {
+        let tasks = [
+            task("2026-11-09", "18:00", "today"),
+            task("2026-11-16", "00:00", "day seven"),
+            task("2026-11-17", "09:00", "day eight"),
+        ];
+        assert_eq!(ids(&tasks, 600), ["today", "day seven"]);
+    }
+
+    #[test]
+    fn window_crosses_month_and_year() {
+        let alerts = due_alerts(&[task("2027-01-03", "09:00", "x")], "2026-12-30", 0, 7);
+        assert_eq!(alerts.len(), 1);
+    }
+
+    #[test]
+    fn ids_are_stable_and_distinct() {
+        let a = due_alerts(&[task("2026-11-10", "09:00", "gym")], "2026-11-09", 0, 7);
+        let b = due_alerts(&[task("2026-11-10", "09:00", "gym")], "2026-11-09", 0, 7);
+        let c = due_alerts(&[task("2026-11-10", "09:01", "gym")], "2026-11-09", 0, 7);
+        assert_eq!(a[0].id, b[0].id);
+        assert_ne!(a[0].id, c[0].id);
+        assert!(a[0].id.starts_with(ID_PREFIX));
+    }
+
+    #[test]
+    fn body_names_time_and_project() {
+        let mut t = task("2026-11-10", "18:00", "gym");
+        assert_eq!(due_alerts(std::slice::from_ref(&t), "2026-11-09", 0, 7)[0].body, "Scheduled for 18:00");
+        t.project = "Health".into();
+        let a = &due_alerts(&[t], "2026-11-09", 0, 7)[0];
+        assert_eq!(a.body, "Scheduled for 18:00 · #Health");
+        assert_eq!((a.hour, a.minute), (18, 0));
+    }
+}

@@ -15,6 +15,7 @@ mod pill_button;
 mod pomodoros;
 mod quick_add;
 mod store;
+mod task_alerts;
 mod task_row;
 mod terminal_keys;
 mod terminal_palette;

@@ -27,6 +27,7 @@ use crate::calendar::{self, Access, Calendar, Event, Reminder};
 use crate::clip_card::{self, ClipCard};
 use crate::clips::ClipHistory;
 use crate::days;
+use crate::task_alerts;
 use crate::drop_column::DropColumn;
 use crate::list_row::{self, ListRow};
 use crate::live_activity::{Activity, LiveActivity, WING};
@@ -797,6 +798,7 @@ impl Controller {
             eprintln!("notchpad: could not save tasks: {err}");
         }
         self.ivars().seen_mtime.set(store::modified());
+        task_alerts::sync(&self.ivars().tasks.borrow());
     }
 
     /// Fetches the Week tab's days; a no-op returning nothing until access is granted.
