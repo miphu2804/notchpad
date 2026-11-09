@@ -1,65 +1,122 @@
 # Notchpad
 
-A small, native macOS app that lives in the notch. It holds today's tasks, a pomodoro timer and a terminal, and shows what's playing. Hover the notch (or press ⌥N) to open it.
+A small native macOS app that lives in the MacBook notch: today's tasks, a focus timer and quick capture, one hover away.
 
-[![Install for Mac](https://img.shields.io/badge/Install_for_Mac-Download-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/miphu2804/notchpad/releases/latest/download/Notchpad.zip)
-
-Apple Silicon, macOS 14 or later. It is written in Rust with AppKit, runs at 0% CPU while idle, and makes no network requests unless you connect Linear.
+![Platform: macOS 14+](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey)
 
 ## Features
 
-- **Workspace.** Today's tasks with quick add (`gym 6pm !high #health 45m tomorrow`), sorted by priority. Typing `!`, `#` or `/` shows completions for priorities, projects and words; ↑↓ choose and Tab takes one. ▶ makes a task the pomodoro's focus. Pick a priority from the coloured dots beside the input or by right-clicking a task. A deleted task can be brought back with Undo for a few seconds. A pomodoro card shows a large progress ring, four pixel tomatoes for the current cycle (the running one ripens green → orange → red), today's totals, a stopwatch and +5 min.
-- **Collapsed notch.** Shows album art with a moving waveform while music plays, or the focus countdown.
-- **Playing.** Now playing from any app (Spotify, Music, YouTube in a browser), with playback controls.
-- **Clips.** A short clipboard history.
-- **Terminal.** A real shell in the notch.
-- **Alerts.** When a focus session or a break ends, and before and at a timed task's time, a small card drops out of the notch with a chime. A task reminder has **Snooze 5 min** and **Done**; clicking the card dismisses it. The card never takes the keyboard from the app you're in. Timed tasks also get a system notification, except when the notch card is about to show that same reminder.
-- **Focus settings.** Settings › Focus sets the focus length, short and long breaks, how early task reminders come (or turns them off) and whether alerts chime.
-- **Insights.** Open directly from Settings › Sections › Insights › Open, or right-click the notch header › Open Insights. A dashboard tab (not in the notch) for the last weeks: active days, streaks, focus time with the week's tasks and daily bars, month rings of petals (idle days stay dots), and a moon calendar for the month.
-- **Claude.** Settings › Integrations › Claude adds the `notchpad` MCP server to Claude Code (runs `claude mcp add --scope user`) or to Claude Desktop (merges into `claude_desktop_config.json`, keeping a `.bak`; restart Claude Desktop afterwards). A config that is not valid JSON is never overwritten.
-- **Calendars.** Turn on **Show calendar events** and today's events appear read-only above your tasks. They come from the macOS calendars through EventKit, so add a Google account in System Settings › Internet Accounts; Notion Calendar events arrive through that same Google calendar. macOS asks for calendar access only when you turn the switch on, and nothing is ever written to a calendar.
-- **Linear.** Click **Connect** under Settings › Integrations › Linear to authorize in your browser using OAuth PKCE (requires the app's registered public client ID; see below). Your open assigned issues become tasks (`linear:<identifier>`) when the app opens and every 10 minutes, placed on their due date or today; completing one in Notchpad moves the issue to its team's completed state. Tokens are kept only in the macOS Keychain and refreshed in the background; credentials go to `curl` on stdin. Cancel stops a pending authorization; Disconnect removes credentials. A build without a client ID shows a field for a personal API key instead (Linear › Settings › Security & access), checked against Linear before it is saved to the Keychain. Existing personal API keys remain readable until you disconnect.
-- **More.** A JSON backup export, a dashboard window, and today's tasks copied as a Markdown checklist. Right-click the header for these.
+- Today's tasks with a one-line quick add, sorted by priority, with undo for deletes.
+- Focus timer (pomodoro) tied to a task, with a progress ring and daily totals.
+- Alerts that drop out of the notch when a focus session or break ends, and before a timed task, with Snooze and Done.
+- Insights dashboard: active days, streaks, focus time and a monthly calendar.
+- Clips (short clipboard history), a built-in terminal, and Now Playing with playback controls.
+- Integrations: Claude (MCP), Calendar, Linear, Apple Reminders and Shortcuts. See [Integrations](#integrations).
+
+## Requirements
+
+- macOS 14 or later.
+- A MacBook with a notch. On a display without one, Notchpad draws its own notch at the top of the screen.
+- To build from source: a Rust toolchain (edition 2024) and the Xcode command line tools.
 
 ## Install
 
-1. Download [Notchpad.zip](https://github.com/miphu2804/notchpad/releases/latest/download/Notchpad.zip), unzip it, and drag **Notchpad.app** into **Applications**.
-2. Open Notchpad. The app is not notarized, so macOS blocks the first launch: open **System Settings › Privacy & Security** and click **Open Anyway**. Alternatively, run:
+**Release.** Download [Notchpad.zip](https://github.com/miphu2804/notchpad/releases/latest/download/Notchpad.zip), unzip it, and drag **Notchpad.app** into **Applications**. The app is not notarized, so macOS blocks the first launch: open **System Settings › Privacy & Security** and click **Open Anyway**, or run:
 
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/Notchpad.app
-   ```
+```bash
+xattr -dr com.apple.quarantine /Applications/Notchpad.app
+```
 
-3. To start Notchpad at login, turn on **Settings › General › Open at login**.
-
-Quit with the ✕ in the notch. Data lives in `~/Library/Application Support/notchpad/` as plain text.
-
-## Build from source
-
-Building needs Rust and the Xcode command line tools.
+**From source.**
 
 ```bash
 ./macos/bundle.sh --install
 ```
 
-This builds `Notchpad.app` (ad-hoc signed) and copies it to `/Applications`. `cargo build --release` alone produces `notchpad` (the app) and `notchpad-mcp` (a stdio MCP server over the same task file).
+This builds `Notchpad.app` and replaces `/Applications/Notchpad.app`. It is signed with your first Apple Development identity if one exists, otherwise ad hoc; ad-hoc builds make macOS ask for permissions again after each rebuild.
 
-### Linear OAuth configuration
+To start at login, turn on **Settings › General › Open at login**.
 
-Register a public OAuth application in Linear with the exact redirect URI `http://127.0.0.1:53682/oauth/callback`, then build with its public client ID:
+## Usage
+
+Hover the notch, or press Option-N, to open it. Quit with the ✕ in the notch. Right-click the header for the JSON backup export, Insights and copying today's tasks as a Markdown checklist.
+
+Quick add parses one line; recognised words set fields and are removed from the title:
+
+| Syntax | Meaning |
+|---|---|
+| `5pm`, `17:30`, `5:30pm`, `9h30` | time |
+| `!high` `!med` `!low` (or `!!!` `!!` `!`) | priority |
+| `#project` | project |
+| `30m`, `45min`, `~1h`, `~1.5h` | time estimate |
+| `today`, `tomorrow`, `tmr` | day (default: today) |
+
+Example: `gym 6pm !high #health 45m tomorrow`. Typing `!`, `#` or `/` shows completions; Up/Down choose and Tab accepts.
+
+## Integrations
+
+### Claude (Code and Desktop)
+
+The bundled MCP server `notchpad-mcp` lets Claude read and manage your tasks (`list_tasks`, `add_task`, `complete_task`, `move_task`, `update_task`, `plan_day`). In **Settings › Integrations › Claude**, use the Add button for Claude Code (runs `claude mcp add --scope user`) or Claude Desktop (merges into `claude_desktop_config.json`, keeping a `.bak`; restart Claude Desktop afterwards). A config that is not valid JSON is never overwritten.
+
+Tasks live in `~/Library/Application Support/notchpad/tasks.txt`, one tab-separated line per task; the app reloads it within about 2 seconds of an external write. Tasks added through MCP without a day go to the Inbox, which the notch does not show; `move_task` or `plan_day` brings them into today.
+
+### Calendar
+
+Turn on **Show calendar events** to see today's events, read-only, above your tasks. Events come from the macOS calendars (EventKit), so add Google or other accounts in System Settings › Internet Accounts. macOS asks for access only when you enable the switch; Notchpad never writes to a calendar.
+
+### Linear
+
+Under **Settings › Integrations › Linear**, either:
+
+- **Connect** with OAuth (browser authorization), or
+- paste a personal API key from Linear › Settings › Security & access (shown when the build has no OAuth client ID).
+
+Your open assigned issues become tasks on their due date (or today), refreshed when the app opens and every 10 minutes. Completing one in Notchpad moves the issue to its team's completed state. Credentials are stored in the macOS Keychain.
+
+### Apple Reminders
+
+Opt-in: turn on **Sync tasks with Reminders** in **Settings › Integrations**. Tasks sync two-way with a Reminders list named "Notchpad", so they reach iPhone and Apple Watch through iCloud.
+
+- Only local tasks sync; Linear tasks keep their own sync.
+- Deleting a task on either side deletes it on the other.
+- A completion made on the phone is kept.
+
+### Shortcuts and automation
+
+`notchpad-mcp add` adds a task from the command line using the quick-add syntax. It goes to today unless the line names another day.
 
 ```bash
-NOTCHPAD_LINEAR_CLIENT_ID='<registered-client-id>' ./macos/bundle.sh --install
+/Applications/Notchpad.app/Contents/MacOS/notchpad-mcp add "Pay rent 5pm !high #home"
 ```
 
-Do not embed a client secret. Without a client ID, Settings reports that OAuth is not configured; Connect cannot start authentication. Local callback, cancellation, PKCE and refresh tests do not prove a real provider login. A registered client and an end-to-end login are still required.
+In the Shortcuts app, add a **Run Shell Script** action with that command, and pass your text as an argument (or build the string with a Text action first). Combined with a personal automation, this turns incoming messages into tasks. On macOS Tahoe, create an automation triggered by **Email** or **Message**, filter on the sender or subject (for example, your bank's transaction emails), then run a shell script that adds a task such as `Review transaction #finance`. macOS has no generic "any notification" trigger, so automations are limited to the triggers Shortcuts offers.
 
-## Task sync (Notion, Linear, Google Calendar)
+## Privacy
 
-Claude can sync Notion, Linear and Google Calendar: it uses the service's MCP connector together with the `notchpad` MCP server. The app itself only talks to Linear when you connect it in Settings (see Features); everything else on this page runs through Claude.
+Everything stays on your Mac, in `~/Library/Application Support/notchpad/` as plain text. Notchpad makes network requests only to Linear, and only if you connect it. Calendar, Reminders and Music/Spotify access are requested from macOS only when the feature is used.
 
-- **Store.** `~/Library/Application Support/notchpad/tasks.txt`, one task per line, tab separated. `ext` is the stable external id (`linear:ENG-12`, `notion:<page-id>`, `gcal:<event-id>`). The app reloads the file within about 2 s of an external write.
-- **Server.** Register it with Settings › Integrations › Claude, or by hand: `claude mcp add --scope user notchpad -- $PWD/target/release/notchpad-mcp`. Tools: `list_tasks`, `add_task` (upserts when `ext` is given), `complete_task`, `move_task`, `update_task`, `plan_day`.
-- **Inbox.** A task without a day sits in the Inbox, which the notch does not show. `add_task` puts tasks there unless given a day; `move_task` or `plan_day` brings them into today.
-- **Conflict rule.** A task done on either side stays done. The `day` set in Notchpad wins over the service's date. The title comes from the service. Tasks are deduplicated by `ext`, so re-running never creates duplicates.
-- **Run it.** Authorize the connectors in Claude Code (`/mcp`), then run `/sync-tasks` (`.claude/commands/sync-tasks.md`).
+## Development
+
+```bash
+cargo build --release   # produces notchpad (app) and notchpad-mcp (MCP server)
+cargo test
+```
+
+Layout of `src/`:
+
+- `main.rs`, `controller.rs`, `panel.rs`: app entry, notch window and event handling.
+- `store.rs`, `days.rs`, `quick_add.rs`: task file, day keys and the quick-add parser.
+- `settings*.rs`, `insights*.rs`, `calendar.rs`, `linear.rs`, `claude_mcp.rs`: settings UI and integrations.
+- `terminal_*.rs`, `now_playing.rs`, `clips.rs`: terminal, Now Playing and clips.
+- `bin/notchpad-mcp.rs`: MCP server and the `add` command.
+
+To embed a Linear OAuth client ID, register a public application in Linear with the redirect URI `http://127.0.0.1:53682/oauth/callback` and build with `NOTCHPAD_LINEAR_CLIENT_ID='<client-id>' ./macos/bundle.sh --install`. Never embed a client secret.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
+## License
+
+No license file is included yet; all rights are reserved until the maintainer adds one.
