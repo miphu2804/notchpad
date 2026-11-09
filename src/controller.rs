@@ -23,7 +23,7 @@ use objc2_event_kit::EKEventStoreChangedNotification;
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSOperationQueue, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 
-use crate::calendar::{self, Access, Calendar, Event};
+use crate::calendar::{self, Access, Calendar, Event, Reminder};
 use crate::clip_card::{self, ClipCard};
 use crate::clips::ClipHistory;
 use crate::days;
@@ -58,6 +58,8 @@ const MAX_CARD_ROWS: usize = 5;
 const MAX_COLUMN_ROWS: usize = 6;
 /// Calendar rows per day before "+N more".
 const MAX_DAY_EVENTS: usize = 4;
+/// Reminder rows per day before "+N more".
+const MAX_DAY_REMINDERS: usize = 3;
 /// The Week tab shows today (0) and tomorrow (1).
 const WEEK_LAST_OFFSET: i64 = 1;
 /// Gap between Today rows; a hairline is drawn in its middle.
@@ -210,6 +212,8 @@ pub struct State {
     calendar: Calendar,
     /// Today and tomorrow, refetched on tab switch, panel open and `EKEventStoreChanged`.
     events: RefCell<Vec<Event>>,
+    /// Incomplete reminders due by tomorrow, refetched together with `events`.
+    reminders: RefCell<Vec<Reminder>>,
     now_playing: RefCell<NowPlaying>,
     /// Wing width the panel was last told to grow by; zero when nothing is live.
     wings: Cell<f64>,
@@ -354,6 +358,18 @@ define_class!(
         #[unsafe(method(requestCalendar:))]
         fn request_calendar(&self, _sender: &AnyObject) {
             self.ivars().calendar.request_access();
+        }
+
+        #[unsafe(method(requestReminders:))]
+        fn request_reminders(&self, _sender: &AnyObject) {
+            self.ivars().calendar.request_reminders_access();
+        }
+
+        #[unsafe(method(completeReminder:))]
+        fn complete_reminder(&self, sender: &NSButton) {
+            if let Some(reminder) = self.ivars().reminders.borrow().get(sender.tag() as usize) {
+                self.ivars().calendar.complete(&reminder.id);
+            }
         }
 
         #[unsafe(method(showClips:))]
@@ -589,6 +605,15 @@ impl Controller {
             center.addObserverForName_object_queue_usingBlock(
                 Some(EKEventStoreChangedNotification), None, Some(&NSOperationQueue::mainQueue()), &changed,
             );
+            let me = Weak::new(&*this);
+            let fetched = RcBlock::new(move |_: NonNull<NSNotification>| {
+                if let Some(controller) = me.load() {
+                    controller.show_fetched_reminders();
+                }
+            });
+            center.addObserverForName_object_queue_usingBlock(
+                Some(&NSString::from_str(calendar::REMINDERS_FETCHED)), None, Some(&NSOperationQueue::mainQueue()), &fetched,
+            );
             center.addObserver_selector_name_object(this.target(), sel!(notesChanged:), Some(NSTextDidChangeNotification), Some(text));
             center.addObserver_selector_name_object(this.target(), sel!(notesEditingEnded:), Some(NSTextDidEndEditingNotification), Some(text));
             let terminal: &AnyObject = this.ui().terminal.view.as_ref();
@@ -774,7 +799,16 @@ impl Controller {
     /// Fetches the Week tab's days; a no-op returning nothing until access is granted.
     fn reload_events(&self) {
         *self.ivars().events.borrow_mut() = self.ivars().calendar.events(WEEK_LAST_OFFSET);
+        self.ivars().calendar.fetch_reminders();
         self.render_week();
+    }
+
+    /// Called on the main queue when an asynchronous reminders fetch has finished.
+    fn show_fetched_reminders(&self) {
+        if let Some(reminders) = self.ivars().calendar.take_fetched() {
+            *self.ivars().reminders.borrow_mut() = reminders;
+            self.render_week();
+        }
     }
 
     fn refresh(&self) {
@@ -1085,6 +1119,13 @@ impl Controller {
                 ui.events.addArrangedSubview(&pill);
                 lines = 2;
             }
+            if calendar::reminders_access() == Access::NotDetermined {
+                let pill = w::pill("Show reminders", 22.0, self.target(), sel!(requestReminders:), mtm);
+                w::fit_pill(&pill, 10.0);
+                w::style_pill(&pill, &white(0.1), &white(0.8), 11.0);
+                ui.events.addArrangedSubview(&pill);
+                lines += 2;
+            }
         } else {
             let day = days::key(if column == TODAY { 0 } else { 1 });
             let events = self.ivars().events.borrow();
@@ -1096,9 +1137,37 @@ impl Controller {
                 add_full_width(&ui.events, &w::label(&format!("+{more} more"), 12.0, unsafe { NSFontWeightRegular }, &white(0.4), mtm), None);
             }
             lines = rows.len() + usize::from(more > 0);
+            let reminders = self.ivars().reminders.borrow();
+            let (rows, more) = calendar::reminder_rows(&reminders, &day, MAX_DAY_REMINDERS);
+            for reminder in &rows {
+                let index = reminders.iter().position(|r| std::ptr::eq(r, *reminder)).unwrap_or_default();
+                add_full_width(&ui.events, &self.reminder_row(index, reminder), None);
+            }
+            if more > 0 {
+                add_full_width(&ui.events, &w::label(&format!("+{more} more"), 12.0, unsafe { NSFontWeightRegular }, &white(0.4), mtm), None);
+            }
+            lines += rows.len() + usize::from(more > 0);
         }
         ui.events.setHidden(lines == 0);
         lines
+    }
+
+    /// Hollow circle in the list's colour (click completes), the title on one line, then the due time.
+    fn reminder_row(&self, index: usize, reminder: &Reminder) -> Retained<NSView> {
+        let mtm = self.mtm();
+        let (r, g, b) = reminder.color;
+        let circle = w::icon_button("circle", "", 10.0, &rgba(r, g, b, 1.0), self.target(), sel!(completeReminder:), mtm);
+        circle.setTag(index as isize);
+        let title = w::label(&reminder.title, 12.0, unsafe { NSFontWeightRegular }, &white(0.8), mtm);
+        let mut views: Vec<&NSView> = vec![&circle, &title];
+        let when;
+        if let Some(m) = reminder.due_minutes {
+            // Soft red marks a reminder whose time has already passed.
+            let color = if reminder.overdue { rgba(255, 120, 120, 1.0) } else { white(0.5) };
+            when = w::label(&format!("{:02}:{:02}", m / 60, m % 60), 11.0, unsafe { NSFontWeightMedium }, &color, mtm);
+            views.push(&when);
+        }
+        w::stack(&views, false, 6.0, mtm).into_super()
     }
 
     fn week_row(&self, index: usize, task: &Task) -> Retained<NSView> {
