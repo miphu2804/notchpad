@@ -104,6 +104,15 @@ pub fn start_oauth() -> Result<OAuthAttempt, String> {
     Ok(OAuthAttempt { receiver, cancel })
 }
 
+/// Opens Linear's page for creating a personal API key in the default browser.
+pub fn open_key_page() -> Result<(), String> {
+    Command::new("open")
+        .arg("https://linear.app/settings/account/security")
+        .spawn()
+        .map(drop)
+        .map_err(|err| format!("Could not open Linear in the default browser: {err}"))
+}
+
 /// Connects with a personal API key, the way in when no OAuth client is configured. The key is
 /// checked against Linear first, so a typo is caught on the spot, then kept only in the Keychain.
 pub fn connect_key(key: &str) -> Result<(), String> {
