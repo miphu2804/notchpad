@@ -9,8 +9,8 @@ A small native macOS app that lives in the MacBook notch: today's tasks, a focus
 - Today's tasks with a one-line quick add, sorted by priority, with undo for deletes.
 - Focus timer (pomodoro) tied to a task, with a progress ring and daily totals.
 - Alerts that drop out of the notch when a focus session or break ends, and before a timed task, with Snooze and Done.
-- Insights dashboard: active days, streaks, focus time and a monthly calendar.
-- Clips (short clipboard history), a built-in terminal, and Now Playing with playback controls.
+- Insights dashboard: streaks and focus totals, month rings of completed tasks, and a moon calendar of focus days.
+- Clips (clipboard history and fresh screenshots), a built-in terminal, and Now Playing with playback controls.
 - Integrations: Claude (MCP), Calendar, Linear, Apple Reminders and Shortcuts. See [Integrations](#integrations).
 
 ## Requirements
@@ -78,9 +78,11 @@ Your open assigned issues become tasks on their due date (or today), refreshed w
 
 Opt-in: turn on **Sync tasks with Reminders** in **Settings › Integrations**. Tasks sync two-way with a Reminders list named "Notchpad", so they reach iPhone and Apple Watch through iCloud.
 
+- Title, day, time, priority and completion sync; Inbox tasks become reminders without a due date.
 - Only local tasks sync; Linear tasks keep their own sync.
-- Deleting a task on either side deletes it on the other.
-- A completion made on the phone is kept.
+- Deleting an open task on either side deletes it on the other. Clearing completed reminders on the phone keeps the done tasks in Notchpad's history.
+- When both sides changed, Notchpad's edit wins, except that a completion made on the phone is kept.
+- macOS asks for Reminders access only when you turn the switch on. Changes on the phone arrive within about 30 seconds.
 
 ### Shortcuts and automation
 
@@ -90,7 +92,7 @@ Opt-in: turn on **Sync tasks with Reminders** in **Settings › Integrations**. 
 /Applications/Notchpad.app/Contents/MacOS/notchpad-mcp add "Pay rent 5pm !high #home"
 ```
 
-In the Shortcuts app, add a **Run Shell Script** action with that command, and pass your text as an argument (or build the string with a Text action first). Combined with a personal automation, this turns incoming messages into tasks. On macOS Tahoe, create an automation triggered by **Email** or **Message**, filter on the sender or subject (for example, your bank's transaction emails), then run a shell script that adds a task such as `Review transaction #finance`. macOS has no generic "any notification" trigger, so automations are limited to the triggers Shortcuts offers.
+In the Shortcuts app, turn on **Settings › Advanced › Allow Running Scripts**, then add a **Run Shell Script** action with that command, and pass your text as an argument (or build the string with a Text action first). Combined with a personal automation, this turns incoming messages into tasks. On macOS Tahoe, create an automation triggered by **Email** or **Message**, filter on the sender or subject (for example, your bank's transaction emails), then run a shell script that adds a task such as `Review transaction #finance`. macOS has no generic "any notification" trigger, so automations are limited to the triggers Shortcuts offers.
 
 ## Privacy
 
