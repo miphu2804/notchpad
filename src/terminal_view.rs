@@ -469,7 +469,17 @@ impl TerminalView {
                     let font = if cell.bold { &self.ivars().bold_font } else { &self.ivars().font };
                     Self::attributes(font, &ns_color(cell.fg))
                 });
-                draw_text(&cell.ch.to_string(), at, style);
+                if let Some((alpha, parts)) = block_shape(cell.ch) {
+                    ns_color(cell.fg).colorWithAlphaComponent(alpha).setFill();
+                    for [x, y, w, h] in parts {
+                        // Snapped to whole points, neighbouring cells share an edge and leave no seam.
+                        let (left, top) = ((at.x + x * cw).round(), (at.y + y * ch).round());
+                        let (right, bottom) = ((at.x + (x + w) * cw).round(), (at.y + (y + h) * ch).round());
+                        NSBezierPath::fillRect(NSRect::new(NSPoint::new(left, top), NSSize::new(right - left, bottom - top)));
+                    }
+                } else {
+                    draw_text(&cell.ch.to_string(), at, style);
+                }
             }
             if cell.underline {
                 fill(cell.fg, NSRect::new(NSPoint::new(at.x, at.y + ch - 2.0), NSSize::new(cw * cell.width as f64, 1.0)));
@@ -604,6 +614,43 @@ fn resolve(color: Color, overrides: &Colors) -> Rgb {
     }
 }
 
+/// Block elements (U+2580–U+259F) as rectangles in cell fractions `[x, y, w, h]`, y from
+/// the top, with the fill alpha (below 1 for the shades). The font's glyphs don't fill a
+/// cell taller than the font, so pictures built from them, like logos, come apart.
+fn block_shape(ch: char) -> Option<(f64, Vec<[f64; 4]>)> {
+    const UL: [f64; 4] = [0.0, 0.0, 0.5, 0.5];
+    const UR: [f64; 4] = [0.5, 0.0, 0.5, 0.5];
+    const LL: [f64; 4] = [0.0, 0.5, 0.5, 0.5];
+    const LR: [f64; 4] = [0.5, 0.5, 0.5, 0.5];
+    const FULL: [f64; 4] = [0.0, 0.0, 1.0, 1.0];
+    let eighths = |n: u32| f64::from(n) / 8.0;
+    let parts = match ch {
+        '\u{2580}' => vec![[0.0, 0.0, 1.0, 0.5]],
+        '\u{2581}'..='\u{2587}' => {
+            let h = eighths(ch as u32 - 0x2580);
+            vec![[0.0, 1.0 - h, 1.0, h]]
+        }
+        '\u{2588}' => vec![FULL],
+        '\u{2589}'..='\u{258F}' => vec![[0.0, 0.0, eighths(0x2590 - ch as u32), 1.0]],
+        '\u{2590}' => vec![[0.5, 0.0, 0.5, 1.0]],
+        '\u{2591}'..='\u{2593}' => return Some((f64::from(ch as u32 - 0x2590) / 4.0, vec![FULL])),
+        '\u{2594}' => vec![[0.0, 0.0, 1.0, 0.125]],
+        '\u{2595}' => vec![[0.875, 0.0, 0.125, 1.0]],
+        '\u{2596}' => vec![LL],
+        '\u{2597}' => vec![LR],
+        '\u{2598}' => vec![UL],
+        '\u{2599}' => vec![UL, LL, LR],
+        '\u{259A}' => vec![UL, LR],
+        '\u{259B}' => vec![UL, UR, LL],
+        '\u{259C}' => vec![UL, UR, LR],
+        '\u{259D}' => vec![UR],
+        '\u{259E}' => vec![UR, LL],
+        '\u{259F}' => vec![UR, LL, LR],
+        _ => return None,
+    };
+    Some((1.0, parts))
+}
+
 fn draw_text(text: &str, at: NSPoint, attributes: &NSDictionary<NSAttributedStringKey, AnyObject>) {
     unsafe { NSString::from_str(text).drawAtPoint_withAttributes(at, Some(attributes)) };
 }
@@ -640,6 +687,18 @@ mod tests {
         assert_eq!(wheel_report(false, 0, 0, true), b"\x1b[<65;1;1M");
         assert_eq!(wheel_report(true, 4, 9, false), [0x1b, b'[', b'M', 96, 37, 42]);
         assert_eq!(wheel_report(false, 300, 0, false)[4], 255);
+    }
+
+    #[test]
+    fn block_elements_fill_their_part_of_the_cell() {
+        assert_eq!(block_shape('█'), Some((1.0, vec![[0.0, 0.0, 1.0, 1.0]])));
+        assert_eq!(block_shape('▁'), Some((1.0, vec![[0.0, 0.875, 1.0, 0.125]])));
+        assert_eq!(block_shape('▌'), Some((1.0, vec![[0.0, 0.0, 0.5, 1.0]])));
+        assert_eq!(block_shape('▏'), Some((1.0, vec![[0.0, 0.0, 0.125, 1.0]])));
+        assert_eq!(block_shape('▛').map(|(_, parts)| parts.len()), Some(3));
+        assert_eq!(block_shape('▒').map(|(alpha, _)| alpha), Some(0.5));
+        assert_eq!(block_shape('a'), None);
+        assert_eq!(block_shape('─'), None);
     }
 
     #[test]
