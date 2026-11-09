@@ -11,7 +11,7 @@ Apple Silicon, macOS 14 or later. It is written in Rust with AppKit, runs at 0% 
 - **Workspace.** Today's tasks with quick add (`gym 6pm !high #health 45m tomorrow`). A pomodoro card shows today's tomatoes, a stopwatch, +5 min and weekly focus stats.
 - **Week.** Tasks, calendar events and reminders laid out by day. Calendar and Reminders are only accessed after you click to allow them.
 - **Collapsed notch.** Shows album art with a moving waveform while music plays, or the focus countdown.
-- **Music.** Now playing from any app (Spotify, Music, YouTube in a browser), with playback controls.
+- **Playing.** Now playing from any app (Spotify, Music, YouTube in a browser), with playback controls.
 - **Clips.** A short clipboard history.
 - **Notes.** Saved automatically. Turn a line into a task with ⌘↩.
 - **Terminal.** A real shell in the notch.

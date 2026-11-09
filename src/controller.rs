@@ -1753,7 +1753,7 @@ impl Controller {
         let workspace = pill("Workspace", sel!(showWorkspace:));
         let week = pill("Week", sel!(showWeek:));
         let clips = pill("Clips", sel!(showClips:));
-        let music = icon_pill("music.note", sel!(showMusic:));
+        let music = icon_pill("play.circle", sel!(showMusic:));
         let notes = icon_pill("note.text", sel!(showNotes:));
         let terminal = pill("Terminal", sel!(showTerminal:));
         // Settings is otherwise only reachable through ⌘, or the header's right-click menu.
