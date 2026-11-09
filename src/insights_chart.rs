@@ -11,9 +11,9 @@ use objc2_app_kit::{
     NSBezierPath, NSColor, NSFont, NSFontAttributeName, NSFontWeightMedium, NSFontWeightSemibold, NSForegroundColorAttributeName,
     NSLineCapStyle, NSStringDrawing, NSView,
 };
-use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSAttributedStringKey, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
-use crate::insights::LEVELS;
+use crate::insights::{KINDS, Kind, LEVELS};
 use crate::widgets::rgba;
 
 pub type Rgb = (u8, u8, u8);
@@ -24,8 +24,6 @@ pub const SAGE: Rgb = (111, 201, 160);
 pub const PINK: Rgb = (232, 125, 160);
 /// The moons' light: a warm cream.
 pub const MOON: Rgb = (232, 215, 154);
-/// A finished task is drawn this many minutes tall next to focus minutes in the Pulse bars.
-pub const TASK_BAR_MIN: u32 = 10;
 
 #[derive(Clone, PartialEq)]
 pub enum Plot {
@@ -35,11 +33,12 @@ pub enum Plot {
     Ring { active: u32, total: u32 },
     /// `(column, row, level)` per day; the week labels as `(column, text)`.
     Heatmap { cells: Vec<(usize, u32, u8)>, weeks: Vec<(usize, String)>, hue: Rgb },
-    /// One petal per day, oldest first: its level and whether focus (not tasks) led the day; the
-    /// week labels as `(day index, text)`.
-    Petals { days: Vec<(u8, bool)>, weeks: Vec<(usize, String)>, active: u32 },
-    /// `(focus minutes, task height in minutes)` per day, oldest first, with x labels as `(index, text)`.
-    Pulse { bars: Vec<(u32, u32)>, labels: Vec<(usize, String)> },
+    /// One petal per day, oldest first: its effort as a fraction of the busiest day's and the
+    /// kind that led it (none when idle); a few dates around the ring as `(day index, text)`.
+    Petals { days: Vec<(f64, Option<Kind>)>, labels: Vec<(usize, String)>, active: u32 },
+    /// Each day's share of effort per kind, in `KINDS` order, oldest first, with x labels as
+    /// `(index, text)`.
+    Pulse { days: Vec<[f64; 3]>, labels: Vec<(usize, String)> },
     /// The month as a calendar: weekday of the 1st (Monday 0), a level per day (`None` once the
     /// day has not come), and the index of today.
     Moon { lead: u32, days: Vec<Option<u8>>, today: usize },
@@ -65,8 +64,8 @@ define_class!(
                 Plot::Blank => {}
                 Plot::Ring { active, total } => draw_ring(size, *active, *total),
                 Plot::Heatmap { cells, weeks, hue } => draw_heatmap(size, cells, weeks, *hue),
-                Plot::Petals { days, weeks, active } => draw_petals(size, days, weeks, *active),
-                Plot::Pulse { bars, labels } => draw_pulse(size, bars, labels),
+                Plot::Petals { days, labels, active } => draw_petals(size, days, labels, *active),
+                Plot::Pulse { days, labels } => draw_pulse(size, days, labels),
                 Plot::Moon { lead, days, today } => draw_moon(size, *lead, days, *today),
             }
         }
@@ -117,17 +116,26 @@ fn fill_round(r: NSRect, radius: f64, color: &NSColor) {
 /// Draws `s` and returns its width. `align` is 0 for text starting at `x`, 0.5 centred on it,
 /// 1 ending at it.
 fn text(s: &str, x: f64, y: f64, align: f64, size: f64, semibold: bool, color: &NSColor) -> f64 {
-    let weight = if semibold { unsafe { NSFontWeightSemibold } } else { unsafe { NSFontWeightMedium } };
-    let font = NSFont::systemFontOfSize_weight(size, weight);
-    let attrs = unsafe {
-        let keys = [NSFontAttributeName, NSForegroundColorAttributeName];
-        let values: [&AnyObject; 2] = [font.as_ref(), color.as_ref()];
-        NSDictionary::from_slices(&keys, &values)
-    };
+    let attrs = attributes(size, semibold, color);
     let s = NSString::from_str(s);
     let width = unsafe { s.sizeWithAttributes(Some(&attrs)) }.width;
     unsafe { s.drawAtPoint_withAttributes(NSPoint::new(x - width * align, y), Some(&attrs)) };
     width
+}
+
+/// How wide [`text`] would draw `s` at `size` without semibold.
+fn text_width(s: &str, size: f64) -> f64 {
+    unsafe { NSString::from_str(s).sizeWithAttributes(Some(&attributes(size, false, &white(1.0)))) }.width
+}
+
+fn attributes(size: f64, semibold: bool, color: &NSColor) -> Retained<NSDictionary<NSAttributedStringKey, AnyObject>> {
+    let weight = if semibold { unsafe { NSFontWeightSemibold } } else { unsafe { NSFontWeightMedium } };
+    let font = NSFont::systemFontOfSize_weight(size, weight);
+    unsafe {
+        let keys = [NSFontAttributeName, NSForegroundColorAttributeName];
+        let values: [&AnyObject; 2] = [font.as_ref(), color.as_ref()];
+        NSDictionary::from_slices(&keys, &values)
+    }
 }
 
 /// Points on a circle of `radius` around `(cx, cy)`; angle 0 is up and grows clockwise.
@@ -151,10 +159,6 @@ fn draw_ring(size: NSSize, active: u32, total: u32) {
             if i == 0 { arc.moveToPoint(point) } else { arc.lineToPoint(point) }
         }
         arc.setLineCapStyle(NSLineCapStyle::Round);
-        // A wider, faint pass under the arc gives it a soft glow.
-        arc.setLineWidth(11.0);
-        color(PURPLE, 0.16).setStroke();
-        arc.stroke();
         arc.setLineWidth(6.0);
         color(PURPLE, 1.0).setStroke();
         arc.stroke();
@@ -202,82 +206,115 @@ fn draw_heatmap(size: NSSize, cells: &[(usize, u32, u8)], weeks: &[(usize, Strin
     text("Less", right - 30.0 - swatches - 6.0, y, 1.0, 10.0, false, &dim);
 }
 
-fn draw_petals(size: NSSize, days: &[(u8, bool)], weeks: &[(usize, String)], active: u32) {
-    const LEGEND: f64 = 26.0;
-    const LABELS: f64 = 16.0;
-    let (cx, cy) = (size.width / 2.0, (size.height - LEGEND) / 2.0);
-    let outer = (size.width.min(size.height - LEGEND) / 2.0 - LABELS).max(1.0);
-    let inner = outer * 0.4;
-    // Faint guides at the base and the full length of a petal.
-    for radius in [inner - 4.0, (inner + outer) / 2.0, outer + 3.0] {
-        let guide = NSBezierPath::bezierPathWithOvalInRect(rect(cx - radius, cy - radius, 2.0 * radius, 2.0 * radius));
-        guide.setLineWidth(1.0);
-        white(0.05).setStroke();
-        guide.stroke();
-    }
-    let angle_of = |i: usize| TAU * i as f64 / days.len() as f64;
-    for (i, name) in weeks {
-        let at = on_circle(cx, cy, outer + LABELS - 4.0, angle_of(*i));
-        text(name, at.x, at.y - 6.0, 0.5, 9.0, false, &white(0.4));
-    }
-    for (i, (level, focus_led)) in days.iter().enumerate() {
+fn draw_petals(size: NSSize, days: &[(f64, Option<Kind>)], labels: &[(usize, String)], active: u32) {
+    const FOOTER: f64 = 40.0;
+    const LABELS: f64 = 22.0;
+    // Below this share of the busiest day a petal would be a stub, so the day stays a tinted dot.
+    const SHORTEST: f64 = 0.12;
+    let (cx, cy) = (size.width / 2.0, (size.height - FOOTER) / 2.0);
+    let outer = (size.width.min(size.height - FOOTER) / 2.0 - LABELS).max(1.0);
+    let inner = outer * 0.58;
+    let angle_of = |i: usize| TAU * i as f64 / days.len().max(1) as f64;
+    // Thick petals read best, but neighbours must not touch at the base.
+    let width = (TAU * inner / days.len().max(1) as f64 * 0.7).min(6.0);
+    dotted_circle(cx, cy, outer);
+    dotted_circle(cx, cy, (inner + outer) / 2.0);
+    for (i, (length, kind)) in days.iter().enumerate() {
         let angle = angle_of(i);
-        let length = 2.0 + (outer - inner - 2.0) * f64::from(*level) / f64::from(LEVELS);
-        let petal = NSBezierPath::bezierPath();
-        petal.moveToPoint(on_circle(cx, cy, inner, angle));
-        petal.lineToPoint(on_circle(cx, cy, inner + length, angle));
-        petal.setLineWidth(2.0);
-        petal.setLineCapStyle(NSLineCapStyle::Round);
-        if *level == 0 {
-            white(0.1).setStroke();
-        } else {
-            color(if *focus_led { PURPLE } else { SAGE }, 0.4 + 0.6 * f64::from(*level) / f64::from(LEVELS)).setStroke();
+        let base = on_circle(cx, cy, inner, angle);
+        match kind {
+            None => dot(base, 1.6, &white(0.12)),
+            Some(kind) if *length < SHORTEST => dot(base, width / 2.0, &color(hue(*kind), 0.4)),
+            Some(kind) => {
+                let petal = NSBezierPath::bezierPath();
+                petal.moveToPoint(base);
+                petal.lineToPoint(on_circle(cx, cy, inner + (outer - inner) * length.min(1.0), angle));
+                petal.setLineWidth(width);
+                petal.setLineCapStyle(NSLineCapStyle::Round);
+                color(hue(*kind), 0.9).setStroke();
+                petal.stroke();
+            }
         }
-        petal.stroke();
     }
-    text(&active.to_string(), cx, cy - 17.0, 0.5, 26.0, true, &white(0.95));
-    text("active days", cx, cy + 11.0, 0.5, 10.0, false, &white(0.45));
-    let y = size.height - LEGEND + 4.0;
-    for (x, name, hue) in [(cx - 50.0, "Focus", PURPLE), (cx + 8.0, "Tasks", SAGE)] {
-        fill_round(rect(x, y + 2.0, 8.0, 8.0), 4.0, &color(hue, 1.0));
-        text(name, x + 13.0, y, 0.0, 10.0, false, &white(0.55));
+    let dim = white(0.38);
+    for (i, label) in labels {
+        let angle = angle_of(*i);
+        let at = on_circle(cx, cy, outer + 14.0, angle);
+        // Left and right labels hang off the ring; top and bottom ones centre on it.
+        text(label, at.x, at.y - 7.0, 0.5 - 0.5 * angle.sin(), 10.0, false, &dim);
+    }
+    text(&format!("last {} days", days.len()), cx, cy - 31.0, 0.5, 10.0, false, &dim);
+    text(&active.to_string(), cx, cy - 19.0, 0.5, 26.0, true, &white(0.95));
+    text("active days", cx, cy + 12.0, 0.5, 10.0, false, &dim);
+    let y = size.height - FOOTER + 4.0;
+    legend(&[("mostly deep focus", Kind::Focus), ("mostly pomodoros", Kind::Pomodoros), ("mostly tasks", Kind::Tasks)], cx, y, 0.5);
+    text("petal length = that day's contribution", cx, y + 20.0, 0.5, 10.0, false, &white(0.3));
+}
+
+/// One full-height column per day, split into each kind's share of it, so the row reads as a
+/// steady rhythm and the colours tell what kind of day it was.
+fn draw_pulse(size: NSSize, days: &[[f64; 3]], labels: &[(usize, String)]) {
+    const TOP: f64 = 26.0;
+    const BOTTOM: f64 = 20.0;
+    const GAP: f64 = 2.0;
+    let area = size.height - TOP - BOTTOM;
+    let base = TOP + area;
+    let pitch = size.width / days.len().max(1) as f64;
+    let width = (pitch * 0.62).min(18.0);
+    let radius = (width / 2.0).min(4.0);
+    for (i, shares) in days.iter().enumerate() {
+        let x = i as f64 * pitch + (pitch - width) / 2.0;
+        let parts = shares.iter().filter(|s| **s > 0.0).count();
+        if parts == 0 {
+            fill_round(rect(x, TOP, width, area), radius, &white(0.045));
+            continue;
+        }
+        let room = area - GAP * (parts - 1) as f64;
+        let mut y = base;
+        for (share, kind) in shares.iter().zip(KINDS).filter(|(s, _)| **s > 0.0) {
+            let height = room * share;
+            fill_round(rect(x, y - height, width, height), radius.min(height / 2.0), &color(hue(kind), 0.9));
+            y -= height + GAP;
+        }
+    }
+    for (i, label) in labels {
+        text(label, *i as f64 * pitch + pitch / 2.0, base + 6.0, 0.5, 10.0, false, &white(0.38));
+    }
+    legend(&[("Deep focus", Kind::Focus), ("Pomodoros", Kind::Pomodoros), ("Tasks", Kind::Tasks)], size.width, 0.0, 1.0);
+}
+
+fn hue(kind: Kind) -> Rgb {
+    match kind {
+        Kind::Focus => PURPLE,
+        Kind::Pomodoros => AMBER,
+        Kind::Tasks => SAGE,
     }
 }
 
-fn draw_pulse(size: NSSize, bars: &[(u32, u32)], labels: &[(usize, String)]) {
-    const TOP: f64 = 22.0;
-    const BOTTOM: f64 = 18.0;
-    let area = size.height - TOP - BOTTOM;
-    let top = bars.iter().map(|(focus, tasks)| focus + tasks).max().unwrap_or(0).max(TASK_BAR_MIN * 6) as f64;
-    let pitch = size.width / bars.len().max(1) as f64;
-    let width = pitch * 0.6;
-    let base = TOP + area;
-    for third in 1..=3 {
-        white(if third == 0 { 0.08 } else { 0.04 }).setFill();
-        NSBezierPath::fillRect(rect(0.0, base - area * f64::from(third) / 3.0, size.width, 1.0));
+fn dot(at: NSPoint, radius: f64, color: &NSColor) {
+    color.setFill();
+    NSBezierPath::bezierPathWithOvalInRect(rect(at.x - radius, at.y - radius, 2.0 * radius, 2.0 * radius)).fill();
+}
+
+/// A barely visible guide: small dots every few points around the circle.
+fn dotted_circle(cx: f64, cy: f64, radius: f64) {
+    let count = (TAU * radius / 6.0).round().max(1.0);
+    for i in 0..count as usize {
+        dot(on_circle(cx, cy, radius, TAU * i as f64 / count), 0.6, &white(0.1));
     }
-    white(0.1).setFill();
-    NSBezierPath::fillRect(rect(0.0, base, size.width, 1.0));
-    for (i, (focus, tasks)) in bars.iter().enumerate() {
-        let x = i as f64 * pitch + (pitch - width) / 2.0;
-        let focus_h = area * f64::from(*focus) / top;
-        let task_h = area * f64::from(*tasks) / top;
-        if focus + tasks == 0 {
-            fill_round(rect(x, base - 2.0, width, 2.0), 1.0, &white(0.12));
-            continue;
-        }
-        fill_round(rect(x, base - focus_h, width, focus_h.max(0.0)), 2.0, &color(PURPLE, 1.0));
-        fill_round(rect(x, base - focus_h - task_h - if focus_h > 0.0 { 1.0 } else { 0.0 }, width, task_h), 2.0, &color(SAGE, 1.0));
-    }
-    for (i, label) in labels {
-        text(label, *i as f64 * pitch + pitch / 2.0, base + 4.0, 0.5, 9.0, false, &white(0.4));
-    }
-    let dim = white(0.55);
-    let mut x = size.width;
-    for (name, hue) in [(format!("Tasks ({TASK_BAR_MIN} min each)"), SAGE), ("Focus minutes".to_owned(), PURPLE)] {
-        let label_width = text(&name, x, 0.0, 1.0, 10.0, false, &dim);
-        fill_round(rect(x - label_width - 13.0, 2.0, 8.0, 8.0), 4.0, &color(hue, 1.0));
-        x -= label_width + 28.0;
+}
+
+/// A row of coloured dots with names; `align` places the row at `x` as [`text`] does.
+fn legend(entries: &[(&str, Kind)], x: f64, y: f64, align: f64) {
+    const DOT: f64 = 7.0;
+    const SPACING: f64 = 16.0;
+    let widths: Vec<f64> = entries.iter().map(|(name, _)| text_width(name, 10.0)).collect();
+    let total = widths.iter().map(|w| DOT + 6.0 + w).sum::<f64>() + SPACING * (entries.len().max(1) - 1) as f64;
+    let mut left = x - total * align;
+    for ((name, kind), width) in entries.iter().zip(widths) {
+        dot(NSPoint::new(left + DOT / 2.0, y + 7.0), DOT / 2.0, &color(hue(*kind), 0.9));
+        text(name, left + DOT + 6.0, y, 0.0, 10.0, false, &white(0.5));
+        left += DOT + 6.0 + width + SPACING;
     }
 }
 

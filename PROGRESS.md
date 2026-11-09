@@ -1,3 +1,15 @@
+### [2026-11-09 23:09 UTC+07:00] — [UI] Rounded Insights petals and stacked Pulse
+
+**Done:**
+- Rounded, pastel petals replace thin month-ring strokes; idle days remain dots. Pulse uses full-height columns split by contribution, with faint columns on idle days. The week strip remains in Insights, not the pomodoro card.
+- Chart contribution is a daily estimate: pomodoro minutes are capped at session count × 25; remaining focus minutes are deep focus, and each task weighs 10 equivalent minutes. The tooltip explains this; it does not claim measured task time.
+
+**Changed  files:**
+- `src/insights.rs`, `src/insights_chart.rs`, `src/insights_view.rs`, `src/week_bars.rs`, `README.md` — modified
+
+**Flow explained:**
+`Day::effort` builds contribution weights, `shares` normalizes Pulse segments, and `dominant` selects petal colour. Charts still redraw only when their plot changes; no timer was added. Verified: 80 tests pass and real-window screenshots inspected with populated, empty and one-task scratch HOME fixtures under `/tmp/notchpad-finish/insights/`. Temporary rendering hooks removed. Idle CPU not yet remeasured.
+
 ### [2026-11-09 23:55 UTC+07:00] — [Refactor] Week strip moved from the focus card to Insights
 
 **Done:**

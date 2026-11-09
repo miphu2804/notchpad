@@ -15,7 +15,7 @@ Apple Silicon, macOS 14 or later. It is written in Rust with AppKit, runs at 0% 
 - **Terminal.** A real shell in the notch.
 - **Alerts.** When a focus session or a break ends, and before and at a timed task's time, a small card drops out of the notch with a chime. A task reminder has **Snooze 5 min** and **Done**; clicking the card dismisses it. The card never takes the keyboard from the app you're in. Timed tasks also get a system notification.
 - **Focus settings.** Settings › Focus sets the focus length, short and long breaks, how early task reminders come (or turns them off) and whether alerts chime.
-- **Insights.** A dashboard tab (not in the notch) for the last weeks: active days, streaks, focus time with the week's tasks and daily bars, a five-week heatmap with Focus, Pomodoros and Tasks tabs, month rings, a 30-day pulse you can export as PNG, and a moon calendar for the month.
+- **Insights.** A dashboard tab (not in the notch) for the last weeks: active days, streaks, focus time with the week's tasks and daily bars, a five-week heatmap with Focus, Pomodoros and Tasks tabs, rounded month petals (idle days stay dots), a full-height stacked 30-day pulse you can export as PNG, and a moon calendar for the month.
 - **More.** A JSON backup export, a dashboard window, and today's tasks copied as a Markdown checklist. Right-click the header for these.
 
 ## Install

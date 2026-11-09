@@ -51,11 +51,43 @@ impl Day {
         }
     }
 
-    /// True when focus sessions, not finished tasks, carried the day.
-    pub fn focus_led(&self) -> bool {
-        self.pomodoros * POMODORO_POINTS >= self.tasks
+    /// Estimated contribution weights in [`KINDS`] order, not measured task durations.
+    /// Daily focus up to session count × [`POMODORO_MIN`] is pomodoro effort; the remainder is
+    /// deep focus. Each finished task contributes [`TASK_MIN`] equivalent minutes.
+    pub fn effort(&self) -> [u32; 3] {
+        let pomodoro = self.focus_min.min(self.pomodoros * POMODORO_MIN);
+        [self.focus_min - pomodoro, pomodoro, self.tasks * TASK_MIN]
+    }
+
+    /// Each kind's share of the day's effort, summing to 1; all zero for an idle day.
+    pub fn shares(&self) -> [f64; 3] {
+        let effort = self.effort();
+        let total: u32 = effort.iter().sum();
+        effort.map(|e| if total == 0 { 0.0 } else { f64::from(e) / f64::from(total) })
+    }
+
+    /// The kind with the most effort, the earlier one in [`KINDS`] on a tie; none for an idle day.
+    pub fn dominant(&self) -> Option<Kind> {
+        let effort = self.effort();
+        let best = (0..KINDS.len()).rev().max_by_key(|&k| effort[k])?;
+        (effort[best] > 0).then_some(KINDS[best])
     }
 }
+
+/// The kinds of effort the charts split a day into.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    /// Session time beyond [`POMODORO_MIN`] per session.
+    Focus,
+    Pomodoros,
+    Tasks,
+}
+
+pub const KINDS: [Kind; 3] = [Kind::Focus, Kind::Pomodoros, Kind::Tasks];
+/// The classic pomodoro length: session time up to this counts as a pomodoro.
+pub const POMODORO_MIN: u32 = 25;
+/// A finished task weighs as much as this many minutes of session time.
+pub const TASK_MIN: u32 = 10;
 
 /// Every day that has anything in it, plus today for the "this month" and "current streak" maths.
 #[derive(Default)]
@@ -359,9 +391,18 @@ mod tests {
     }
 
     #[test]
-    fn dominant_effort_follows_points() {
-        assert!(Day { focus_min: 25, pomodoros: 1, tasks: 2 }.focus_led());
-        assert!(!Day { focus_min: 25, pomodoros: 1, tasks: 3 }.focus_led());
+    fn effort_splits_sessions_at_the_pomodoro_length() {
+        // Daily approximation: 60 focus minutes, a 50-minute session allowance and 20 task points.
+        let day = Day { focus_min: 60, pomodoros: 2, tasks: 2 };
+        assert_eq!(day.effort(), [10, 50, 20]);
+        assert_eq!(day.shares(), [0.125, 0.625, 0.25]);
+        assert_eq!(day.dominant(), Some(Kind::Pomodoros));
+        assert_eq!(Day { focus_min: 90, pomodoros: 1, tasks: 1 }.dominant(), Some(Kind::Focus));
+        assert_eq!(Day { focus_min: 0, pomodoros: 0, tasks: 1 }.shares(), [0.0, 0.0, 1.0]);
+        // A tie goes to the earlier kind; an idle day has no shares and no dominant kind.
+        assert_eq!(Day { focus_min: 50, pomodoros: 1, tasks: 0 }.dominant(), Some(Kind::Focus));
+        assert_eq!(Day::default().shares(), [0.0; 3]);
+        assert_eq!(Day::default().dominant(), None);
     }
 
     #[test]

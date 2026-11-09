@@ -16,8 +16,8 @@ use objc2_app_kit::{
 use objc2_foundation::{NSArray, NSDictionary, NSObject, NSString};
 
 use crate::days;
-use crate::insights::{self, Insights, MONTH_NAMES, Metric, SPAN, civil, days_in_month, level, weekday};
-use crate::insights_chart::{AMBER, Chart, PINK, PURPLE, Plot, Rgb, SAGE, TASK_BAR_MIN};
+use crate::insights::{self, Day, Insights, MONTH_NAMES, Metric, SPAN, civil, days_in_month, level, weekday};
+use crate::insights_chart::{AMBER, Chart, PINK, PURPLE, Plot, Rgb, SAGE};
 use crate::week_bars::{self, WeekBars};
 use crate::widgets::{self as w, SURFACE, rgba};
 
@@ -160,18 +160,23 @@ impl InsightsView {
         self.render_heatmap_with(&data);
 
         let span = data.recent(SPAN);
-        let peak = data.peak(Metric::Score);
+        let effort = |d: &Day| d.effort().iter().sum::<u32>();
+        let busiest = span.iter().map(effort).max().unwrap_or(0).max(1);
+        let first_shown = today - (SPAN - 1);
         parts.petals.set(Plot::Petals {
-            days: span.iter().map(|d| (level(d.score(), peak), d.focus_led())).collect(),
-            weeks: insights::week_labels(today).into_iter().map(|(monday, text)| (monday - (today - (SPAN - 1)), text)).filter(|(i, _)| (0..SPAN - 3).contains(i)).map(|(i, text)| (i as usize, text)).collect(),
+            days: span.iter().map(|d| (f64::from(effort(d)) / f64::from(busiest), d.dominant())).collect(),
+            // Four dates at the compass points: top, right, bottom, left.
+            labels: (0..4).map(|q| q * SPAN / 4).map(|i| (i as usize, date_label(first_shown + i, today))).collect(),
             active: span.iter().filter(|d| d.active()).count() as u32,
         });
 
         let recent = data.recent(PULSE_DAYS);
         parts.pulse.set(Plot::Pulse {
-            bars: recent.iter().map(|d| (d.focus_min, d.tasks * TASK_BAR_MIN)).collect(),
-            labels: (0..recent.len()).filter(|i| i % 5 == 4).map(|i| (i, date_label(today - (PULSE_DAYS - 1 - i as i64), today))).collect(),
+            days: recent.iter().map(Day::shares).collect(),
+            // A label a week apart, ending on today.
+            labels: (0..recent.len()).rev().step_by(7).map(|i| (i, date_label(today - (PULSE_DAYS - 1 - i as i64), today))).collect(),
         });
+        let peak = data.peak(Metric::Score);
 
         let (year_now, month, day_of_month) = civil(today);
         let first = today - i64::from(day_of_month - 1);
@@ -252,6 +257,9 @@ impl InsightsView {
         w::fit_pill(&export, 10.0);
         w::style_pill(&export, &rgba(255, 255, 255, 0.1), &rgba(255, 255, 255, 0.8), 12.0);
         let pulse = Chart::new(Plot::Blank, mtm);
+        let contribution_note = NSString::from_str("Estimated contribution: pomodoros = min(focus minutes, sessions × 25); deep focus = remaining minutes; tasks = completed tasks × 10. Colours show shares, not measured task time.");
+        petals.setToolTip(Some(&contribution_note));
+        pulse.setToolTip(Some(&contribution_note));
         let pulse_card = card(&format!("Pulse · last {PULSE_DAYS} days"), Some(&export), &pulse, mtm);
         let bottom = w::stack(&[&moon_card, &pulse_card], false, GAP, mtm);
         bottom.heightAnchor().constraintEqualToConstant(ROW_HEIGHT).setActive(true);

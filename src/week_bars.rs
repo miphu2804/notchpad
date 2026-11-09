@@ -8,15 +8,15 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_app_kit::{NSBezierPath, NSFont, NSFontAttributeName, NSFontWeightMedium, NSForegroundColorAttributeName, NSStringDrawing, NSView};
 use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
+use crate::insights_chart::PURPLE;
 use crate::pomodoros::DAILY_GOAL;
 use crate::widgets::rgba;
 
-const BAR_WIDTH: f64 = 10.0;
-const GAP: f64 = 5.0;
+const BAR_WIDTH: f64 = 8.0;
+const GAP: f64 = 6.0;
 const BAR_AREA: f64 = 24.0;
 const LABEL_AREA: f64 = 11.0;
-/// Idle days keep a stub so the week still reads as seven bars.
-const STUB: f64 = 2.0;
+/// Idle days keep a round dot so the week still reads as seven bars.
 pub const WIDTH: f64 = 7.0 * BAR_WIDTH + 6.0 * GAP;
 pub const HEIGHT: f64 = BAR_AREA + LABEL_AREA;
 
@@ -38,10 +38,10 @@ define_class!(
             let (counts, initials) = self.ivars().get();
             // A full-goal day fills the bar area; a better week rescales instead of clipping.
             let scale = counts.iter().copied().max().unwrap_or(0).max(DAILY_GOAL as u32) as f64;
-            let dim = rgba(255, 255, 255, 0.22);
-            let coral = rgba(217, 112, 90, 1.0);
+            let dim = rgba(255, 255, 255, 0.16);
+            let today = rgba(PURPLE.0, PURPLE.1, PURPLE.2, 0.9);
             let label_font = NSFont::systemFontOfSize_weight(8.0, unsafe { NSFontWeightMedium });
-            let label_color = rgba(255, 255, 255, 0.4);
+            let label_color = rgba(255, 255, 255, 0.35);
             let attrs = unsafe {
                 let keys = [NSFontAttributeName, NSForegroundColorAttributeName];
                 let values: [&AnyObject; 2] = [label_font.as_ref(), label_color.as_ref()];
@@ -49,10 +49,10 @@ define_class!(
             };
             for (i, (&n, initial)) in counts.iter().zip(initials).enumerate() {
                 let x = i as f64 * (BAR_WIDTH + GAP);
-                let height = (BAR_AREA * n as f64 / scale).max(STUB);
+                let height = (BAR_AREA * n as f64 / scale).max(BAR_WIDTH);
                 let bar = NSRect::new(NSPoint::new(x, BAR_AREA - height), NSSize::new(BAR_WIDTH, height));
-                (if i == 6 { &coral } else { &dim }).setFill();
-                NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(bar, 2.0, 2.0).fill();
+                (if i == 6 { &today } else { &dim }).setFill();
+                NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(bar, BAR_WIDTH / 2.0, BAR_WIDTH / 2.0).fill();
 
                 let text = NSString::from_str(&initial.to_string());
                 let size = unsafe { text.sizeWithAttributes(Some(&attrs)) };
