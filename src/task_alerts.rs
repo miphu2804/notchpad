@@ -98,7 +98,9 @@ pub fn sync(tasks: &[Task]) {
     let now = days::stamp();
     let (now_day, clock_now) = now.split_once(' ').unwrap_or_default();
     let now_minutes = clock(clock_now).map_or(0, |(h, m)| h * 60 + m);
-    let alerts = due_alerts(tasks, now_day, now_minutes, DAYS_AHEAD);
+    // The next minute belongs to the notch card (see `withdraw_next_minute`), so a save in it
+    // does not put back the notification just withdrawn.
+    let alerts = due_alerts(tasks, now_day, now_minutes + 1, DAYS_AHEAD);
 
     let center = UNUserNotificationCenter::currentNotificationCenter();
     let handler = RcBlock::new({
@@ -113,6 +115,23 @@ pub fn sync(tasks: &[Task]) {
         }
     });
     center.getNotificationSettingsWithCompletionHandler(&handler);
+}
+
+/// Ids of the notifications for open tasks of `today` due in the minute after `now`.
+pub fn next_minute_ids(tasks: &[Task], today: &str, now: u32) -> Vec<String> {
+    due_alerts(tasks, today, now, 0).into_iter().filter(|a| a.hour * 60 + a.minute == now + 1).map(|a| a.id).collect()
+}
+
+/// While the app runs, the notch card reminds of a task, so its system notification would only
+/// repeat it with a second sound. Withdrawn a minute ahead, it still fires when the app is not
+/// running, and stays scheduled when the notch reminders are off (the caller does not call this).
+pub fn withdraw_next_minute(tasks: &[Task], today: &str, now: u32) {
+    let ids = next_minute_ids(tasks, today, now);
+    if ids.is_empty() || NSBundle::mainBundle().bundleIdentifier().is_none() {
+        return;
+    }
+    let ids: Vec<Retained<NSString>> = ids.iter().map(|id| NSString::from_str(id)).collect();
+    UNUserNotificationCenter::currentNotificationCenter().removePendingNotificationRequestsWithIdentifiers(&NSArray::from_retained_slice(&ids));
 }
 
 fn request_then_schedule(center: &Retained<UNUserNotificationCenter>, alerts: Vec<Alert>) {
@@ -200,6 +219,16 @@ mod tests {
 
     fn task(day: &str, time: &str, text: &str) -> Task {
         Task { day: day.into(), time: time.into(), text: text.into(), ..Task::default() }
+    }
+
+    #[test]
+    fn next_minute_ids_pick_only_open_tasks_of_today_due_in_the_next_minute() {
+        let mut done = task("2026-11-09", "10:01", "done");
+        done.done = true;
+        let tasks = [task("2026-11-09", "10:01", "soon"), task("2026-11-09", "10:02", "later"), task("2026-11-10", "10:01", "tomorrow"), done];
+        let soon = due_alerts(&tasks[..1], "2026-11-09", 0, 0)[0].id.clone();
+        assert_eq!(next_minute_ids(&tasks, "2026-11-09", 600), vec![soon]);
+        assert!(next_minute_ids(&tasks, "2026-11-09", 602).is_empty());
     }
 
     fn ids(tasks: &[Task], now_minutes: u32) -> Vec<String> {

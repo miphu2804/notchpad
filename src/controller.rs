@@ -1273,6 +1273,7 @@ impl Controller {
         }
         let (today, clock) = stamp.split_once(' ').unwrap_or_default();
         let Some(now) = task_alerts::minutes(clock) else { return };
+        task_alerts::withdraw_next_minute(&self.ivars().tasks.borrow(), today, now);
         let earliest = now.saturating_sub(REMIND_GRACE_MIN);
         let after = match last.split_once(' ') {
             Some((day, clock)) if day == today => task_alerts::minutes(clock).unwrap_or(now).max(earliest),
