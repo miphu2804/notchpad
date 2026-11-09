@@ -13,7 +13,7 @@ use objc2_app_kit::{
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
     NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
     NSLayoutConstraintOrientation, NSMainMenuWindowLevel, NSScreen, NSScrollView, NSStackView,
-    NSStackViewDistribution, NSStackViewGravity, NSTextAlignment, NSTextField, NSTrackingArea,
+    NSStackViewDistribution, NSTextAlignment, NSTextField, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
@@ -31,7 +31,7 @@ use crate::panel::{self, FileDrag, NotchPanel, NotchShape};
 use crate::store::{self, Task};
 use crate::widgets::{self as w, rgba};
 
-const WIDTH: f64 = 720.0;
+const WIDTH: f64 = 840.0;
 const HEIGHT: f64 = 330.0;
 /// The window extends this far above the screen. The pointer pressed against the top
 /// edge sits at exactly the screen's max Y, which would otherwise count as outside the
@@ -115,7 +115,10 @@ struct Ui {
     tasks: TaskCard,
     columns: Vec<Column>,
     expanded: Cell<NSRect>,
-    header_top: Retained<NSLayoutConstraint>,
+    /// Height of the header band beside the notch; follows the display's safe area.
+    header_height: Retained<NSLayoutConstraint>,
+    /// Keeps the tabs right of the hardware notch: half the notch width plus a margin.
+    notch_gap: Retained<NSLayoutConstraint>,
     motion: Retained<NotchMotion>,
 }
 
@@ -300,8 +303,8 @@ define_class!(
             let (collapsed, expanded, safe_top) = notch_rects(self.mtm());
             let ui = self.ui();
             ui.expanded.set(expanded);
-            ui.content.setFrameSize(NSSize::new(WIDTH, HEIGHT + safe_top));
-            ui.header_top.setConstant(safe_top);
+            ui.header_height.setConstant(header_band(safe_top));
+            ui.notch_gap.setConstant(notch_gap(collapsed, safe_top));
             ui.motion.set_rects(collapsed, expanded);
             self.collapse_when_left();
         }
@@ -738,19 +741,30 @@ impl Controller {
         background.addTrackingArea(&tracking);
 
         // Fixed-size content laid out once at full size; hidden while collapsed.
-        // Reserve the hardware notch above the header without shrinking the cards.
-        let ear = panel::ear(HEIGHT + safe_top + TOP_SLOP);
-        let content = NSView::initWithFrame(mtm.alloc(), NSRect::new(NSPoint::new(ear, 0.0), NSSize::new(WIDTH, HEIGHT + safe_top)));
+        let ear = panel::ear(HEIGHT + TOP_SLOP);
+        let content = NSView::initWithFrame(mtm.alloc(), NSRect::new(NSPoint::new(ear, 0.0), NSSize::new(WIDTH, HEIGHT)));
         content.setHidden(true);
         background.addSubview(&content);
 
-        let (header, tab_workspace, tab_week, tab_clips) = self.build_header(mtm);
+        // The header sits in the menu-bar band: name left of the hardware notch, tabs right of it.
+        let (brand, tabs, tab_workspace, tab_week, tab_clips) = self.build_header(mtm);
+        let header = NSView::new(mtm);
+        header.setTranslatesAutoresizingMaskIntoConstraints(false);
         content.addSubview(&header);
-        header.leadingAnchor().constraintEqualToAnchor_constant(&content.leadingAnchor(), 18.0).setActive(true);
-        header.trailingAnchor().constraintEqualToAnchor_constant(&content.trailingAnchor(), -14.0).setActive(true);
-        let header_top = header.topAnchor().constraintEqualToAnchor_constant(&content.topAnchor(), safe_top);
-        header_top.setActive(true);
-        header.heightAnchor().constraintEqualToConstant(32.0).setActive(true);
+        header.leadingAnchor().constraintEqualToAnchor(&content.leadingAnchor()).setActive(true);
+        header.trailingAnchor().constraintEqualToAnchor(&content.trailingAnchor()).setActive(true);
+        header.topAnchor().constraintEqualToAnchor(&content.topAnchor()).setActive(true);
+        let header_height = header.heightAnchor().constraintEqualToConstant(header_band(safe_top));
+        header_height.setActive(true);
+        for group in [&brand, &tabs] {
+            header.addSubview(group);
+            group.centerYAnchor().constraintEqualToAnchor(&header.centerYAnchor()).setActive(true);
+        }
+        brand.leadingAnchor().constraintEqualToAnchor_constant(&header.leadingAnchor(), 18.0).setActive(true);
+        tabs.trailingAnchor().constraintEqualToAnchor_constant(&header.trailingAnchor(), -14.0).setActive(true);
+        // The panel is centred on the screen, so the header's centre is the notch's centre.
+        let notch_gap = tabs.leadingAnchor().constraintGreaterThanOrEqualToAnchor_constant(&header.centerXAnchor(), notch_gap(collapsed, safe_top));
+        notch_gap.setActive(true);
 
         let (focus_view, focus) = self.build_focus_card(mtm);
         let (task_view, tasks) = self.build_task_card(mtm);
@@ -771,10 +785,14 @@ impl Controller {
         }
 
         let motion = NotchMotion::new(panel.clone(), content.clone(), collapsed, expanded, mtm);
-        Ui { panel, content, workspace, week, tab_workspace, tab_week, tab_clips, clips, focus, tasks, columns, expanded: Cell::new(expanded), header_top, motion }
+        Ui { panel, content, workspace, week, tab_workspace, tab_week, tab_clips, clips, focus, tasks, columns, expanded: Cell::new(expanded), header_height, notch_gap, motion }
     }
 
-    fn build_header(&self, mtm: MainThreadMarker) -> (Retained<NSStackView>, Retained<NSButton>, Retained<NSButton>, Retained<NSButton>) {
+    /// Returns the logo-and-name group, the tabs group, and the three tab buttons.
+    fn build_header(
+        &self,
+        mtm: MainThreadMarker,
+    ) -> (Retained<NSStackView>, Retained<NSStackView>, Retained<NSButton>, Retained<NSButton>, Retained<NSButton>) {
         let logo = LogoMark::new(20.0, mtm);
         fixed_size(&logo, 20.0, 20.0);
         let name = w::label("Notchpad", 14.0, unsafe { NSFontWeightSemibold }, &white(1.0), mtm);
@@ -782,18 +800,13 @@ impl Controller {
         let tab_week = w::pill("Week", 24.0, self.target(), sel!(showWeek:), mtm);
         let tab_clips = w::pill("Clips", 24.0, self.target(), sel!(showClips:), mtm);
         for tab in [&tab_workspace, &tab_week, &tab_clips] {
-            w::fit_pill(tab, 12.0);
+            w::fit_pill(tab, 10.0);
         }
         let quit = w::icon_button("xmark", "", 10.0, &white(0.55), self.target(), sel!(quit:), mtm);
 
-        let header = w::stack(&[], false, 8.0, mtm);
-        header.addView_inGravity(&logo, NSStackViewGravity::Leading);
-        header.addView_inGravity(&name, NSStackViewGravity::Leading);
-        header.addView_inGravity(&tab_workspace, NSStackViewGravity::Trailing);
-        header.addView_inGravity(&tab_week, NSStackViewGravity::Trailing);
-        header.addView_inGravity(&tab_clips, NSStackViewGravity::Trailing);
-        header.addView_inGravity(&quit, NSStackViewGravity::Trailing);
-        (header, tab_workspace, tab_week, tab_clips)
+        let brand = w::stack(&[&logo, &name], false, 8.0, mtm);
+        let tabs = w::stack(&[&tab_workspace, &tab_week, &tab_clips, &quit], false, 6.0, mtm);
+        (brand, tabs, tab_workspace, tab_week, tab_clips)
     }
 
     fn build_focus_card(&self, mtm: MainThreadMarker) -> (Retained<NSView>, FocusCard) {
@@ -1083,11 +1096,22 @@ fn notch_rects(mtm: MainThreadMarker) -> (NSRect, NSRect, f64) {
         // No hardware notch (external display): draw one of our own.
         DEFAULT_NOTCH
     };
-    let (collapsed, expanded) = frames_at_top(frame, width, height, inset);
+    let (collapsed, expanded) = frames_at_top(frame, width, height);
     (collapsed, expanded, inset)
 }
 
-fn frames_at_top(frame: NSRect, width: f64, height: f64, safe_top: f64) -> (NSRect, NSRect) {
+/// The header fills the menu-bar band on a notched display, so it never sits under the notch.
+fn header_band(safe_top: f64) -> f64 {
+    safe_top.max(32.0)
+}
+
+/// Distance from the panel's centre to where the tabs may start: clear of the hardware
+/// notch (the collapsed panel covers it exactly), or nothing on a display without one.
+fn notch_gap(collapsed: NSRect, safe_top: f64) -> f64 {
+    if safe_top > 0.0 { collapsed.size.width / 2.0 + 8.0 } else { 0.0 }
+}
+
+fn frames_at_top(frame: NSRect, width: f64, height: f64) -> (NSRect, NSRect) {
     let top = frame.origin.y + frame.size.height;
     let mid = frame.origin.x + frame.size.width / 2.0;
     // Body plus an ear on each side, extended TOP_SLOP above the screen.
@@ -1095,7 +1119,7 @@ fn frames_at_top(frame: NSRect, width: f64, height: f64, safe_top: f64) -> (NSRe
         let ear = panel::ear(h + TOP_SLOP);
         NSRect::new(NSPoint::new(mid - w / 2.0 - ear, top - h), NSSize::new(w + 2.0 * ear, h + TOP_SLOP))
     };
-    (rect(width, height), rect(WIDTH, HEIGHT + safe_top))
+    (rect(width, height), rect(WIDTH, HEIGHT))
 }
 
 #[cfg(test)]
@@ -1113,20 +1137,14 @@ mod tests {
             (1800.0, 200.0, 2560.0, 1440.0),
         ] {
             let screen = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
-            for ((width, height), safe_top) in [(DEFAULT_NOTCH, 0.0), ((185.0, 38.0), 38.0)] {
-                let (collapsed, expanded) = frames_at_top(screen, width, height, safe_top);
+            for (width, height) in [DEFAULT_NOTCH, (185.0, 38.0)] {
+                let (collapsed, expanded) = frames_at_top(screen, width, height);
                 for rect in [collapsed, expanded] {
                     assert_eq!(rect.origin.y + rect.size.height, y + h + TOP_SLOP);
                     assert_eq!(rect.origin.x + rect.size.width / 2.0, x + w / 2.0);
                 }
                 assert_eq!(collapsed.size.height, height + TOP_SLOP);
-                assert_eq!(expanded.size.height, HEIGHT + safe_top + TOP_SLOP);
-                // Content starts below off-screen slop. The header starts below the
-                // safe area, leaving the same usable height on both display types.
-                let content_top = expanded.origin.y + expanded.size.height - TOP_SLOP;
-                let header_top = content_top - safe_top;
-                assert!(header_top <= y + h - safe_top);
-                assert_eq!(header_top - expanded.origin.y, HEIGHT);
+                assert_eq!(expanded.size.height, HEIGHT + TOP_SLOP);
             }
         }
     }
