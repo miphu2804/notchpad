@@ -2,7 +2,7 @@
 
 use objc2::{define_class, msg_send, MainThreadOnly};
 use objc2_app_kit::{NSButton, NSControl, NSEvent, NSResponder, NSView};
-use objc2_foundation::NSObject;
+use objc2_foundation::{NSEdgeInsets, NSObject};
 
 use crate::widgets as w;
 
@@ -23,6 +23,13 @@ define_class!(
             // Runs AppKit's tracking loop until the mouse goes up (and sends the action).
             let _: () = unsafe { msg_send![super(self), mouseDown: event] };
             w::fade(self, 1.0, 0.2);
+        }
+
+        /// An image button pads its alignment rect around the symbol, so an icon pill stood
+        /// taller than a text pill under the same height constraint. The pill's frame is its shape.
+        #[unsafe(method(alignmentRectInsets))]
+        fn alignment_rect_insets(&self) -> NSEdgeInsets {
+            NSEdgeInsets { top: 0.0, left: 0.0, bottom: 0.0, right: 0.0 }
         }
     }
 );
