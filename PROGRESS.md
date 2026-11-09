@@ -1,3 +1,17 @@
+### [2026-11-09 14:05 UTC+07:00] — [Feature] System-wide Now Playing, pomodoro chime, terminal Escape fix
+
+**Done:**
+The Music tab now follows whatever macOS shows as Now Playing (YouTube in Chrome, Music, Spotify, …) with title, artist, artwork, position and prev/play-pause/next. macOS 15.4+ blocks MediaRemote for unentitled apps, so a small helper dylib runs inside Apple-signed `/usr/bin/perl` and streams JSON lines. Built by a Sonnet thread; accepted by a render with live YouTube data. Pomodoro end now plays the Glass chime instead of the alert beep and still opens the notch (checked with a 1 s session). The terminal prompt stays enabled while a command runs so Escape reaches it and kills the command (checked with synthetic key events). Idle CPU 0.0%, footprint 28.9 MB.
+
+**Changed  files:**
+- `build.rs` — created
+- `macos/now_playing_helper.m` — created
+- `src/now_playing.rs` — modified
+- `src/controller.rs` — modified
+
+**Flow explained:**
+`build.rs` compiles the helper with clang; `now_playing.rs` embeds it, writes it to the app's support folder on first use of the Music tab, and runs `perl` with it. The helper registers for MediaRemote notifications and prints a JSON line per change; a reader thread queues parsed tracks and pokes the controller on the main thread, which re-renders. Controls are words written to the helper's stdin; it exits when stdin closes.
+
 ### [2026-11-09 13:48 UTC+07:00] — [Feature] Pomodoro tomatoes and Terminal tab
 
 **Done:**
@@ -141,3 +155,4 @@ Header owl replaced by a vector logo (two interlinked rounded-hexagon rings, vio
 
 **Flow explained:**
 Dragging a row puts its store index on the pasteboard. The column under the pointer highlights, and on drop calls `Controller::drop_task`, which moves the task in the list, sets its day, keeps the focus index pointing at the same task, saves, and re-renders on the next run-loop pass so the drag source is not torn down mid-session.
+\n
