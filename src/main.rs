@@ -1,3 +1,4 @@
+mod calendar;
 mod clip_card;
 mod clips;
 mod controller;
