@@ -1,4 +1,4 @@
-### [2026-11-09 22:15 UTC+07:00] — [Feature] Notch alert cards, focus settings, quick-add hints
+### [2026-11-09 21:55 UTC+07:00] — [Feature] Notch alert cards, focus settings, quick-add hints
 
 **Done:**
 - Alerts now drop a small card out of the notch (`NotchBanner`, its own non-activating panel) instead of opening the whole panel. Task reminders carry Snooze 5 min and Done; pomodoro and break ends show for 8 s.
