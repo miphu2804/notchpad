@@ -36,6 +36,30 @@
 **Flow explained:**
 `refresh()` calls `render_insights()` only while the Insights tab is visible; it builds `Insights` from the pomodoro log and tasks and hands it to `InsightsView`. The heatmap and rings cover the last 36 days (`SPAN`, six week columns) instead of a year; the palette is purple (focus), green (tasks), orange (pomodoros), cream moons. `Chart` draws each plot with NSBezierPath and skips the redraw when the plot is unchanged, so there are no new timers. Verified with 85 tests, offscreen renders from a scratch HOME (60 and 300 days, empty), and 0.0% idle CPU.
 
+### [2026-11-09 22:58 UTC+07:00] — [UI] Vendor icons in Integrations
+
+**Done:**
+- Embedded the official Notion, Linear and Google Calendar PNG icons from their vendors; calendar marks sit side by side, without tint or redrawing. Asset sources are in `assets/integrations/README.md`.
+- Verified: 89 tests pass; real Settings window screenshot inspected at `/tmp/notchpad-finish/logos/vendor-icons.png`. Both Add buttons dispatched through AppKit in a scratch HOME and changed to Added; Claude Code's CLI was stubbed, while Desktop wrote its real JSON format in the scratch directory. Temporary render/action hooks removed.
+- Still unverified: real Claude configuration, Calendar permission/events, and Linear sync with a real key.
+
+### [2026-11-09 22:16 UTC+07:00] — [Feature] Settings › Integrations: Claude, calendars, Linear
+
+**Done:**
+- New Integrations pane (`puzzlepiece.extension`) in three groups, one commit each.
+- Claude: **Add** for Claude Code (`claude mcp add --scope user`, `claude` found on PATH, `~/.claude/local`, `~/.local/bin`, Homebrew) and for Claude Desktop (JSON merge with `.bak`; invalid JSON is refused). Status reads `~/.claude.json` and the Desktop config.
+- Calendars: `calendar=1` setting; EventKit read of today's events, shown read-only above the tasks. Access is requested only when the switch is turned on.
+- Linear: key in the Keychain (`notchpad.linear`), `linear=1` flag in settings, `curl` with the config on stdin, import every 10 min on the existing 2 s tick (no new timer), completion calls `issueUpdate`.
+
+**Changed  files:**
+- `src/claude_mcp.rs`, `src/calendar.rs`, `src/linear.rs` — created
+- `src/settings_window.rs`, `src/settings.rs`, `src/controller.rs`, `src/days.rs`, `src/main.rs`, `Cargo.toml`, `Cargo.lock`, `macos/Info.plist`, `README.md` — modified
+
+**Flow explained:**
+- Switch on → `apply_settings` asks EventKit once, then `reloadEvents:` reads today's events (also on `EKEventStoreChanged` and at midnight); `render_task_card` prepends up to 3 event rows.
+- The reload tick starts a Linear fetch on a thread when due; the thread sends the parsed issues over a channel and pings `linearSynced:`, which dedupes by `ext` and saves. Ticking a `linear:` task done spawns a thread that looks up the team's completed state and updates the issue.
+- Verified: 89 tests (JSON merge, command args, claude lookup, GraphQL parsing, dedupe, curl request against a loopback server), pane rendered with a scratch HOME, 0.0% idle CPU. Not verified: a real Linear sync, a real calendar prompt and events, clicking Add.
+
 ### [2026-11-09 21:55 UTC+07:00] — [Feature] Notch alert cards, focus settings, quick-add hints
 
 **Done:**
@@ -112,42 +136,3 @@ The 2 s `reload:` tick calls `remind_tasks`, which works only when the minute ch
 
 **Flow explained:**
 `render_focus` (every timer tick) → ripeness = 1 − remaining ÷ session length → `Tomato::Growing(ripeness)` → `ripen` blends body, highlight and shade between the green, orange and red stops. Verified by a scratch render at 0, ¼, ½, ¾ and 1.
-
-### [2026-11-09 19:35 UTC+07:00] — [Fix] Signed builds keep permissions; block glyphs fill the cell
-
-**Done:**
-- `bundle.sh` signs with the first Apple Development identity in the keychain (ad-hoc when there is none). The designated requirement is now the identifier plus the certificate instead of the cdhash, so macOS keeps granted privacy permissions across rebuilds.
-- The terminal draws block elements (U+2580–U+259F) as rectangles snapped to the cell instead of font glyphs, which leave gaps in a cell taller than the font. Claude Code's logo now renders solid.
-
-**Changed  files:**
-- `macos/bundle.sh` — modified
-- `src/terminal_view.rs` — modified
-
-**Flow explained:**
-`paint` → `block_shape(ch)` gives cell-fraction rects and an alpha (shades) → filled in the foreground colour, edges rounded to whole points so neighbouring cells meet. Verified by a scratch render of the logo and every block group.
-
-### [2026-11-09 19:25 UTC+07:00] — [Fix] Terminal wheel scrolls programs that track the mouse
-
-**Done:**
-- When a program has turned on mouse tracking (e.g. Claude Code full screen, vim with `mouse=a`), the scroll wheel sends it wheel reports at the cell under the pointer, in SGR form when asked, else the legacy form. Before, the alternate screen always got arrow keys, which only walked the prompt history. Programs without mouse tracking still get arrows, and the normal screen still scrolls the scrollback.
-
-**Changed  files:**
-- `src/terminal_view.rs` — modified
-
-**Flow explained:**
-`scrollWheel:` → `scroll_by` turns the delta into whole lines → with `MOUSE_MODE`, `pointer_cell` + `wheel_report` (button 64 up / 65 down) per line; otherwise the arrow keys or scrollback path as before. Verified by a run against a probe program: mouse mode got `ESC[<64;41;1M` ×2 and `ESC[<65;41;1M`, plain alternate screen got `ESC[A` ×6 and `ESC[B` ×3.
-
-### [2026-11-09 18:35 UTC+07:00] — [Feature] Per-section panel size and collapse on Space change
-
-**Done:**
-- Each section has a size in Settings › Sections: Compact, Tall (1.6×) or Extra tall (2.5×). It is clamped to the screen's visible height minus 40 pt. Switching tabs springs the panel to that tab's height, and the content stays level with the panel top while it moves. The terminal is told its new size once per switch.
-- Switching Spaces or full-screen apps folds the expanded panel into the notch. A latch stops a pointer resting on the notch from reopening it until the pointer leaves and comes back.
-
-**Changed  files:**
-- `src/settings.rs` — modified
-- `src/settings_window.rs` — modified
-- `src/controller.rs` — modified
-- `src/notch_motion.rs` — modified
-
-**Flow explained:**
-`render_tabs` calls `fit_panel`, which computes `body_height(size, visible_height)` and hands the new rects to `NotchMotion::set_rects`. `apply` offsets the content by the height still to travel. `activeSpaceChanged:` comes from the NSWorkspace notification centre: it sets `space_collapsed` and collapses the panel. `mouseExited:` clears the latch.

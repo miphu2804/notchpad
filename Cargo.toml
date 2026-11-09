@@ -19,11 +19,13 @@ dispatch2 = "0.3.1"
 objc2 = "0.6.5"
 objc2-app-kit = "0.3.2"
 objc2-core-graphics = "0.3.2"
+objc2-event-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "EKCalendar", "EKCalendarItem", "EKEvent", "EKEventStore", "EKObject", "EKTypes"] }
 objc2-foundation = "0.3.2"
 objc2-quartz-core = "0.3.2"
 objc2-service-management = "0.3.2"
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNNotification", "UNNotificationResponse", "UNUserNotificationCenter", "UNNotificationCategory", "UNError"] }
-serde_json = "1"
+security-framework = "3"
+serde_json = { version = "1", features = ["preserve_order"] }
 
 [profile.release]
 opt-level = "z"
