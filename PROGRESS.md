@@ -1,3 +1,20 @@
+### [2026-11-09 14:35 UTC+07:00] — [Feature] Real PTY terminal tab
+
+**Done:**
+The Terminal tab is now a real terminal: the user's login shell in a PTY, emulated by `alacritty_terminal`, so `claude`, vim and htop run as in a full terminal. Colors (16/256/truecolor), alternate screen, block cursor, bold/dim/inverse/underline, scrollback on the wheel, Ctrl/Option/arrow/function keys, ⌘V with bracketed paste, and an `NSTextInputClient` for IME input. The shell starts the first time the tab opens and survives collapse; Return restarts it after exit. Replaces the old command runner (`shell.rs`). Built by a Sonnet thread; accepted by renders of colored output, typed input, vi full-screen, and `claude --version`. Idle CPU 0.0%; footprint 28.2 MB before the shell starts, about 41 MB with it running.
+
+**Changed  files:**
+- `src/terminal_view.rs` — created
+- `src/terminal_session.rs` — created
+- `src/terminal_keys.rs` — created
+- `src/terminal_palette.rs` — created
+- `src/shell.rs` — deleted
+- `src/controller.rs` — modified
+- `Cargo.toml` — modified
+
+**Flow explained:**
+`TerminalSession` spawns the PTY and alacritty's event loop; its listener hops to the main queue via `dispatch2` to mark `TerminalView` dirty, so nothing polls. `TerminalView` draws the grid per row, maps keys through `terminal_keys`, and resizes the PTY to its bounds. While the view is first responder the panel stays open.
+
 ### [2026-11-09 14:05 UTC+07:00] — [Feature] System-wide Now Playing, pomodoro chime, terminal Escape fix
 
 **Done:**
@@ -126,17 +143,3 @@ The notch panel springs open (slight overshoot) and closed (no overshoot) instea
 
 **Flow explained:**
 Hover still calls `set_expanded`, which now only sets the target on `NotchMotion`. A `CADisplayLink` on the panel wakes the spring and steps it each frame: it sets the window frame between the collapsed and expanded rects, keeps the content centred and pinned to the bottom edge, and sets the content's alpha and scale. When the frame and fade are at rest, the link pauses. Exit events are still checked against the real pointer, and while open the full expanded rect counts, so an exit during the spring polls `recheckHover:` rather than closing. Rows are rebuilt on every render as before. `list_row::snapshot` records the old rows by task text first, and `animate_changes` then puts the removed rows back as inert ghosts that fade out and then hide inside an implicit-animation group, and fades new rows in at their final frames while the stack animates the rest of the layout.
-
-### [2026-11-08 21:20 UTC+07:00] — [Feature] Let Claude plan it
-
-**Done:**
-Tasks gained optional `time` (HH:MM), `priority` (low/medium/high), `project` and `minutes`, stored as columns 5-8 of `tasks.txt`; 3- and 4-column lines still load, and trailing empty columns are not written. The MCP server has a new `plan_day` tool (several tasks, one atomic save, upsert by `ext` or by same open title on the same day) and `update_task`; `add_task` and `list_tasks` carry the new fields, and day/time/priority are validated. Today and Week rows show a dim line such as `5:00 PM · High · Home · 45 min`; Today's open tasks sort by time, untimed after. Lists now count two-line rows as 1.5 rows so they never overflow the card. `/plan-day` command added.
-
-**Changed  files:**
-- `src/store.rs` — modified (planning fields, line format, `Default`)
-- `src/bin/notchpad-mcp.rs` — modified (`plan_day`, `update_task`, field validation)
-- `src/controller.rs` — modified (`with_meta`, `meta_line`, `rows_that_fit`, Today time sort)
-- `.claude/commands/plan-day.md` — created
-
-**Flow explained:**
-"plan my afternoon: call mom at 5pm, gym after work !high" → Claude splits it and calls `plan_day` once → the server validates every item, upserts them in memory and saves `tasks.txt` once (any invalid item aborts with nothing written) → the app sees the new mtime within 2s and re-renders, with timed tasks first in the Today card.
