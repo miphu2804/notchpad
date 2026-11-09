@@ -24,7 +24,7 @@ pub struct Event {
     start: f64,
 }
 
-/// What macOS lets Notchday do with the user's calendars.
+/// What macOS lets NotchGo do with the user's calendars.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Access {
     Undecided,
