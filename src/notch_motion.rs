@@ -257,7 +257,10 @@ impl NotchMotion {
             return;
         }
         let size = s.content.frame().size;
-        s.content.setFrameOrigin(NSPoint::new(((frame.size.width - size.width) / 2.0).round(), 0.0));
+        // Stays level with the panel's top edge while the height springs to a new size, so the
+        // header never leaves the window; zero whenever the height is at rest.
+        let lag = s.height.get() - s.expanded.get().size.height;
+        s.content.setFrameOrigin(NSPoint::new(((frame.size.width - size.width) / 2.0).round(), lag.round()));
 
         let f = s.fade.get();
         let eased = f * f * (3.0 - 2.0 * f);
