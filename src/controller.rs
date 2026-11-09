@@ -8,7 +8,7 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyObject;
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+    NSAppearance, NSImageScaling, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
     NSApplication, NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
     NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
@@ -16,7 +16,7 @@ use objc2_app_kit::{
     NSStackViewDistribution, NSTextAlignment, NSTextField, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
+use objc2_foundation::{NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSNotificationSuspensionBehavior, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 
 use crate::clip_card::{self, ClipCard};
@@ -24,6 +24,7 @@ use crate::clips::ClipHistory;
 use crate::days;
 use crate::drop_column::DropColumn;
 use crate::list_row::{self, ListRow};
+use crate::now_playing::{self, Command, NowPlaying, Source};
 use crate::notch_motion::NotchMotion;
 use crate::task_row::TaskRow;
 use crate::quick_add;
@@ -41,6 +42,9 @@ const TOP_SLOP: f64 = 1.0;
 const DEFAULT_NOTCH: (f64, f64) = (185.0, 32.0);
 const FOCUS_CARD_WIDTH: f64 = 236.0;
 const PROGRESS_WIDTH: f64 = 150.0;
+const MUSIC_PROGRESS_WIDTH: f64 = 340.0;
+const MUSIC_TAB_WIDTH: f64 = 28.0;
+const ARTWORK_SIZE: f64 = 120.0;
 const MAX_CARD_ROWS: usize = 5;
 const MAX_COLUMN_ROWS: usize = 6;
 /// Gap between Today rows; a hairline is drawn in its middle.
@@ -94,12 +98,27 @@ struct ClipsView {
     empty: Retained<NSTextField>,
 }
 
+struct MusicView {
+    body: Retained<NSView>,
+    /// Artwork plus the track column; hidden while nothing plays.
+    now: Retained<NSStackView>,
+    empty: Retained<NSTextField>,
+    art: Retained<NSImageView>,
+    title: Retained<NSTextField>,
+    subtitle: Retained<NSTextField>,
+    progress: Retained<NSLayoutConstraint>,
+    elapsed: Retained<NSTextField>,
+    total: Retained<NSTextField>,
+    toggle: Retained<NSButton>,
+}
+
 #[derive(Clone, Copy, PartialEq, Default)]
 enum Tab {
     #[default]
     Workspace,
     Week,
     Clips,
+    Music,
 }
 
 struct Ui {
@@ -110,7 +129,9 @@ struct Ui {
     tab_workspace: Retained<NSButton>,
     tab_week: Retained<NSButton>,
     tab_clips: Retained<NSButton>,
+    tab_music: Retained<NSButton>,
     clips: ClipsView,
+    music: MusicView,
     focus: FocusCard,
     tasks: TaskCard,
     columns: Vec<Column>,
@@ -131,6 +152,9 @@ pub struct State {
     pinned: Cell<bool>,
     tab: Cell<Tab>,
     clips: RefCell<ClipHistory>,
+    now_playing: RefCell<NowPlaying>,
+    /// Runs only while the Music tab is visible and a track is playing.
+    music_timer: RefCell<Option<Retained<NSTimer>>>,
     show_completed: Cell<bool>,
     /// Task index chosen with ▶; falls back to the first open task of today.
     focus: Cell<Option<usize>>,
@@ -268,6 +292,43 @@ define_class!(
             self.refresh();
         }
 
+        #[unsafe(method(showMusic:))]
+        fn show_music(&self, _sender: &AnyObject) {
+            self.ivars().tab.set(Tab::Music);
+            self.refresh();
+        }
+
+        #[unsafe(method(musicPrevious:))]
+        fn music_previous(&self, _sender: &AnyObject) {
+            self.ivars().now_playing.borrow().send(Command::Previous);
+        }
+
+        #[unsafe(method(musicPlayPause:))]
+        fn music_play_pause(&self, _sender: &AnyObject) {
+            self.ivars().now_playing.borrow().send(Command::PlayPause);
+        }
+
+        #[unsafe(method(musicNext:))]
+        fn music_next(&self, _sender: &AnyObject) {
+            self.ivars().now_playing.borrow().send(Command::Next);
+        }
+
+        #[unsafe(method(musicChanged:))]
+        fn music_changed(&self, notification: &NSNotification) {
+            self.player_changed(Source::Music, notification);
+        }
+
+        #[unsafe(method(spotifyChanged:))]
+        fn spotify_changed(&self, notification: &NSNotification) {
+            self.player_changed(Source::Spotify, notification);
+        }
+
+        #[unsafe(method(tickMusic:))]
+        fn tick_music(&self, _timer: &NSTimer) {
+            self.ivars().now_playing.borrow_mut().tick();
+            self.render_music();
+        }
+
         #[unsafe(method(clearClips:))]
         fn clear_clips(&self, _sender: &AnyObject) {
             self.ivars().clips.borrow_mut().clear();
@@ -379,6 +440,14 @@ impl Controller {
             );
             // Lives for the whole process, so the returned timer handle is not kept.
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(2.0, this.target(), sel!(reload:), None, true);
+            // Delivered even while this accessory app is inactive, which it always is.
+            let center = NSDistributedNotificationCenter::defaultCenter();
+            for (name, action) in [(now_playing::MUSIC_NOTIFICATION, sel!(musicChanged:)), (now_playing::SPOTIFY_NOTIFICATION, sel!(spotifyChanged:))] {
+                center.addObserver_selector_name_object_suspensionBehavior(
+                    this.target(), action, Some(&NSString::from_str(name)), None,
+                    NSNotificationSuspensionBehavior::DeliverImmediately,
+                );
+            }
             // Reading the pasteboard's change count is cheap, so copies show up within half a second.
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.5, this.target(), sel!(pollClips:), None, true);
         }
@@ -458,6 +527,7 @@ impl Controller {
     fn set_expanded(&self, on: bool) {
         if self.ivars().expanded.replace(on) != on {
             self.ui().motion.set_open(on);
+            self.sync_music_timer();
         }
     }
 
@@ -478,6 +548,7 @@ impl Controller {
         self.render_focus();
         self.render_task_card();
         self.render_week();
+        self.render_music();
     }
 
     // ---- state queries -------------------------------------------------------------
@@ -509,15 +580,36 @@ impl Controller {
         self.render_focus();
     }
 
+    fn player_changed(&self, source: Source, notification: &NSNotification) {
+        let Some(info) = notification.userInfo() else { return };
+        self.ivars().now_playing.borrow_mut().apply(source, &now_playing::info_map(&info));
+        self.render_music();
+    }
+
+    /// One-second ticks only while someone can see the position move.
+    fn sync_music_timer(&self) {
+        let state = self.ivars();
+        let wanted = state.expanded.get() && state.tab.get() == Tab::Music && state.now_playing.borrow().playing();
+        let mut timer = state.music_timer.borrow_mut();
+        if wanted && timer.is_none() {
+            *timer = Some(unsafe {
+                NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(1.0, self.target(), sel!(tickMusic:), None, true)
+            });
+        } else if !wanted && let Some(timer) = timer.take() {
+            timer.invalidate();
+        }
+    }
+
     // ---- rendering -----------------------------------------------------------------
 
     fn render_tabs(&self) {
         let ui = self.ui();
         let current = self.ivars().tab.get();
-        let tabs: [(&NSView, &NSButton, Tab); 3] = [
+        let tabs: [(&NSView, &NSButton, Tab); 4] = [
             (&ui.workspace, &ui.tab_workspace, Tab::Workspace),
             (&ui.week, &ui.tab_week, Tab::Week),
             (&ui.clips.body, &ui.tab_clips, Tab::Clips),
+            (&ui.music.body, &ui.tab_music, Tab::Music),
         ];
         if !ui.content.isHidden() && tabs.iter().any(|(body, _, tab)| body.isHidden() == (*tab == current)) {
             crossfade(&ui.content);
@@ -530,6 +622,27 @@ impl Controller {
                 w::style_pill(pill, &white(0.1), &white(0.8), 12.0);
             }
         }
+    }
+
+    fn render_music(&self) {
+        let view = &self.ui().music;
+        {
+            let now = self.ivars().now_playing.borrow();
+            view.now.setHidden(now.track.is_none());
+            view.empty.setHidden(now.track.is_some());
+            if let Some(track) = &now.track {
+                view.art.setImage(Some(&track.artwork.clone().unwrap_or_else(|| w::symbol("music.note"))));
+                view.title.setStringValue(&NSString::from_str(&track.title));
+                let credits = [track.artist.as_str(), track.album.as_str()];
+                view.subtitle.setStringValue(&NSString::from_str(&credits.iter().filter(|c| !c.is_empty()).copied().collect::<Vec<_>>().join(" · ")));
+                view.elapsed.setStringValue(&NSString::from_str(&clock(track.position)));
+                view.total.setStringValue(&NSString::from_str(&clock(track.duration)));
+                let fraction = if track.duration > 0.0 { track.position / track.duration } else { 0.0 };
+                view.progress.setConstant(MUSIC_PROGRESS_WIDTH * fraction.clamp(0.0, 1.0));
+                view.toggle.setImage(Some(&w::symbol(if track.playing { "pause.fill" } else { "play.fill" })));
+            }
+        }
+        self.sync_music_timer();
     }
 
     /// Rebuilds the cards; called only when the history changes, so a card being dragged
@@ -816,7 +929,7 @@ impl Controller {
 
         // The header sits in the menu-bar band: close top-left as on macOS windows, tabs right
         // of the hardware notch.
-        let (quit, tabs, tab_workspace, tab_week, tab_clips) = self.build_header(mtm);
+        let (quit, tabs, tab_workspace, tab_week, tab_clips, tab_music) = self.build_header(mtm);
         let header = NSView::new(mtm);
         header.setTranslatesAutoresizingMaskIntoConstraints(false);
         content.addSubview(&header);
@@ -843,7 +956,8 @@ impl Controller {
         task_view.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
         let (week, columns) = self.build_week(mtm);
         let clips = self.build_clips(mtm);
-        for body in [&*workspace, &*week, &*clips.body] {
+        let music = self.build_music(mtm);
+        for body in [&*workspace, &*week, &*clips.body, &*music.body] {
             content.addSubview(body);
             body.leadingAnchor().constraintEqualToAnchor_constant(&content.leadingAnchor(), 12.0).setActive(true);
             body.trailingAnchor().constraintEqualToAnchor_constant(&content.trailingAnchor(), -12.0).setActive(true);
@@ -855,24 +969,29 @@ impl Controller {
         }
 
         let motion = NotchMotion::new(panel.clone(), content.clone(), collapsed, expanded, mtm);
-        Ui { panel, content, workspace, week, tab_workspace, tab_week, tab_clips, clips, focus, tasks, columns, expanded: Cell::new(expanded), header_height, notch_gap, motion }
+        Ui { panel, content, workspace, week, tab_workspace, tab_week, tab_clips, tab_music, clips, music, focus, tasks, columns, expanded: Cell::new(expanded), header_height, notch_gap, motion }
     }
 
-    /// Returns the close button, the tabs group, and the three tab buttons.
+    /// Returns the close button, the tabs group, and the four tab buttons.
     fn build_header(
         &self,
         mtm: MainThreadMarker,
-    ) -> (Retained<NSButton>, Retained<NSStackView>, Retained<NSButton>, Retained<NSButton>, Retained<NSButton>) {
+    ) -> (Retained<NSButton>, Retained<NSStackView>, Retained<NSButton>, Retained<NSButton>, Retained<NSButton>, Retained<NSButton>) {
         let tab_workspace = w::pill("Workspace", 24.0, self.target(), sel!(showWorkspace:), mtm);
         let tab_week = w::pill("Week", 24.0, self.target(), sel!(showWeek:), mtm);
         let tab_clips = w::pill("Clips", 24.0, self.target(), sel!(showClips:), mtm);
         for tab in [&tab_workspace, &tab_week, &tab_clips] {
-            w::fit_pill(tab, 10.0);
+            w::fit_pill(tab, 7.0);
         }
+        // Icon only: a fourth text pill would not fit between the notch and the right edge.
+        let tab_music = w::pill("", 24.0, self.target(), sel!(showMusic:), mtm);
+        tab_music.setImage(Some(&w::symbol("music.note")));
+        tab_music.setImagePosition(NSCellImagePosition::ImageOnly);
+        tab_music.widthAnchor().constraintEqualToConstant(MUSIC_TAB_WIDTH).setActive(true);
         let quit = w::icon_button("xmark", "", 10.0, &white(0.55), self.target(), sel!(quit:), mtm);
 
-        let tabs = w::stack(&[&tab_workspace, &tab_week, &tab_clips], false, 6.0, mtm);
-        (quit, tabs, tab_workspace, tab_week, tab_clips)
+        let tabs = w::stack(&[&tab_workspace, &tab_week, &tab_clips, &tab_music], false, 4.0, mtm);
+        (quit, tabs, tab_workspace, tab_week, tab_clips, tab_music)
     }
 
     fn build_focus_card(&self, mtm: MainThreadMarker) -> (Retained<NSView>, FocusCard) {
@@ -1048,6 +1167,65 @@ impl Controller {
         ClipsView { body: body.into_super(), strip, count, empty }
     }
 
+    /// Artwork on the left; title, credits, progress and transport controls on the right.
+    fn build_music(&self, mtm: MainThreadMarker) -> MusicView {
+        let art = NSImageView::new(mtm);
+        art.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+        art.setContentTintColor(Some(&white(0.4)));
+        fixed_size(&art, ARTWORK_SIZE, ARTWORK_SIZE);
+        w::paint(&art, &white(0.08), 14.0);
+        if let Some(layer) = art.layer() {
+            layer.setMasksToBounds(true);
+        }
+
+        let title = w::label("", 17.0, unsafe { NSFontWeightBold }, &white(0.95), mtm);
+        let subtitle = w::label("", 12.0, unsafe { NSFontWeightRegular }, &white(0.6), mtm);
+        for text in [&title, &subtitle] {
+            text.widthAnchor().constraintLessThanOrEqualToConstant(MUSIC_PROGRESS_WIDTH).setActive(true);
+        }
+
+        let track = w::filled(&white(0.15), 1.5, mtm);
+        fixed_size(&track, MUSIC_PROGRESS_WIDTH, 3.0);
+        let fill = w::filled(&white(0.85), 1.5, mtm);
+        track.addSubview(&fill);
+        fill.leadingAnchor().constraintEqualToAnchor(&track.leadingAnchor()).setActive(true);
+        fill.topAnchor().constraintEqualToAnchor(&track.topAnchor()).setActive(true);
+        fill.bottomAnchor().constraintEqualToAnchor(&track.bottomAnchor()).setActive(true);
+        let progress = fill.widthAnchor().constraintEqualToConstant(0.0);
+        progress.setActive(true);
+
+        let elapsed = w::label("0:00", 11.0, unsafe { NSFontWeightRegular }, &white(0.45), mtm);
+        let total = w::label("0:00", 11.0, unsafe { NSFontWeightRegular }, &white(0.45), mtm);
+        let times = w::stack(&[&elapsed, &w::spacer(mtm), &total], false, 0.0, mtm);
+        times.widthAnchor().constraintEqualToConstant(MUSIC_PROGRESS_WIDTH).setActive(true);
+
+        let button = |symbol: &str, size: f64, action| {
+            let button = w::icon_button(symbol, "", size, &white(0.9), self.target(), action, mtm);
+            fixed_size(&button, 40.0, 36.0);
+            button
+        };
+        let previous = button("backward.fill", 16.0, sel!(musicPrevious:));
+        let toggle = button("play.fill", 22.0, sel!(musicPlayPause:));
+        let next = button("forward.fill", 16.0, sel!(musicNext:));
+        let controls = w::stack(&[&previous, &toggle, &next], false, 10.0, mtm);
+
+        let column = w::stack(&[&title, &subtitle, &track, &times, &controls], true, 6.0, mtm);
+        column.setCustomSpacing_afterView(12.0, &subtitle);
+        column.setCustomSpacing_afterView(10.0, &times);
+        let now = w::stack(&[&art, &column], false, 20.0, mtm);
+
+        let empty = w::label("Nothing playing. Start Music or Spotify.", 12.0, unsafe { NSFontWeightRegular }, &white(0.45), mtm);
+        let body = NSView::new(mtm);
+        body.setTranslatesAutoresizingMaskIntoConstraints(false);
+        for view in [&**now, &**empty] {
+            body.addSubview(view);
+            view.setTranslatesAutoresizingMaskIntoConstraints(false);
+            view.centerXAnchor().constraintEqualToAnchor(&body.centerXAnchor()).setActive(true);
+            view.centerYAnchor().constraintEqualToAnchor(&body.centerYAnchor()).setActive(true);
+        }
+        MusicView { body, now, empty, art, title, subtitle, progress, elapsed, total, toggle }
+    }
+
     /// "+ <input>" row used under every task list.
     fn add_row(&self, input: &NSTextField, tint: &NSColor, mtm: MainThreadMarker) -> Retained<NSStackView> {
         let plus = NSImageView::imageViewWithImage(&w::symbol("plus"), mtm);
@@ -1055,6 +1233,12 @@ impl Controller {
         input.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
         w::stack(&[&plus, input], false, 6.0, mtm)
     }
+}
+
+/// `m:ss` for a position or duration in seconds.
+fn clock(seconds: f64) -> String {
+    let seconds = seconds as u64;
+    format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 /// Open task scheduled for today or rolled over from an earlier day (Inbox excluded).
