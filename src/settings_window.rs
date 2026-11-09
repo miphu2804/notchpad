@@ -167,7 +167,8 @@ define_class!(
             self.refresh_integrations(CLAUDE_DESKTOP_ROW, error);
         }
 
-        /// Starts OAuth, cancels a pending browser flow, or disconnects. Credentials never enter the UI.
+        /// Starts OAuth (or, with no OAuth client configured, connects the pasted personal key),
+        /// cancels a pending browser flow, or disconnects. Credentials go only to the Keychain.
         #[unsafe(method(toggleLinear:))]
         fn toggle_linear(&self, _sender: &NSButton) {
             if let Some(attempt) = self.ivars().linear_oauth_pending.borrow_mut().take() {
@@ -181,6 +182,23 @@ define_class!(
             if settings.linear {
                 linear::disconnect();
                 settings.linear = false;
+                self.commit(settings);
+                return self.refresh_integrations(-1, None);
+            }
+            if linear::oauth_client_id().is_none() {
+                let pane = &self.ivars().parts.get().expect("built in new()").panes[INTEGRATIONS_PANE];
+                let field = pane.viewWithTag(FIELD + LINEAR_ROW).and_then(|v| v.downcast::<NSTextField>().ok());
+                let key = field.as_ref().map(|f| f.stringValue().to_string()).unwrap_or_default();
+                if key.trim().is_empty() {
+                    return self.refresh_integrations(LINEAR_ROW, Some("Paste a personal API key first".to_owned()));
+                }
+                if let Err(error) = linear::connect_key(key.trim()) {
+                    return self.refresh_integrations(LINEAR_ROW, Some(error));
+                }
+                if let Some(field) = field {
+                    field.setStringValue(&NSString::new());
+                }
+                settings.linear = true;
                 self.commit(settings);
                 return self.refresh_integrations(-1, None);
             }
@@ -403,6 +421,7 @@ impl SettingsWindow {
             name: "Linear",
             blurb: Some(""),
             button: Some(("Connect", sel!(toggleLinear:))),
+            field: linear::oauth_client_id().is_none().then_some("Personal API key"),
             ..Row::default()
         }];
         let calendar_note = "Add a Google account in System Settings › Internet Accounts. Notion Calendar events come from that same Google calendar.";
@@ -537,7 +556,7 @@ impl SettingsWindow {
             _ if linear_pending => "Waiting for Linear authorization…",
             _ if linear_on => "Syncing your assigned issues",
             _ if linear::oauth_client_id().is_some() => "Connects with Linear using OAuth",
-            _ => "OAuth client ID is not configured",
+            _ => "Paste a key from Linear › Settings › Security & access",
         };
         if let Some(label) = pane.viewWithTag(STATUS + LINEAR_ROW).and_then(|v| v.downcast::<NSTextField>().ok()) {
             label.setStringValue(&NSString::from_str(linear_blurb));
