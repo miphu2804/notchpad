@@ -9,7 +9,7 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSButton, NSCellImagePosition,
     NSControlSize, NSControlStateValueOn, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular, NSImageView,
-    NSPopUpButton, NSSwitch, NSTextAlignment, NSView, NSWindow, NSWindowStyleMask,
+    NSPopUpButton, NSSwitch, NSTextAlignment, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
 
@@ -131,8 +131,10 @@ impl SettingsWindow {
         };
         unsafe { window.setReleasedWhenClosed(false) };
         window.setTitle(&NSString::from_str("Notchpad Settings"));
-        // The sidebar runs up behind the traffic lights.
+        // The sidebar runs up behind the traffic lights. The title stays set for the Window
+        // menu and accessibility but is not drawn: it would straddle the sidebar's edge.
         window.setTitlebarAppearsTransparent(true);
+        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         window.setBackgroundColor(Some(&rgba(30, 30, 33, 1.0)));
         window.setAppearance(unsafe { NSAppearance::appearanceNamed(NSAppearanceNameDarkAqua) }.as_deref());
         window.center();
@@ -144,7 +146,8 @@ impl SettingsWindow {
 
         let target: &AnyObject = self.as_ref();
         let rows: Vec<_> = PANES.iter().enumerate().map(|(i, (symbol, name))| {
-            let row = w::icon_button(symbol, name, 13.0, &rgba(255, 255, 255, 0.9), target, sel!(selectPane:), mtm);
+            // AppKit puts no gap between an image and its title; the spaces add one.
+            let row = w::icon_button(symbol, &format!("  {name}"), 13.0, &rgba(255, 255, 255, 0.9), target, sel!(selectPane:), mtm);
             row.setTag(i as isize);
             row.setAlignment(NSTextAlignment::Left);
             row.setImagePosition(NSCellImagePosition::ImageLeft);
