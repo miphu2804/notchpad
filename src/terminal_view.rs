@@ -133,7 +133,7 @@ define_class!(
 
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
-            self.scroll_by(event.scrollingDeltaY(), event.hasPreciseScrollingDeltas());
+            self.scroll_by(event);
         }
     }
 
@@ -392,8 +392,9 @@ impl TerminalView {
         self.setNeedsDisplay(true);
     }
 
-    fn scroll_by(&self, delta: f64, precise: bool) {
-        let lines = if precise { delta / self.ivars().cell.1 } else { delta };
+    fn scroll_by(&self, event: &NSEvent) {
+        let delta = event.scrollingDeltaY();
+        let lines = if event.hasPreciseScrollingDeltas() { delta / self.ivars().cell.1 } else { delta };
         let total = self.ivars().scroll_rest.get() + lines;
         let whole = total.trunc();
         self.ivars().scroll_rest.set(total - whole);
@@ -402,7 +403,12 @@ impl TerminalView {
             return;
         }
         let mode = self.mode();
-        if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+        if mode.intersects(TermMode::MOUSE_MODE) {
+            // The program tracks the mouse, so it scrolls its own view: report the wheel.
+            let Some((column, row)) = self.pointer_cell(event) else { return };
+            let report = wheel_report(steps > 0, column, row, mode.contains(TermMode::SGR_MOUSE));
+            self.send(report.repeat(steps.unsigned_abs() as usize));
+        } else if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
             // No scrollback on the alternate screen: do what the arrow keys would.
             let key = if steps > 0 { Special::Up } else { Special::Down };
             let arrow = terminal_keys::special_bytes(key, Mods::default(), mode.contains(TermMode::APP_CURSOR));
@@ -411,6 +417,15 @@ impl TerminalView {
             session.scroll(Scroll::Delta(steps));
             self.setNeedsDisplay(true);
         }
+    }
+
+    /// Screen (column, row) under the pointer.
+    fn pointer_cell(&self, event: &NSEvent) -> Option<(usize, usize)> {
+        let session = self.ivars().session.borrow();
+        let term = session.as_ref()?.term();
+        let local = self.convertPoint_fromView(event.locationInWindow(), None);
+        let (point, _) = cell_at(local, self.ivars().cell, 0, term.columns(), term.screen_lines());
+        Some((point.column.0, point.line.0 as usize))
     }
 
     /// Cursor position as (row, column) on screen.
@@ -568,6 +583,19 @@ fn cell_at(point: NSPoint, cell: (f64, f64), display_offset: usize, cols: usize,
     (Point::new(Line(row - display_offset as i32), Column(column)), side)
 }
 
+/// One wheel notch as a mouse report: button 64 is up, 65 down. SGR when the program
+/// asked for it, else the legacy encoding, which offsets each value by 32 and so cannot
+/// address past column or row 223.
+fn wheel_report(up: bool, column: usize, row: usize, sgr: bool) -> Vec<u8> {
+    let button: u8 = if up { 64 } else { 65 };
+    if sgr {
+        format!("\x1b[<{button};{};{}M", column + 1, row + 1).into_bytes()
+    } else {
+        let coord = |v: usize| (v + 33).min(255) as u8;
+        vec![0x1b, b'[', b'M', 32 + button, coord(column), coord(row)]
+    }
+}
+
 fn resolve(color: Color, overrides: &Colors) -> Rgb {
     match color {
         Color::Spec(rgb) => rgb,
@@ -605,6 +633,14 @@ mod tests {
     use super::*;
 
     const CELL: (f64, f64) = (7.0, 14.0);
+
+    #[test]
+    fn wheel_reports_in_sgr_and_legacy_form() {
+        assert_eq!(wheel_report(true, 4, 9, true), b"\x1b[<64;5;10M");
+        assert_eq!(wheel_report(false, 0, 0, true), b"\x1b[<65;1;1M");
+        assert_eq!(wheel_report(true, 4, 9, false), [0x1b, b'[', b'M', 96, 37, 42]);
+        assert_eq!(wheel_report(false, 300, 0, false)[4], 255);
+    }
 
     #[test]
     fn point_maps_to_cell_and_half() {
