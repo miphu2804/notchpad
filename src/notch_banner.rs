@@ -14,9 +14,8 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use crate::panel::{self, NotchShape};
 use crate::widgets::{self as w, rgba};
 
-/// The card hugs its text and buttons between these widths, so the content sits balanced in it
-/// rather than leaving a wide empty right side.
-const MIN_WIDTH: f64 = 300.0;
+/// The card hugs its text and buttons, never narrower than the notch it hangs from, so no black
+/// shoulders stand out beside short content.
 const MAX_WIDTH: f64 = 420.0;
 const BODY: f64 = 72.0;
 /// Extra body height for the button row.
@@ -115,7 +114,8 @@ impl NotchBanner {
         let button_widths: Vec<f64> = [&self.snooze, &self.done].iter().map(|b| b.intrinsicContentSize().width + 28.0).collect();
         let buttons = if notice.actions { button_widths.iter().sum::<f64>() + 8.0 } else { 0.0 };
         let text = self.title.intrinsicContentSize().width.max(self.subtitle.intrinsicContentSize().width);
-        let width = (TEXT_X + text.max(buttons) + PAD + 4.0).clamp(MIN_WIDTH, MAX_WIDTH);
+        let notch_width = notch.size.width - 2.0 * panel::ear(notch.size.height);
+        let width = (TEXT_X + text.max(buttons) + PAD + 4.0).clamp(notch_width, MAX_WIDTH);
         // Icon to the end of the longer of text and buttons, centred in the card; at the cap the
         // text truncates instead.
         let content = (TEXT_X - PAD + text.max(buttons) + 4.0).min(width - 2.0 * PAD);
