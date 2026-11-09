@@ -10,12 +10,14 @@
 //! - only the reminder changed: the task takes its title, day, time, priority and completion;
 //! - the task changed: the reminder takes the task's fields (the task wins when both changed,
 //!   except that a completion on the phone is kept);
-//! - a linked reminder disappeared: the task is deleted, and a linked task deleted in
-//!   Notchpad deletes its reminder;
+//! - a linked reminder disappeared: an open task is deleted, a done one only loses its link (so
+//!   "Clear Completed" on the phone keeps Notchpad's history); a linked task deleted in Notchpad
+//!   deletes its reminder;
 //! - a new, open reminder becomes a task.
 //!
-//! When the list comes back empty while the snapshot is not (the list was deleted or recreated),
-//! links are dropped instead of deleting tasks, so the tasks are put back into the new list.
+//! Nothing is deleted on a reset: when the list was just (re)created, or when no task is linked
+//! although the snapshot says some were (the task file failed to load or was replaced). Links are
+//! dropped instead, so the tasks go back into the list and its open reminders come back as tasks.
 
 use std::collections::{HashMap, HashSet};
 use std::{fs, io, path::PathBuf};
@@ -54,9 +56,11 @@ pub struct Changes {
 
 /// Brings `tasks` in line with `reminders` (every reminder of the list, done ones included) and
 /// returns what the list needs. Tasks still without a link afterwards are new: see [`to_create`].
-pub fn reconcile(tasks: &mut Vec<Task>, reminders: &[Reminder], snapshot: &Snapshot) -> Changes {
+/// `list_created` says the list did not exist before this pass.
+pub fn reconcile(tasks: &mut Vec<Task>, reminders: &[Reminder], snapshot: &Snapshot, list_created: bool) -> Changes {
     let by_id: HashMap<&str, &Reminder> = reminders.iter().map(|r| (r.id.as_str(), r)).collect();
-    let reset = reminders.is_empty() && !snapshot.is_empty();
+    let tasks_lost = !snapshot.is_empty() && !tasks.iter().any(|t| t.ext.starts_with(PREFIX));
+    let reset = list_created || tasks_lost;
     let mut changes = Changes::default();
     let mut kept = Vec::with_capacity(tasks.len());
     for mut task in tasks.drain(..) {
@@ -73,7 +77,7 @@ pub fn reconcile(tasks: &mut Vec<Task>, reminders: &[Reminder], snapshot: &Snaps
                     pull(&mut task, reminder);
                     changes.tasks_changed = true;
                 } else if task_changed {
-                    if phone_changed && reminder.done && !task.done {
+                    if phone_changed && reminder.done && !task.done && !base.is_some_and(|b| b.done) {
                         task.set_done(true);
                         changes.tasks_changed = true;
                     }
@@ -85,7 +89,7 @@ pub fn reconcile(tasks: &mut Vec<Task>, reminders: &[Reminder], snapshot: &Snaps
                 kept.push(task);
             }
             // Deleted on the other side.
-            None if snapshot.contains_key(&id) && !reset => changes.tasks_changed = true,
+            None if snapshot.contains_key(&id) && !reset && !task.done => changes.tasks_changed = true,
             None => {
                 task.ext.clear();
                 changes.tasks_changed = true;
@@ -96,7 +100,7 @@ pub fn reconcile(tasks: &mut Vec<Task>, reminders: &[Reminder], snapshot: &Snaps
 
     let linked: HashSet<String> = kept.iter().filter_map(|t| t.ext.strip_prefix(PREFIX).map(str::to_owned)).collect();
     for reminder in reminders.iter().filter(|r| !linked.contains(&r.id)) {
-        if snapshot.contains_key(&reminder.id) {
+        if snapshot.contains_key(&reminder.id) && !reset {
             changes.delete.push(reminder.id.clone());
         } else if !reminder.done {
             let mut task = Task { ext: format!("{PREFIX}{}", reminder.id), ..Task::default() };
@@ -119,6 +123,11 @@ pub fn snapshot_of(tasks: &[Task]) -> Snapshot {
     tasks.iter().filter_map(|t| t.ext.strip_prefix(PREFIX).map(|id| (id.to_owned(), fields(t, id)))).collect()
 }
 
+/// A reminder title as a task's text: tabs and line breaks would break the task file's lines.
+pub fn clean(title: &str) -> String {
+    title.replace(['\t', '\n', '\r'], " ")
+}
+
 pub fn fields(task: &Task, id: &str) -> Reminder {
     Reminder {
         id: id.to_owned(),
@@ -132,7 +141,7 @@ pub fn fields(task: &Task, id: &str) -> Reminder {
 }
 
 fn pull(task: &mut Task, reminder: &Reminder) {
-    task.text = reminder.text.clone();
+    task.text = clean(&reminder.text);
     task.day = reminder.day.clone();
     task.time = reminder.time.clone();
     task.priority = reminder.priority.clone();
@@ -173,8 +182,7 @@ fn format_snapshot(snapshot: &Snapshot) -> String {
     ids.into_iter()
         .map(|id| {
             let r = &snapshot[id];
-            // Tabs and newlines would break the line format; titles never need them.
-            let text = r.text.replace(['\t', '\n'], " ");
+            let text = clean(&r.text);
             format!("{id}\t{}\t{}\t{}\t{}\t{text}\n", u8::from(r.done), r.day, r.time, r.priority)
         })
         .collect()
@@ -201,7 +209,7 @@ mod tests {
         let base = reminder("a", "Call mom");
         let mut tasks = vec![task("Call mom", "rem:a")];
         let phone = Reminder { text: "Call mom back".to_owned(), time: "17:00".to_owned(), done: true, ..base.clone() };
-        let changes = reconcile(&mut tasks, &[phone], &snapshot(&[base]));
+        let changes = reconcile(&mut tasks, &[phone], &snapshot(&[base]), false);
         assert!(changes.tasks_changed && changes.update.is_empty());
         assert_eq!((tasks[0].text.as_str(), tasks[0].time.as_str(), tasks[0].done), ("Call mom back", "17:00", true));
         assert_eq!(tasks[0].done_on, crate::days::key(0));
@@ -212,7 +220,7 @@ mod tests {
         let base = reminder("a", "Call mom");
         let mut tasks = vec![Task { priority: "high".to_owned(), ..task("Call dad", "rem:a") }];
         let phone = Reminder { text: "Call mom later".to_owned(), ..base.clone() };
-        let changes = reconcile(&mut tasks, &[phone], &snapshot(&[base]));
+        let changes = reconcile(&mut tasks, &[phone], &snapshot(&[base]), false);
         assert_eq!(changes.update, [Reminder { text: "Call dad".to_owned(), priority: "high".to_owned(), ..reminder("a", "") }]);
         assert!(!changes.tasks_changed);
     }
@@ -222,7 +230,7 @@ mod tests {
         let base = reminder("a", "Call mom");
         let mut tasks = vec![task("Call mom now", "rem:a")];
         let phone = Reminder { done: true, ..base.clone() };
-        let changes = reconcile(&mut tasks, &[phone], &snapshot(&[base]));
+        let changes = reconcile(&mut tasks, &[phone], &snapshot(&[base]), false);
         assert!(tasks[0].done);
         assert_eq!(changes.update, [Reminder { text: "Call mom now".to_owned(), done: true, ..reminder("a", "") }]);
     }
@@ -231,7 +239,7 @@ mod tests {
     fn unchanged_pairs_need_nothing() {
         let base = reminder("a", "Call mom");
         let mut tasks = vec![task("Call mom", "rem:a"), task("Local", ""), task("ENG-1", "linear:ENG-1")];
-        let changes = reconcile(&mut tasks, &[base.clone()], &snapshot(&[base]));
+        let changes = reconcile(&mut tasks, &[base.clone()], &snapshot(&[base]), false);
         assert_eq!(changes, Changes::default());
         assert_eq!(tasks.len(), 3);
     }
@@ -240,7 +248,7 @@ mod tests {
     fn deletions_cross_over_both_ways() {
         let (gone, kept) = (reminder("a", "Deleted on phone"), reminder("b", "Deleted in Notchpad"));
         let mut tasks = vec![task("Deleted on phone", "rem:a"), task("Stays", "")];
-        let changes = reconcile(&mut tasks, &[kept.clone()], &snapshot(&[gone, kept]));
+        let changes = reconcile(&mut tasks, &[kept.clone()], &snapshot(&[gone, kept]), false);
         assert_eq!(tasks.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), ["Stays"]);
         assert_eq!(changes.delete, ["b"]);
         assert!(changes.tasks_changed);
@@ -251,19 +259,61 @@ mod tests {
         let mut tasks = Vec::new();
         let open = Reminder { priority: "medium".to_owned(), ..reminder("n", "Buy milk") };
         let done = Reminder { done: true, ..reminder("d", "Old") };
-        let changes = reconcile(&mut tasks, &[open, done], &Snapshot::new());
+        let changes = reconcile(&mut tasks, &[open, done], &Snapshot::new(), false);
         assert!(changes.tasks_changed);
         assert_eq!(tasks.len(), 1);
         assert_eq!((tasks[0].ext.as_str(), tasks[0].text.as_str(), tasks[0].priority.as_str()), ("rem:n", "Buy milk", "medium"));
     }
 
     #[test]
-    fn an_emptied_list_unlinks_instead_of_deleting() {
+    fn a_recreated_list_unlinks_instead_of_deleting() {
         let mut tasks = vec![task("Call mom", "rem:a")];
-        let changes = reconcile(&mut tasks, &[], &snapshot(&[reminder("a", "Call mom")]));
+        let changes = reconcile(&mut tasks, &[], &snapshot(&[reminder("a", "Call mom")]), true);
         assert!(changes.tasks_changed);
         assert_eq!((tasks.len(), tasks[0].ext.as_str()), (1, ""));
         assert_eq!(to_create(&tasks), [0]);
+    }
+
+    #[test]
+    fn deleting_the_last_reminder_on_the_phone_deletes_its_task() {
+        let mut tasks = vec![task("Call mom", "rem:a")];
+        reconcile(&mut tasks, &[], &snapshot(&[reminder("a", "Call mom")]), false);
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn a_lost_task_file_deletes_no_reminder() {
+        let a = reminder("a", "Call mom");
+        let mut tasks = Vec::new();
+        let changes = reconcile(&mut tasks, &[a.clone()], &snapshot(&[a]), false);
+        assert!(changes.delete.is_empty());
+        assert_eq!(tasks[0].ext, "rem:a");
+    }
+
+    #[test]
+    fn clearing_completed_on_the_phone_keeps_done_tasks() {
+        let base = Reminder { done: true, ..reminder("a", "Paid rent") };
+        let mut tasks = vec![Task { done: true, ..task("Paid rent", "rem:a") }, task("Linked", "rem:b")];
+        let b = reminder("b", "Linked");
+        reconcile(&mut tasks, &[b.clone()], &snapshot(&[base, b]), false);
+        assert_eq!((tasks.len(), tasks[0].done, tasks[0].ext.as_str()), (2, true, ""));
+    }
+
+    #[test]
+    fn a_reopen_in_notchpad_survives_a_title_edit_on_the_phone() {
+        let base = Reminder { done: true, ..reminder("a", "Call mom") };
+        let mut tasks = vec![task("Call mom", "rem:a")];
+        let phone = Reminder { text: "Call mom!".to_owned(), ..base.clone() };
+        let changes = reconcile(&mut tasks, &[phone], &snapshot(&[base]), false);
+        assert!(!tasks[0].done);
+        assert_eq!(changes.update, [reminder("a", "Call mom")]);
+    }
+
+    #[test]
+    fn phone_titles_cannot_break_the_task_file() {
+        let mut tasks = Vec::new();
+        reconcile(&mut tasks, &[reminder("n", "Buy\tmilk\nand eggs")], &Snapshot::new(), false);
+        assert_eq!(tasks[0].text, "Buy milk and eggs");
     }
 
     #[test]
