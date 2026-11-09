@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSClickGestureRecognizer, NSControlStateValueOn, NSForegroundColorAttributeName, NSStrikethroughStyleAttributeName, NSUnderlineStyle, NSSound, 
+use objc2_app_kit::{NSClickGestureRecognizer, NSLineBreakMode, NSPasteboard, NSPasteboardTypeString, NSControlStateValueOn, NSForegroundColorAttributeName, NSStrikethroughStyleAttributeName, NSUnderlineStyle, NSSound, 
     NSAppearance, NSImageScaling, NSAppearanceCustomization, NSAppearanceNameDarkAqua,
     NSApplication, NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
@@ -67,7 +67,11 @@ const LONG_BREAK_MIN: u64 = 15;
 /// A long break follows every this many focus sessions.
 const CYCLE: usize = 4;
 /// How long the focus card's task line shows what just happened to the session.
-const TOAST_SECS: f64 = 6.0;
+/// How long a deleted task can be brought back with Undo.
+const UNDO_SECS: f64 = 6.0;
+/// A reminder whose minute passed longer ago than this (the Mac slept through it) is dropped;
+/// the system notification at the task's time still covers it.
+const REMIND_GRACE_MIN: u32 = 5;
 const TOMATO_SIZE: f64 = 22.0;
 const CORAL: (u8, u8, u8) = (217, 112, 90);
 /// Cards and the controls on them, in the near-black, faintly cool greys of Linear's dark theme.
@@ -102,6 +106,9 @@ struct TaskCard {
     done: Retained<NSButton>,
     /// Clears today's completed tasks; shown only on the Completed list when it has any.
     clear: Retained<NSButton>,
+    /// The reminder or the "Deleted" line beside the list pills.
+    note: Retained<NSTextField>,
+    undo: Retained<NSButton>,
     /// One dot per entry of `PRIORITIES`, picking the priority of tasks added here.
     dots: Vec<Retained<NSButton>>,
     rows: Retained<NSStackView>,
@@ -218,8 +225,14 @@ pub struct State {
     break_min: Cell<u64>,
     /// The chime that is ringing; held because a released `NSSound` stops mid-note.
     chime: RefCell<Option<Retained<NSSound>>>,
-    /// What just happened to the session, shown on the focus card's task line for `TOAST_SECS`.
-    toast: RefCell<Option<(String, Instant)>>,
+    /// What just happened to the session, shown on the focus card's task line until the panel closes.
+    toast: RefCell<Option<String>>,
+    /// The task reminder that popped the notch open, shown on the task card until the panel closes.
+    task_toast: RefCell<Option<String>>,
+    /// `YYYY-MM-DD HH:MM` of the last reminder check; empty until the first one.
+    reminded_at: RefCell<String>,
+    /// The last deleted task and where it stood, while Undo can still restore it.
+    undo: RefCell<Option<(usize, Task, Instant)>>,
     /// Last seven days of `pomodoros.txt`, read once per refresh.
     week: Cell<Week>,
     ticker: RefCell<Option<Retained<NSTimer>>>,
@@ -311,8 +324,10 @@ define_class!(
                 if index >= tasks.len() {
                     return;
                 }
-                tasks.remove(index);
+                let task = tasks.remove(index);
+                *self.ivars().undo.borrow_mut() = Some((index, task, Instant::now()));
             }
+            unsafe { NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(UNDO_SECS, self.target(), sel!(undoExpired:), None, false) };
             // The focus card refers to tasks by index, so follow the shift.
             let focus = self.ivars().focus.get().and_then(|f| match f {
                 f if f == index => None,
@@ -321,6 +336,40 @@ define_class!(
             });
             self.ivars().focus.set(focus);
             self.save_and_refresh();
+        }
+
+        #[unsafe(method(undoDelete:))]
+        fn undo_delete(&self, _sender: &AnyObject) {
+            let Some((index, task, _)) = self.ivars().undo.take() else { return };
+            let index = {
+                let mut tasks = self.ivars().tasks.borrow_mut();
+                let index = index.min(tasks.len());
+                tasks.insert(index, task);
+                index
+            };
+            let focus = self.ivars().focus.get().map(|f| if f >= index { f + 1 } else { f });
+            self.ivars().focus.set(focus);
+            self.save_and_refresh();
+        }
+
+        /// A later delete restarts the clock, so only an Undo that has really run out is dropped.
+        #[unsafe(method(undoExpired:))]
+        fn undo_expired(&self, _timer: &NSTimer) {
+            let stale = self.ivars().undo.borrow().as_ref().is_some_and(|(_, _, at)| at.elapsed().as_secs_f64() >= UNDO_SECS - 0.1);
+            if stale {
+                self.ivars().undo.take();
+                self.render_task_card();
+            }
+        }
+
+        #[unsafe(method(copyMarkdown:))]
+        fn copy_markdown(&self, _item: &NSMenuItem) {
+            let tasks = self.ivars().tasks.borrow();
+            let (todo, done) = today_lists(&tasks, &days::key(0));
+            let text = checklist(todo.iter().chain(&done).map(|&i| &tasks[i]));
+            let pasteboard = NSPasteboard::generalPasteboard();
+            pasteboard.clearContents();
+            pasteboard.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
         }
 
         #[unsafe(method(setPriority:))]
@@ -519,11 +568,6 @@ define_class!(
             self.render_focus();
         }
 
-        #[unsafe(method(toastExpired:))]
-        fn toast_expired(&self, _timer: &NSTimer) {
-            self.render_focus();
-        }
-
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: &NSTimer) {
             let Some(deadline) = self.ivars().deadline.get() else {
@@ -548,10 +592,8 @@ define_class!(
                     self.run_timer(self.session_secs());
                     (Chime::FocusEnd, format!("Pomodoro {done} done · {} break {break_min} min", if long { "long" } else { "short" }))
                 };
-                self.announce(chime, toast);
-                self.ivars().tab.set(Tab::Workspace);
-                self.refresh();
-                self.pin_open();
+                *self.ivars().toast.borrow_mut() = Some(toast);
+                self.alert(chime);
             } else {
                 self.render_focus();
             }
@@ -560,6 +602,7 @@ define_class!(
         /// Picks up edits made to `tasks.txt` by other processes (e.g. the MCP server).
         #[unsafe(method(reload:))]
         fn reload(&self, _timer: &NSTimer) {
+            self.remind_tasks();
             let mtime = store::modified();
             if mtime != self.ivars().seen_mtime.get() {
                 self.ivars().seen_mtime.set(mtime);
@@ -777,6 +820,11 @@ impl Controller {
             self.sync_activity();
             if !on && self.terminal_has_focus() {
                 self.ui().panel.makeFirstResponder(None);
+            }
+            // An alert has been seen once the panel closes after it.
+            if !on && (self.ivars().toast.take().is_some() | self.ivars().task_toast.take().is_some()) {
+                self.render_focus();
+                self.render_task_card();
             }
         }
     }
@@ -1024,15 +1072,47 @@ impl Controller {
         }
     }
 
-    /// Rings the chime and shows `toast` on the focus card until a one-shot timer clears it.
-    fn announce(&self, chime: Chime, toast: String) {
+    /// Rings `chime` and opens the panel on Workspace, where the cards say what happened. The
+    /// keyboard stays with the app in use, and the panel stays until the pointer visits and leaves.
+    /// While the terminal is being typed in, only the chime sounds.
+    fn alert(&self, chime: Chime) {
         let sound = chime.sound();
         if let Some(sound) = &sound {
             sound.play();
         }
         *self.ivars().chime.borrow_mut() = sound;
-        *self.ivars().toast.borrow_mut() = Some((toast, Instant::now()));
-        unsafe { NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(TOAST_SECS, self.target(), sel!(toastExpired:), None, false) };
+        if self.terminal_has_focus() {
+            self.refresh();
+            return;
+        }
+        self.ivars().tab.set(Tab::Workspace);
+        self.refresh();
+        self.ivars().pinned.set(true);
+        self.set_expanded(true);
+        self.ui().panel.orderFrontRegardless();
+    }
+
+    /// Pops the notch open for tasks whose reminder minute passed since the last check. Called
+    /// on the 2 s reload tick; it does work only when the minute changes.
+    fn remind_tasks(&self) {
+        let stamp = days::stamp();
+        let last = self.ivars().reminded_at.replace(stamp.clone());
+        if last.is_empty() || last == stamp {
+            return;
+        }
+        let (today, clock) = stamp.split_once(' ').unwrap_or_default();
+        let Some(now) = task_alerts::minutes(clock) else { return };
+        let earliest = now.saturating_sub(REMIND_GRACE_MIN);
+        let after = match last.split_once(' ') {
+            Some((day, clock)) if day == today => task_alerts::minutes(clock).unwrap_or(now).max(earliest),
+            _ => earliest,
+        };
+        let due = task_alerts::reminders_between(&self.ivars().tasks.borrow(), today, after, now);
+        let Some(first) = due.first() else { return };
+        let text = if due.len() > 1 { format!("{first} · +{} more", due.len() - 1) } else { first.clone() };
+        *self.ivars().task_toast.borrow_mut() = Some(text);
+        self.ivars().show_completed.set(false);
+        self.alert(Chime::Reminder);
     }
 
     fn render_focus(&self) {
@@ -1058,7 +1138,7 @@ impl Controller {
                 Tomato::Empty
             });
         }
-        let toast = state.toast.borrow().as_ref().filter(|(_, at)| at.elapsed().as_secs_f64() < TOAST_SECS).map(|(text, _)| text.clone());
+        let toast = state.toast.borrow().clone();
         if let Some(toast) = toast {
             set(&card.task, &toast);
             card.task.setTextColor(Some(&tone(CORAL)));
@@ -1126,12 +1206,7 @@ impl Controller {
         let card = &self.ui().tasks;
         let today = days::key(0);
         let tasks = self.ivars().tasks.borrow();
-        let mut todo: Vec<usize> = (0..tasks.len()).filter(|&i| is_open_today(&tasks[i], &today)).collect();
-        // Most urgent first; within a priority, timed tasks in clock order, then untimed ones
-        // in their stored order.
-        let list: &[Task] = &tasks;
-        todo.sort_by_key(|&i| (priority_rank(&list[i].priority), list[i].time.is_empty(), list[i].time.as_str()));
-        let done: Vec<usize> = (0..tasks.len()).filter(|&i| tasks[i].done && tasks[i].day == today).collect();
+        let (todo, done) = today_lists(&tasks, &today);
 
         let show_completed = self.ivars().show_completed.get();
         card.todo.setTitle(&NSString::from_str(&format!("To do  {}", todo.len())));
@@ -1142,6 +1217,11 @@ impl Controller {
         w::fit_pill(&card.todo, 10.0);
         w::fit_pill(&card.done, 10.0);
         card.clear.setHidden(!show_completed || done.is_empty());
+        let undo = self.ivars().undo.borrow().as_ref().map(|(_, task, _)| format!("Deleted “{}”", task.text));
+        let reminder = self.ivars().task_toast.borrow().clone();
+        card.undo.setHidden(undo.is_none());
+        card.note.setStringValue(&NSString::from_str(undo.as_deref().or(reminder.as_deref()).unwrap_or_default()));
+        card.note.setTextColor(Some(&*if undo.is_some() { white(0.55) } else { tone(CORAL) }));
         self.render_priority_dots();
 
         let before = list_row::snapshot(&card.rows);
@@ -1195,6 +1275,7 @@ impl Controller {
         let items = [
             ("Open dashboard window", sel!(openDashboard:), ""),
             ("Export backup (JSON)…", sel!(exportBackup:), ""),
+            ("Copy today as Markdown", sel!(copyMarkdown:), ""),
             ("Settings…", sel!(openSettings:), ","),
         ];
         for (title, action, key) in items {
@@ -1583,7 +1664,15 @@ impl Controller {
         let clear = w::pill("Clear", 22.0, self.target(), sel!(clearCompleted:), mtm);
         w::fit_pill(&clear, 10.0);
         w::style_pill(&clear, &white(0.0), &white(0.55), 7.0);
-        let pills = w::stack(&[&todo, &done, &w::spacer(mtm), &clear], false, 4.0, mtm);
+        let note = w::label("", 11.0, unsafe { NSFontWeightMedium }, &tone(CORAL), mtm);
+        note.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        note.setContentCompressionResistancePriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
+        note.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
+        let undo = w::pill("Undo", 22.0, self.target(), sel!(undoDelete:), mtm);
+        w::fit_pill(&undo, 10.0);
+        w::style_pill(&undo, &white(0.1), &white(0.95), 7.0);
+        undo.setHidden(true);
+        let pills = w::stack(&[&todo, &done, &note, &undo, &clear], false, 4.0, mtm);
         let rows = w::stack(&[], true, CARD_ROW_GAP, mtm);
         let top = w::stack(&[&head, &pills, &rows], true, 10.0, mtm);
         card.addSubview(&top);
@@ -1616,7 +1705,7 @@ impl Controller {
         line.bottomAnchor().constraintEqualToAnchor_constant(&bottom.topAnchor(), -8.0).setActive(true);
         bottom.bottomAnchor().constraintEqualToAnchor_constant(&card.bottomAnchor(), -10.0).setActive(true);
 
-        (card, TaskCard { todo, done, clear, dots, rows, input })
+        (card, TaskCard { todo, done, clear, note, undo, dots, rows, input })
     }
 
     /// Title row, then the clips hanging from a line in a sideways-scrolling strip, then a hint.
@@ -1798,6 +1887,36 @@ fn clock(seconds: f64) -> String {
 }
 
 /// Open task scheduled for today or rolled over from an earlier day (Inbox excluded).
+/// Indices of today's open tasks, most urgent first (within a priority, timed tasks in clock
+/// order, then untimed ones in stored order), and of today's completed tasks.
+fn today_lists(tasks: &[Task], today: &str) -> (Vec<usize>, Vec<usize>) {
+    let mut todo: Vec<usize> = (0..tasks.len()).filter(|&i| is_open_today(&tasks[i], today)).collect();
+    todo.sort_by_key(|&i| (priority_rank(&tasks[i].priority), tasks[i].time.is_empty(), tasks[i].time.as_str()));
+    let done = (0..tasks.len()).filter(|&i| tasks[i].done && tasks[i].day == today).collect();
+    (todo, done)
+}
+
+/// A Markdown checklist in the quick-add syntax, so a line pasted back into the input keeps
+/// its time, priority and project.
+fn checklist<'a>(tasks: impl Iterator<Item = &'a Task>) -> String {
+    tasks
+        .map(|t| {
+            let mut line = format!("- [{}] ", if t.done { 'x' } else { ' ' });
+            if !t.time.is_empty() {
+                line += &format!("{} ", t.time);
+            }
+            line += &t.text;
+            if !t.priority.is_empty() {
+                line += &format!(" !{}", t.priority);
+            }
+            if !t.project.is_empty() {
+                line += &format!(" #{}", t.project);
+            }
+            line + "\n"
+        })
+        .collect()
+}
+
 fn is_open_today(task: &Task, today: &str) -> bool {
     !task.done && !task.day.is_empty() && task.day.as_str() <= today
 }
@@ -1983,6 +2102,28 @@ fn frames_at_top(frame: NSRect, width: f64, height: f64, body: f64) -> (NSRect, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checklist_keeps_time_priority_and_project() {
+        let open = Task { text: "Gym".into(), time: "18:00".into(), priority: "high".into(), project: "Health".into(), ..Task::default() };
+        let done = Task { text: "Mail".into(), done: true, ..Task::default() };
+        assert_eq!(checklist([&open, &done].into_iter()), "- [ ] 18:00 Gym !high #Health\n- [x] Mail\n");
+    }
+
+    #[test]
+    fn today_lists_sort_open_and_keep_done_apart() {
+        let task = |text: &str, day: &str, time: &str, priority: &str, done: bool| Task {
+            text: text.into(), day: day.into(), time: time.into(), priority: priority.into(), done, ..Task::default()
+        };
+        let tasks = [
+            task("later", "D", "", "", false),
+            task("tomorrow", "E", "", "high", false),
+            task("evening", "D", "18:00", "low", false),
+            task("urgent", "D", "", "high", false),
+            task("done", "D", "", "", true),
+        ];
+        assert_eq!(today_lists(&tasks, "D"), (vec![3, 2, 0], vec![4]));
+    }
 
     #[test]
     fn priorities_sort_most_urgent_first_and_none_last() {

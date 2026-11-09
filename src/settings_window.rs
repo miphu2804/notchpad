@@ -1,5 +1,6 @@
 //! The Settings window: a sidebar of panes and, beside it, grouped rows of switches.
-//! Every switch saves the settings and reports them to the controller, which applies them live.
+//! Every switch saves the settings and reports them to the controller, which applies them live,
+//! except Open at login: that is the system's login-item state, read and set through `SMAppService`.
 
 use std::cell::{OnceCell, RefCell};
 
@@ -12,6 +13,7 @@ use objc2_app_kit::{
     NSPopUpButton, NSSwitch, NSTextAlignment, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
+use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
 use crate::settings::{SECTIONS, Settings, Size};
 use crate::widgets::{self as w, rgba};
@@ -25,7 +27,7 @@ const ROW: f64 = 50.0;
 const SIZE_MENU_WIDTH: f64 = 96.0;
 
 /// Sidebar rows, top to bottom: SF Symbol and name.
-const PANES: [(&str, &str); 2] = [("square.grid.2x2", "Sections"), ("rectangle.topthird.inset.filled", "Notch")];
+const PANES: [(&str, &str); 3] = [("square.grid.2x2", "Sections"), ("rectangle.topthird.inset.filled", "Notch"), ("gearshape", "General")];
 const WINGS: [(&str, &str); 2] = [("play.circle", "Show what's playing"), ("timer", "Show focus countdown")];
 
 struct Parts {
@@ -80,6 +82,22 @@ define_class!(
                 settings.wing_focus = on;
             }
             self.commit(settings);
+        }
+
+        /// Registers or removes the app as a login item. macOS refuses for a binary outside an
+        /// app bundle; the switch then snaps back to the real state.
+        #[unsafe(method(toggleLogin:))]
+        fn toggle_login(&self, sender: &NSSwitch) {
+            let service = unsafe { SMAppService::mainAppService() };
+            let result = if sender.state() == NSControlStateValueOn {
+                unsafe { service.registerAndReturnError() }
+            } else {
+                unsafe { service.unregisterAndReturnError() }
+            };
+            if let Err(err) = result {
+                eprintln!("notchpad: could not change the login item: {}", err.localizedDescription());
+            }
+            sender.setState(if opens_at_login() { NSControlStateValueOn } else { 0 });
         }
     }
 );
@@ -163,7 +181,12 @@ impl SettingsWindow {
         let wings: Vec<_> = WINGS.iter().zip([settings.wing_music, settings.wing_focus])
             .map(|((symbol, name), on)| (*symbol, *name, None, on, sel!(toggleWing:)))
             .collect();
-        let panes = vec![self.pane("Sections", &sections, Some(settings.sizes), mtm), self.pane("Collapsed notch", &wings, None, mtm)];
+        let general = [("power", "Open at login", None, opens_at_login(), sel!(toggleLogin:))];
+        let panes = vec![
+            self.pane("Sections", &sections, Some(settings.sizes), mtm),
+            self.pane("Collapsed notch", &wings, None, mtm),
+            self.pane("General", &general, None, mtm),
+        ];
         for pane in &panes {
             content.addSubview(pane);
         }
@@ -247,6 +270,12 @@ impl SettingsWindow {
         }
         pane
     }
+}
+
+/// Whether macOS will start the app at login; "requires approval" counts, since the user has asked.
+fn opens_at_login() -> bool {
+    let status = unsafe { SMAppService::mainAppService().status() };
+    status == SMAppServiceStatus::Enabled || status == SMAppServiceStatus::RequiresApproval
 }
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
