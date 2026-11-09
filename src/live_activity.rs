@@ -133,6 +133,14 @@ impl LiveActivity {
         Self { view, art, bars, bar_layers, animating: Cell::new(false), time }
     }
 
+    /// Centres the wings' contents vertically in a collapsed panel `notch_height` tall.
+    pub fn center_in(&self, notch_height: f64) {
+        let y = ((notch_height - ART) / 2.0).round();
+        for (view, dy) in [(&*self.art as &NSView, 0.0), (&*self.bars, 0.0), (&*self.time, (ART - 16.0) / 2.0)] {
+            view.setFrameOrigin(NSPoint::new(view.frame().origin.x, y + dy));
+        }
+    }
+
     /// Fades the wings in or out and fills them; `visible` is false while the panel is open.
     pub fn show(&self, activity: &Activity, visible: bool) {
         self.art.setHidden(activity.music.is_none());

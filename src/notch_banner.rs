@@ -207,6 +207,13 @@ impl NotchBanner {
         self.panel.contentView().expect("content view set in new")
     }
 
+    /// Draws the card as a bar or notch, black or glass, like the notch it hangs from.
+    pub fn set_look(&self, bar: bool, glass: bool) {
+        if let Ok(shape) = self.content().downcast::<NotchShape>() {
+            shape.set_look(bar, glass);
+        }
+    }
+
     /// Slides the card's content to `lift` above the panel and fades it to `alpha`. Core Animation
     /// runs it, so no timer is involved.
     fn animate(&self, lift: f64, alpha: f64, seconds: f64, [a, b, c, d]: [f32; 4], done: Option<&DynBlock<dyn Fn()>>) {
