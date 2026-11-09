@@ -1,6 +1,6 @@
 # Notchpad
 
-A small, native macOS app that lives in the notch. It holds your tasks, notes, a pomodoro timer and a terminal, and shows what's playing. Hover the notch (or press ⌥N) to open it.
+A small, native macOS app that lives in the notch. It holds today's tasks, a pomodoro timer and a terminal, and shows what's playing. Hover the notch (or press ⌥N) to open it.
 
 [![Install for Mac](https://img.shields.io/badge/Install_for_Mac-Download-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/miphu2804/notchpad/releases/latest/download/Notchpad.zip)
 
@@ -8,12 +8,10 @@ Apple Silicon, macOS 14 or later. It is written in Rust with AppKit, runs at 0% 
 
 ## Features
 
-- **Workspace.** Today's tasks with quick add (`gym 6pm !high #health 45m tomorrow`). A pomodoro card shows today's tomatoes, a stopwatch, +5 min and weekly focus stats.
-- **Week.** Tasks, calendar events and reminders laid out by day. Calendar and Reminders are only accessed after you click to allow them.
+- **Workspace.** Today's tasks with quick add (`gym 6pm !high #health 45m tomorrow`), sorted by priority. Pick a priority from the coloured dots beside the input or by right-clicking a task. A pomodoro card shows today's tomatoes, a stopwatch, +5 min and weekly focus stats.
 - **Collapsed notch.** Shows album art with a moving waveform while music plays, or the focus countdown.
 - **Playing.** Now playing from any app (Spotify, Music, YouTube in a browser), with playback controls.
 - **Clips.** A short clipboard history.
-- **Notes.** Saved automatically. Turn a line into a task with ⌘↩.
 - **Terminal.** A real shell in the notch.
 - **Notifications.** Alerts for timed tasks, a JSON backup export, and a dashboard window. Right-click the header to open the dashboard or export.
 
@@ -46,5 +44,6 @@ Sync runs through Claude: Claude uses the service's MCP connector together with 
 
 - **Store.** `~/Library/Application Support/notchpad/tasks.txt`, one task per line, tab separated. `ext` is the stable external id (`linear:ENG-12`, `notion:<page-id>`, `gcal:<event-id>`). The app reloads the file within about 2 s of an external write.
 - **Server.** Register it with `claude mcp add --scope user notchpad -- $PWD/target/release/notchpad-mcp`. Tools: `list_tasks`, `add_task` (upserts when `ext` is given), `complete_task`, `move_task`, `update_task`, `plan_day`.
+- **Inbox.** A task without a day sits in the Inbox, which the notch does not show. `add_task` puts tasks there unless given a day; `move_task` or `plan_day` brings them into today.
 - **Conflict rule.** A task done on either side stays done. The `day` set in Notchpad wins over the service's date. The title comes from the service. Tasks are deduplicated by `ext`, so re-running never creates duplicates.
 - **Run it.** Authorize the connectors in Claude Code (`/mcp`), then run `/sync-tasks` (`.claude/commands/sync-tasks.md`).

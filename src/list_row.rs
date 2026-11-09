@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSAnimationContext, NSColor, NSEvent, NSStackView, NSTrackingArea,
     NSTrackingAreaOptions, NSView,
@@ -23,7 +23,6 @@ const SLIDE_SECS: f64 = 0.28;
 pub struct Ivars {
     /// Identifies the task across re-renders, which rebuild every row.
     key: String,
-    content: Retained<NSView>,
     tint: Retained<NSView>,
     /// A removed row kept on screen only to animate out: ignores the pointer.
     leaving: Cell<bool>,
@@ -80,7 +79,6 @@ impl ListRow {
         highlight.setAlphaValue(0.0);
         let this = mtm.alloc::<Self>().set_ivars(Ivars {
             key: key.to_owned(),
-            content: content.retain(),
             tint: highlight,
             leaving: Cell::new(false),
         });
@@ -121,12 +119,6 @@ impl ListRow {
         line.trailingAnchor().constraintEqualToAnchor(&self.trailingAnchor()).setActive(true);
         line.heightAnchor().constraintEqualToConstant(1.0).setActive(true);
         line.bottomAnchor().constraintEqualToAnchor_constant(&self.topAnchor(), -((gap - 1.0) / 2.0).round()).setActive(true);
-    }
-
-
-    /// The view this row wraps.
-    pub fn content(&self) -> Retained<NSView> {
-        self.ivars().content.clone()
     }
 
     fn key(&self) -> &str {

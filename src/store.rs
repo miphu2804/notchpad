@@ -55,23 +55,9 @@ pub fn load() -> Vec<Task> {
     contents.lines().filter(|l| !l.trim().is_empty()).map(parse).collect()
 }
 
-/// The scratch note lives beside `tasks.txt`.
-pub fn notes_path() -> PathBuf {
-    path().with_file_name("notes.txt")
-}
-
+/// The scratch note an earlier version kept beside `tasks.txt`; still included in backups.
 pub fn load_notes() -> String {
-    fs::read_to_string(notes_path()).unwrap_or_default()
-}
-
-pub fn save_notes(text: &str) -> io::Result<()> {
-    let path = notes_path();
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, text)?;
-    fs::rename(tmp, path)
+    fs::read_to_string(path().with_file_name("notes.txt")).unwrap_or_default()
 }
 
 /// Last-modified time of the task file, used to notice writes by other processes.

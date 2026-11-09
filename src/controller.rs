@@ -1,11 +1,8 @@
-//! Owns the notch window, the tasks and the focus timer, and renders the Workspace and
-//! Week tabs. Every change re-renders from `State`; the views hold no state of their own.
+//! Owns the notch window, the tasks and the focus timer, and renders the notch's tabs. Every change re-renders from `State`; the views hold no state of their own.
 
 use std::cell::{Cell, OnceCell, RefCell};
-use std::ptr::NonNull;
 use std::time::{Duration, Instant};
 
-use block2::RcBlock;
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -16,27 +13,22 @@ use objc2_app_kit::{NSClickGestureRecognizer, NSControlStateValueOn, NSForegroun
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
     NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
     NSLayoutConstraintOrientation, NSMainMenuWindowLevel, NSMenu, NSMenuItem, NSModalResponseOK, NSSavePanel, NSAutoresizingMaskOptions, NSScreen, NSScrollView, NSWindow, NSWindowDelegate, NSStackView,
-    NSStackViewDistribution, NSTextAlignment, NSTextDidChangeNotification, NSTextDidEndEditingNotification, NSTextField, NSTrackingArea,
+    NSStackViewDistribution, NSTextAlignment, NSTextField, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
-use objc2_event_kit::EKEventStoreChangedNotification;
-use objc2_foundation::{NSMutableAttributedString, NSNumber, NSRange, NSNotification, NSNotificationCenter, NSObject, NSOperationQueue, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
+use objc2_foundation::{NSMutableAttributedString, NSNumber, NSRange, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 
-use crate::calendar::{self, Access, Calendar, Event, Reminder};
 use crate::clip_card::{self, ClipCard};
 use crate::clips::ClipHistory;
 use crate::settings::{Settings, Size};
 use crate::settings_window::SettingsWindow;
 use crate::days;
-use crate::drop_column::DropColumn;
 use crate::export;
 use crate::list_row::{self, ListRow};
 use crate::live_activity::{Activity, LiveActivity};
 use crate::now_playing::{Command, NowPlaying};
-use crate::note_view::{self, NoteView};
 use crate::notch_motion::NotchMotion;
-use crate::task_row::TaskRow;
 use crate::quick_add;
 use crate::terminal_view::{self, TerminalView};
 use crate::chime::Chime;
@@ -63,17 +55,8 @@ const MUSIC_PROGRESS_WIDTH: f64 = 340.0;
 const ICON_TAB_WIDTH: f64 = 32.0;
 const ARTWORK_SIZE: f64 = 120.0;
 const MAX_CARD_ROWS: usize = 5;
-const MAX_COLUMN_ROWS: usize = 6;
-/// Calendar rows per day before "+N more".
-const MAX_DAY_EVENTS: usize = 4;
-/// Reminder rows per day before "+N more".
-const MAX_DAY_REMINDERS: usize = 3;
-/// The Week tab shows today (0) and tomorrow (1).
-const WEEK_LAST_OFFSET: i64 = 1;
 /// Gap between Today rows; a hairline is drawn in its middle.
 const CARD_ROW_GAP: f64 = 15.0;
-/// Quiet period after the last keystroke before the note is written to disk.
-const NOTES_SAVE_DELAY: f64 = 0.5;
 const DURATIONS_MIN: [u64; 4] = [15, 25, 45, 60];
 /// One step past the presets in `duration_idx`: count up with no deadline.
 const STOPWATCH: usize = DURATIONS_MIN.len();
@@ -95,20 +78,8 @@ fn tone((r, g, b): (u8, u8, u8)) -> Retained<NSColor> {
     rgba(r, g, b, 1.0)
 }
 
-/// Week columns, also used as the add-field tag that picks the new task's day.
-const INBOX: isize = 0;
-const TODAY: isize = 1;
-const TOMORROW: isize = 2;
-
 fn white(alpha: f64) -> Retained<NSColor> {
     rgba(255, 255, 255, alpha)
-}
-
-struct Column {
-    /// Calendar rows above the tasks; the Inbox column hosts the access pill instead.
-    events: Retained<NSStackView>,
-    list: Retained<NSStackView>,
-    count: Retained<NSTextField>,
 }
 
 struct FocusCard {
@@ -159,15 +130,6 @@ struct MusicView {
     toggle: Retained<NSButton>,
 }
 
-struct NotesView {
-    body: Retained<NSView>,
-    text: Retained<NoteView>,
-    /// Placeholder shown while the note is empty.
-    hint: Retained<NSTextField>,
-    /// Brief confirmation after ⌘↩ turns a line into a task.
-    added: Retained<NSTextField>,
-}
-
 struct TerminalPane {
     body: Retained<NSView>,
     view: Retained<TerminalView>,
@@ -177,16 +139,14 @@ struct TerminalPane {
 enum Tab {
     #[default]
     Workspace,
-    Week,
     Clips,
     Music,
-    Notes,
     Terminal,
 }
 
 impl Tab {
     /// In header order, like [`crate::settings::SECTIONS`].
-    const ALL: [Tab; 6] = [Tab::Workspace, Tab::Week, Tab::Clips, Tab::Music, Tab::Notes, Tab::Terminal];
+    const ALL: [Tab; 4] = [Tab::Workspace, Tab::Clips, Tab::Music, Tab::Terminal];
 }
 
 /// The header's views: close, the tab groups left and right of the notch, and each tab.
@@ -195,10 +155,8 @@ struct Header {
     left: Retained<NSStackView>,
     right: Retained<NSStackView>,
     workspace: Retained<NSButton>,
-    week: Retained<NSButton>,
     clips: Retained<NSButton>,
     music: Retained<NSButton>,
-    notes: Retained<NSButton>,
     terminal: Retained<NSButton>,
 }
 
@@ -206,20 +164,15 @@ struct Ui {
     panel: Retained<NotchPanel>,
     content: Retained<NSView>,
     workspace: Retained<NSStackView>,
-    week: Retained<NSStackView>,
     tab_workspace: Retained<NSButton>,
-    tab_week: Retained<NSButton>,
     tab_clips: Retained<NSButton>,
     tab_music: Retained<NSButton>,
-    tab_notes: Retained<NSButton>,
     tab_terminal: Retained<NSButton>,
     clips: ClipsView,
     music: MusicView,
-    notes: NotesView,
     terminal: TerminalPane,
     focus: FocusCard,
     tasks: TaskCard,
-    columns: Vec<Column>,
     expanded: Cell<NSRect>,
     /// Height of the header band beside the notch; follows the display's safe area.
     header_height: Retained<NSLayoutConstraint>,
@@ -241,11 +194,6 @@ pub struct State {
     space_collapsed: Cell<bool>,
     tab: Cell<Tab>,
     clips: RefCell<ClipHistory>,
-    calendar: Calendar,
-    /// Today and tomorrow, refetched on tab switch, panel open and `EKEventStoreChanged`.
-    events: RefCell<Vec<Event>>,
-    /// Incomplete reminders due by tomorrow, refetched together with `events`.
-    reminders: RefCell<Vec<Reminder>>,
     now_playing: RefCell<NowPlaying>,
     /// Wing width the panel was last told to grow by; zero when nothing is live.
     wings: Cell<f64>,
@@ -300,7 +248,7 @@ define_class!(
             self.hide_dashboard();
         }
 
-        /// Typing in the notes or terminal holds the panel open even after the pointer leaves.
+        /// Typing in the terminal holds the panel open even after the pointer leaves.
         /// Clicking another window ends that, so fold it unless the pointer is still over it.
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, notification: &NSNotification) {
@@ -342,15 +290,7 @@ define_class!(
             let text = field.stringValue().to_string();
             let text = text.trim();
             if !text.is_empty() {
-                let (today, tomorrow) = (days::key(0), days::key(1));
-                let default_day = match field.tag() {
-                    INBOX => "",
-                    TOMORROW => &tomorrow,
-                    _ => &today,
-                };
-                let from_card = std::ptr::eq(field, &*self.ui().tasks.input);
-                let priority = if from_card { PRIORITIES[self.ivars().new_priority.get()] } else { "" };
-                self.push_task(text, default_day, priority);
+                self.push_task(text, &days::key(0), PRIORITIES[self.ivars().new_priority.get()]);
             }
             field.setStringValue(&NSString::new());
         }
@@ -411,16 +351,6 @@ define_class!(
             self.save_and_refresh();
         }
 
-        #[unsafe(method(moveToInbox:))]
-        fn move_to_inbox(&self, item: &NSMenuItem) {
-            self.reschedule(item.tag() as usize, String::new());
-        }
-
-        #[unsafe(method(moveToToday:))]
-        fn move_to_today(&self, item: &NSMenuItem) {
-            self.reschedule(item.tag() as usize, days::key(0));
-        }
-
         #[unsafe(method(moveToTomorrow:))]
         fn move_to_tomorrow(&self, item: &NSMenuItem) {
             self.reschedule(item.tag() as usize, days::key(1));
@@ -448,30 +378,6 @@ define_class!(
         fn show_workspace(&self, _sender: &AnyObject) {
             self.ivars().tab.set(Tab::Workspace);
             self.refresh();
-        }
-
-        #[unsafe(method(showWeek:))]
-        fn show_week(&self, _sender: &AnyObject) {
-            self.ivars().tab.set(Tab::Week);
-            self.reload_events();
-            self.refresh();
-        }
-
-        #[unsafe(method(requestCalendar:))]
-        fn request_calendar(&self, _sender: &AnyObject) {
-            self.ivars().calendar.request_access();
-        }
-
-        #[unsafe(method(requestReminders:))]
-        fn request_reminders(&self, _sender: &AnyObject) {
-            self.ivars().calendar.request_reminders_access();
-        }
-
-        #[unsafe(method(completeReminder:))]
-        fn complete_reminder(&self, sender: &NSButton) {
-            if let Some(reminder) = self.ivars().reminders.borrow().get(sender.tag() as usize) {
-                self.ivars().calendar.complete(&reminder.id);
-            }
         }
 
         #[unsafe(method(showClips:))]
@@ -513,30 +419,6 @@ define_class!(
             self.render_music();
         }
 
-        #[unsafe(method(showNotes:))]
-        fn show_notes(&self, _sender: &AnyObject) {
-            self.ivars().tab.set(Tab::Notes);
-            self.refresh();
-        }
-
-        /// Text changed: toggles the placeholder and saves once typing pauses.
-        #[unsafe(method(notesChanged:))]
-        fn notes_changed(&self, _notification: &NSNotification) {
-            self.after_note_edit();
-        }
-
-        #[unsafe(method(saveNotes:))]
-        fn save_notes(&self, _arg: Option<&AnyObject>) {
-            self.save_notes_now();
-        }
-
-        /// Focus left the note (clicked elsewhere): the hover may have ended meanwhile.
-        #[unsafe(method(notesEditingEnded:))]
-        fn notes_editing_ended(&self, _notification: &NSNotification) {
-            self.save_notes_now();
-            self.collapse_when_left();
-        }
-
         /// Starts the shell on first use and hands the keyboard to it.
         #[unsafe(method(showTerminal:))]
         fn show_terminal(&self, _sender: &AnyObject) {
@@ -550,16 +432,11 @@ define_class!(
         }
 
         /// The terminal lost focus: the pointer may have left the panel meanwhile. Runs
-        /// after the responder change, when `note_has_focus` has settled.
+        /// after the responder change, when `terminal_has_focus` has settled.
         #[unsafe(method(terminalResigned:))]
         fn terminal_resigned(&self, _notification: &NSNotification) {
             let none: Option<&AnyObject> = None;
             let _: () = unsafe { msg_send![self, performSelector: sel!(recheckHover:), withObject: none, afterDelay: 0.0f64] };
-        }
-
-        #[unsafe(method(clearAdded:))]
-        fn clear_added(&self, _arg: Option<&AnyObject>) {
-            self.ivars().ui.get().expect("ui is built in new()").notes.added.setHidden(true);
         }
 
         #[unsafe(method(clearClips:))]
@@ -705,7 +582,7 @@ define_class!(
         }
 
         /// The screen slides under the stationary panel during a Space switch, so fold it
-        /// into the notch instead. Notes are saved by `set_expanded`; focus is dropped.
+        /// into the notch instead; `set_expanded` drops the terminal's focus.
         #[unsafe(method(activeSpaceChanged:))]
         fn active_space_changed(&self, _notification: &NSNotification) {
             if !self.ivars().expanded.get() {
@@ -715,11 +592,6 @@ define_class!(
             self.ivars().pinned.set(false);
             self.ivars().space_collapsed.set(true);
             self.set_expanded(false);
-        }
-
-        #[unsafe(method(redraw:))]
-        fn redraw(&self, _arg: Option<&AnyObject>) {
-            self.refresh();
         }
 
         #[unsafe(method(openDashboard:))]
@@ -741,7 +613,6 @@ define_class!(
                 }
                 return;
             }
-            self.save_notes_now();
             self.ivars().now_playing.borrow_mut().stop();
             NSApplication::sharedApplication(self.mtm()).terminate(None);
         }
@@ -756,7 +627,6 @@ define_class!(
             if panel.runModal() != NSModalResponseOK {
                 return;
             }
-            self.save_notes_now(); // so the backup has what is on screen
             let Some(path) = panel.URL().and_then(|url| url.path()) else { return };
             if let Err(err) = export::write(&path.to_string()) {
                 eprintln!("notchpad: could not export backup: {err}");
@@ -779,32 +649,8 @@ impl Controller {
         let ui = this.build_ui(mtm);
         this.ivars().ui.set(ui).ok().expect("ui is built once");
         this.ivars().seen_mtime.set(store::modified());
-        this.ui().notes.text.setString(&NSString::from_str(&store::load_notes()));
-        this.after_note_edit_without_save();
         unsafe {
             let center = NSNotificationCenter::defaultCenter();
-            let text: &AnyObject = this.ui().notes.text.as_ref();
-            // Delivered on the main queue: EventKit also posts this from background threads.
-            let me = Weak::new(&*this);
-            let changed = RcBlock::new(move |_: NonNull<NSNotification>| {
-                if let Some(controller) = me.load() {
-                    controller.reload_events();
-                }
-            });
-            center.addObserverForName_object_queue_usingBlock(
-                Some(EKEventStoreChangedNotification), None, Some(&NSOperationQueue::mainQueue()), &changed,
-            );
-            let me = Weak::new(&*this);
-            let fetched = RcBlock::new(move |_: NonNull<NSNotification>| {
-                if let Some(controller) = me.load() {
-                    controller.show_fetched_reminders();
-                }
-            });
-            center.addObserverForName_object_queue_usingBlock(
-                Some(&NSString::from_str(calendar::REMINDERS_FETCHED)), None, Some(&NSOperationQueue::mainQueue()), &fetched,
-            );
-            center.addObserver_selector_name_object(this.target(), sel!(notesChanged:), Some(NSTextDidChangeNotification), Some(text));
-            center.addObserver_selector_name_object(this.target(), sel!(notesEditingEnded:), Some(NSTextDidEndEditingNotification), Some(text));
             let terminal: &AnyObject = this.ui().terminal.view.as_ref();
             center.addObserver_selector_name_object(
                 this.target(), sel!(terminalResigned:), Some(&NSString::from_str(terminal_view::RESIGNED_NOTIFICATION)), Some(terminal),
@@ -827,7 +673,6 @@ impl Controller {
             clips.setTolerance(0.25);
         }
         this.sync_now_playing();
-        this.reload_events();
         this.refresh();
         this.render_clips();
         this.ui().panel.orderFrontRegardless();
@@ -884,7 +729,7 @@ impl Controller {
     }
 
     fn collapse_when_left(&self) {
-        if !self.ivars().expanded.get() || self.ivars().pinned.get() || self.note_has_focus() {
+        if !self.ivars().expanded.get() || self.ivars().pinned.get() || self.terminal_has_focus() {
             return;
         }
         if self.pointer_over_panel() {
@@ -930,29 +775,22 @@ impl Controller {
             self.ui().motion.set_open(on);
             self.sync_music_timer();
             self.sync_activity();
-            if on {
-                self.reload_events();
-            }
-            if !on {
-                self.save_notes_now();
-                if self.note_has_focus() {
-                    self.ui().panel.makeFirstResponder(None);
-                }
+            if !on && self.terminal_has_focus() {
+                self.ui().panel.makeFirstResponder(None);
             }
         }
     }
 
-    /// An open note or the terminal keeps the panel up while typing, even with the
-    /// pointer elsewhere.
-    fn note_has_focus(&self) -> bool {
+    /// The terminal keeps the panel up while typing, even with the pointer elsewhere.
+    fn terminal_has_focus(&self) -> bool {
         let ui = self.ui();
         let same = |a: &AnyObject, b: &AnyObject| std::ptr::eq(a as *const _ as *const u8, b as *const _ as *const u8);
         let Some(responder) = ui.panel.firstResponder() else { return false };
-        ui.panel.isKeyWindow() && (same(&responder, ui.notes.text.as_ref()) || same(&responder, ui.terminal.view.as_ref()))
+        ui.panel.isKeyWindow() && same(&responder, ui.terminal.view.as_ref())
     }
 
-    /// Adds a typed line as a task; words like `6pm`, `!high` or `tomorrow` fill its fields.
-    /// Adds a typed line as a task; `priority` applies when the line names none.
+    /// Adds a typed line as a task; words like `6pm`, `!high` or `tomorrow` fill its fields,
+    /// and `priority` applies when the line names none.
     fn push_task(&self, text: &str, default_day: &str, priority: &str) {
         let mut task = quick_add::parse(text, default_day, &days::key(0), &days::key(1));
         if task.priority.is_empty() {
@@ -960,49 +798,6 @@ impl Controller {
         }
         self.ivars().tasks.borrow_mut().push(task);
         self.save_and_refresh();
-    }
-
-    fn after_note_edit(&self) {
-        self.after_note_edit_without_save();
-        let none: Option<&AnyObject> = None;
-        let _: () = unsafe {
-            msg_send![
-                NSObject::class(),
-                cancelPreviousPerformRequestsWithTarget: self,
-                selector: sel!(saveNotes:),
-                object: none
-            ]
-        };
-        let _: () = unsafe { msg_send![self, performSelector: sel!(saveNotes:), withObject: none, afterDelay: NOTES_SAVE_DELAY] };
-    }
-
-    fn after_note_edit_without_save(&self) {
-        let notes = &self.ui().notes;
-        notes.hint.setHidden(notes.text.string().length() > 0);
-    }
-
-    fn save_notes_now(&self) {
-        if let Err(err) = store::save_notes(&self.ui().notes.text.string().to_string()) {
-            eprintln!("notchpad: could not save notes: {err}");
-        }
-    }
-
-    /// ⌘↩: the line under the caret becomes a task for today and leaves the note.
-    fn note_line_to_task(&self) {
-        let notes = &self.ui().notes;
-        let text = notes.text.string().to_string();
-        let (line, rest, caret) = note_view::take_line(&text, notes.text.selectedRange().location);
-        let line = line.trim();
-        if line.is_empty() {
-            return;
-        }
-        self.push_task(line, &days::key(0), "");
-        notes.text.setString(&NSString::from_str(&rest));
-        notes.text.setSelectedRange(objc2_foundation::NSRange::new(caret, 0));
-        self.after_note_edit();
-        notes.added.setHidden(false);
-        let none: Option<&AnyObject> = None;
-        let _: () = unsafe { msg_send![self, performSelector: sel!(clearAdded:), withObject: none, afterDelay: 1.5f64] };
     }
 
     fn save_and_refresh(&self) {
@@ -1016,21 +811,6 @@ impl Controller {
         }
         self.ivars().seen_mtime.set(store::modified());
         task_alerts::sync(&self.ivars().tasks.borrow());
-    }
-
-    /// Fetches the Week tab's days; a no-op returning nothing until access is granted.
-    fn reload_events(&self) {
-        *self.ivars().events.borrow_mut() = self.ivars().calendar.events(WEEK_LAST_OFFSET);
-        self.ivars().calendar.fetch_reminders();
-        self.render_week();
-    }
-
-    /// Called on the main queue when an asynchronous reminders fetch has finished.
-    fn show_fetched_reminders(&self) {
-        if let Some(reminders) = self.ivars().calendar.take_fetched() {
-            *self.ivars().reminders.borrow_mut() = reminders;
-            self.render_week();
-        }
     }
 
     fn reload_week(&self) {
@@ -1049,7 +829,6 @@ impl Controller {
         self.render_tabs();
         self.render_focus();
         self.render_task_card();
-        self.render_week();
         self.render_music();
     }
 
@@ -1163,12 +942,10 @@ impl Controller {
             self.ivars().tab.set(Tab::ALL[settings.first_visible()]);
         }
         let current = self.ivars().tab.get();
-        let tabs: [(&NSView, &NSButton, Tab); 6] = [
+        let tabs: [(&NSView, &NSButton, Tab); 4] = [
             (&ui.workspace, &ui.tab_workspace, Tab::Workspace),
-            (&ui.week, &ui.tab_week, Tab::Week),
             (&ui.clips.body, &ui.tab_clips, Tab::Clips),
             (&ui.music.body, &ui.tab_music, Tab::Music),
-            (&ui.notes.body, &ui.tab_notes, Tab::Notes),
             (&ui.terminal.body, &ui.tab_terminal, Tab::Terminal),
         ];
         if !ui.content.isHidden() && tabs.iter().any(|(body, _, tab)| body.isHidden() == (*tab == current)) {
@@ -1410,110 +1187,6 @@ impl Controller {
         w::stack(&[&check, &title, &play], false, 10.0, mtm).into_super()
     }
 
-    fn render_week(&self) {
-        let today = days::key(0);
-        let tomorrow = days::key(1);
-        let tasks = self.ivars().tasks.borrow();
-        for (column, ui) in [INBOX, TODAY, TOMORROW].into_iter().zip(&self.ui().columns) {
-            let shown: Vec<usize> = (0..tasks.len())
-                .filter(|&i| {
-                    let t = &tasks[i];
-                    match column {
-                        INBOX => !t.done && t.day.is_empty(),
-                        TODAY => is_open_today(t, &today),
-                        _ => !t.done && t.day == tomorrow,
-                    }
-                })
-                .collect();
-            ui.count.setStringValue(&NSString::from_str(&shown.len().to_string()));
-            let event_rows = self.render_events(column, ui);
-            let before = list_row::snapshot(&ui.list);
-            clear(&ui.list);
-            // An event row is about half a task row tall.
-            let fit = rows_that_fit(&tasks, &shown, MAX_COLUMN_ROWS - event_rows.div_ceil(2));
-            for &i in shown.iter().take(fit) {
-                let row = ListRow::new(&tasks[i].text, &self.week_row(i, &tasks[i]), &white(0.07), self.mtm());
-                unsafe { row.setMenu(Some(&self.task_menu(i, &tasks[i].priority))) };
-                add_full_width(&ui.list, &row, None);
-            }
-            self.add_overflow_note(&ui.list, shown.len(), fit, "", &white(0.4));
-            list_row::animate_changes(&ui.list, before);
-        }
-    }
-
-    /// Fills the column's calendar rows (or the access pill) and returns how many lines it used.
-    fn render_events(&self, column: isize, ui: &Column) -> usize {
-        let mtm = self.mtm();
-        clear(&ui.events);
-        let mut lines = 0;
-        if column == INBOX {
-            if calendar::access() == Access::NotDetermined {
-                let pill = w::pill("Show calendar events", 22.0, self.target(), sel!(requestCalendar:), mtm);
-                w::fit_pill(&pill, 10.0);
-                w::style_pill(&pill, &white(0.1), &white(0.8), 11.0);
-                ui.events.addArrangedSubview(&pill);
-                lines = 2;
-            }
-            if calendar::reminders_access() == Access::NotDetermined {
-                let pill = w::pill("Show reminders", 22.0, self.target(), sel!(requestReminders:), mtm);
-                w::fit_pill(&pill, 10.0);
-                w::style_pill(&pill, &white(0.1), &white(0.8), 11.0);
-                ui.events.addArrangedSubview(&pill);
-                lines += 2;
-            }
-        } else {
-            let day = days::key(if column == TODAY { 0 } else { 1 });
-            let events = self.ivars().events.borrow();
-            let (rows, more) = calendar::day_rows(&events, &day, MAX_DAY_EVENTS);
-            for event in &rows {
-                add_full_width(&ui.events, &event_row(event, mtm), None);
-            }
-            if more > 0 {
-                add_full_width(&ui.events, &w::label(&format!("+{more} more"), 12.0, unsafe { NSFontWeightRegular }, &white(0.4), mtm), None);
-            }
-            lines = rows.len() + usize::from(more > 0);
-            let reminders = self.ivars().reminders.borrow();
-            let (rows, more) = calendar::reminder_rows(&reminders, &day, MAX_DAY_REMINDERS);
-            for reminder in &rows {
-                let index = reminders.iter().position(|r| std::ptr::eq(r, *reminder)).unwrap_or_default();
-                add_full_width(&ui.events, &self.reminder_row(index, reminder), None);
-            }
-            if more > 0 {
-                add_full_width(&ui.events, &w::label(&format!("+{more} more"), 12.0, unsafe { NSFontWeightRegular }, &white(0.4), mtm), None);
-            }
-            lines += rows.len() + usize::from(more > 0);
-        }
-        ui.events.setHidden(lines == 0);
-        lines
-    }
-
-    /// Hollow circle in the list's colour (click completes), the title on one line, then the due time.
-    fn reminder_row(&self, index: usize, reminder: &Reminder) -> Retained<NSView> {
-        let mtm = self.mtm();
-        let (r, g, b) = reminder.color;
-        let circle = w::icon_button("circle", "", 10.0, &rgba(r, g, b, 1.0), self.target(), sel!(completeReminder:), mtm);
-        circle.setTag(index as isize);
-        let title = w::label(&reminder.title, 12.0, unsafe { NSFontWeightRegular }, &white(0.8), mtm);
-        let mut views: Vec<&NSView> = vec![&circle, &title];
-        let when;
-        if let Some(m) = reminder.due_minutes {
-            // Soft red marks a reminder whose time has already passed.
-            let color = if reminder.overdue { rgba(255, 120, 120, 1.0) } else { white(0.5) };
-            when = w::label(&format!("{:02}:{:02}", m / 60, m % 60), 11.0, unsafe { NSFontWeightMedium }, &color, mtm);
-            views.push(&when);
-        }
-        w::stack(&views, false, 6.0, mtm).into_super()
-    }
-
-    fn week_row(&self, index: usize, task: &Task) -> Retained<NSView> {
-        let mtm = self.mtm();
-        let check = w::icon_button("circle", "", 14.0, &priority_color(&task.priority), self.target(), sel!(toggleTask:), mtm);
-        check.setTag(index as isize);
-        let title = with_meta(task, w::label(&task.text, 13.0, unsafe { NSFontWeightRegular }, &white(0.9), mtm), &white(0.45), mtm);
-        let content = w::stack(&[&check, &title], false, 8.0, mtm);
-        TaskRow::new(index, &content, mtm).into_super()
-    }
-
     /// Right-click menu of the header's empty area.
     fn header_menu(&self) -> Retained<NSMenu> {
         let mtm = self.mtm();
@@ -1637,15 +1310,13 @@ impl Controller {
         parent.setSubmenu(Some(&levels));
         menu.addItem(&parent);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        add("Move to Inbox", sel!(moveToInbox:));
-        add("Move to Today", sel!(moveToToday:));
         add("Move to Tomorrow", sel!(moveToTomorrow:));
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         add("Delete", sel!(deleteTask:));
         menu
     }
 
-    /// Sets the day of the task at `index` (empty = Inbox), keeping its place in the list.
+    /// Sets the day of the task at `index`, keeping its place in the list.
     fn reschedule(&self, index: usize, day: String) {
         if let Some(task) = self.ivars().tasks.borrow_mut().get_mut(index) {
             task.day = day;
@@ -1653,50 +1324,6 @@ impl Controller {
         self.save_and_refresh();
     }
 
-    /// Moves a dragged task into `column`, placed above the first row whose middle is
-    /// below the drop point, and reschedules it for that column's day.
-    fn drop_task(&self, index: usize, column: isize, at: NSPoint) {
-        let before = list_row::snapshot(&self.ui().columns[column as usize].list)
-            .into_iter()
-            .filter_map(|(_, row)| row.content().downcast::<TaskRow>().ok())
-            .find(|row| {
-                let frame = row.convertRect_toView(row.bounds(), None);
-                at.y > frame.origin.y + frame.size.height / 2.0
-            })
-            .map(|row| row.index());
-        {
-            let mut tasks = self.ivars().tasks.borrow_mut();
-            if index >= tasks.len() {
-                return;
-            }
-            let mut task = tasks.remove(index);
-            task.day = match column {
-                INBOX => String::new(),
-                TOMORROW => days::key(1),
-                _ => days::key(0),
-            };
-            let to = match before {
-                Some(b) if b > index => b - 1,
-                Some(b) => b,
-                None => tasks.len(),
-            };
-            tasks.insert(to, task);
-            // The focus card refers to tasks by index, so follow the shift.
-            let focus = self.ivars().focus.get().map(|f| match f {
-                f if f == index => to,
-                f => {
-                    let f = if f > index { f - 1 } else { f };
-                    if f >= to { f + 1 } else { f }
-                }
-            });
-            self.ivars().focus.set(focus);
-        }
-        self.save();
-        // Rebuilding the rows now would tear down the drag source while AppKit is still
-        // finishing its session, so re-render on the next run-loop pass.
-        let none: Option<&AnyObject> = None;
-        let _: () = unsafe { msg_send![self, performSelector: sel!(redraw:), withObject: none, afterDelay: 0.0f64] };
-    }
 
     fn add_overflow_note(&self, list: &NSStackView, total: usize, max: usize, empty: &str, color: &NSColor) {
         let text = if total > max {
@@ -1800,12 +1427,10 @@ impl Controller {
         let workspace = w::stack(&[&focus_view, &task_view], false, 10.0, mtm);
         workspace.setDistribution(NSStackViewDistribution::Fill);
         task_view.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
-        let (week, columns) = self.build_week(mtm);
         let clips = self.build_clips(mtm);
         let music = self.build_music(mtm);
-        let notes = self.build_notes(mtm);
         let terminal = self.build_terminal(mtm);
-        for body in [&*workspace, &*week, &*clips.body, &*music.body, &*notes.body, &*terminal.body] {
+        for body in [&*workspace, &*clips.body, &*music.body, &*terminal.body] {
             content.addSubview(body);
             body.leadingAnchor().constraintEqualToAnchor_constant(&content.leadingAnchor(), 12.0).setActive(true);
             body.trailingAnchor().constraintEqualToAnchor_constant(&content.trailingAnchor(), -12.0).setActive(true);
@@ -1824,20 +1449,15 @@ impl Controller {
             panel,
             content,
             workspace,
-            week,
             tab_workspace: head.workspace,
-            tab_week: head.week,
             tab_clips: head.clips,
             tab_music: head.music,
-            tab_notes: head.notes,
             tab_terminal: head.terminal,
             clips,
             music,
-            notes,
             terminal,
             focus,
             tasks,
-            columns,
             expanded: Cell::new(expanded),
             header_height,
             notch_gaps,
@@ -1860,23 +1480,19 @@ impl Controller {
             pill
         };
         let workspace = pill("Workspace", sel!(showWorkspace:));
-        let week = pill("Week", sel!(showWeek:));
-        let clips = pill("Clips", sel!(showClips:));
+        let clips = icon_pill("doc.on.clipboard", sel!(showClips:));
         let music = icon_pill("play.circle", sel!(showMusic:));
-        let notes = icon_pill("note.text", sel!(showNotes:));
         let terminal = pill("Terminal", sel!(showTerminal:));
         // Settings is otherwise only reachable through ⌘, or the header's right-click menu.
         let settings = w::icon_button("gearshape", "", 11.0, &white(0.55), self.target(), sel!(openSettings:), mtm);
         settings.setToolTip(Some(&NSString::from_str("Settings (⌘,)")));
         Header {
             quit: w::icon_button("xmark", "", 10.0, &white(0.55), self.target(), sel!(quit:), mtm),
-            left: w::stack(&[&settings, &workspace, &week], false, 8.0, mtm),
-            right: w::stack(&[&clips, &music, &notes, &terminal], false, 6.0, mtm),
+            left: w::stack(&[&settings, &workspace], false, 8.0, mtm),
+            right: w::stack(&[&clips, &music, &terminal], false, 6.0, mtm),
             workspace,
-            week,
             clips,
             music,
-            notes,
             terminal,
         }
     }
@@ -1976,7 +1592,7 @@ impl Controller {
             view.widthAnchor().constraintEqualToAnchor(&top.widthAnchor()).setActive(true);
         }
 
-        let input = w::input("Add a task · try 6pm !high #work 30m", &white(0.9), TODAY, self.target(), sel!(addTask:), mtm);
+        let input = w::input("Add a task · try 6pm !high #work 30m", &white(0.9), 0, self.target(), sel!(addTask:), mtm);
         let bottom = self.add_row(&input, &white(0.5), mtm);
         let dots: Vec<_> = PRIORITIES
             .iter()
@@ -2001,55 +1617,6 @@ impl Controller {
         bottom.bottomAnchor().constraintEqualToAnchor_constant(&card.bottomAnchor(), -10.0).setActive(true);
 
         (card, TaskCard { todo, done, clear, dots, rows, input })
-    }
-
-    fn build_week(&self, mtm: MainThreadMarker) -> (Retained<NSStackView>, Vec<Column>) {
-        let week = w::stack(&[], false, 10.0, mtm);
-        week.setDistribution(NSStackViewDistribution::FillEqually);
-        let mut columns = Vec::new();
-        for (tag, offset) in [(INBOX, 0), (TODAY, 0), (TOMORROW, 1)] {
-            let me = Weak::new(self);
-            let on_drop = Box::new(move |index, at| {
-                if let Some(controller) = me.load() {
-                    controller.drop_task(index, tag, at);
-                }
-            });
-            let card = DropColumn::new(tone(SURFACE), tone(SURFACE_RAISED), on_drop, mtm);
-            let title: Retained<NSView> = match tag {
-                INBOX => {
-                    let tray = NSImageView::imageViewWithImage(&w::symbol("tray"), mtm);
-                    tray.setContentTintColor(Some(&white(0.9)));
-                    let text = w::label("Inbox", 13.0, unsafe { NSFontWeightSemibold }, &white(0.95), mtm);
-                    w::stack(&[&tray, &text], false, 6.0, mtm).into_super()
-                }
-                TODAY => {
-                    let pill = w::pill("Today", 20.0, self.target(), sel!(showWorkspace:), mtm);
-                    w::fit_pill(&pill, 8.0);
-                    w::style_pill(&pill, &white(1.0), &NSColor::blackColor(), 10.0);
-                    pill.into_super().into_super()
-                }
-                _ => w::label("Tomorrow", 13.0, unsafe { NSFontWeightSemibold }, &white(0.95), mtm).into_super().into_super(),
-            };
-            let date_text = if tag == INBOX { String::new() } else { days::label(offset) };
-            let date = w::label(&date_text, 12.0, unsafe { NSFontWeightRegular }, &white(0.45), mtm);
-            let count = w::label("0", 12.0, unsafe { NSFontWeightMedium }, &white(0.45), mtm);
-            let head = w::stack(&[&title, &date, &w::spacer(mtm), &count], false, 6.0, mtm);
-            let events = w::stack(&[], true, 4.0, mtm);
-            events.setAlignment(objc2_app_kit::NSLayoutAttribute::Leading);
-            let list = w::stack(&[], true, 8.0, mtm);
-            let input = w::input("Add task", &white(0.9), tag, self.target(), sel!(addTask:), mtm);
-            let add = self.add_row(&input, &white(0.45), mtm);
-            let inner = w::stack(&[&head, &events, &list, &add], true, 12.0, mtm);
-            card.addSubview(&inner);
-            w::pin(&inner, &card, 12.0, None);
-            for view in [&*head, &*events, &*list, &*add] {
-                view.widthAnchor().constraintEqualToAnchor(&inner.widthAnchor()).setActive(true);
-            }
-            week.addArrangedSubview(&card);
-            card.heightAnchor().constraintEqualToAnchor(&week.heightAnchor()).setActive(true);
-            columns.push(Column { events, list, count });
-        }
-        (week, columns)
     }
 
     /// Title row, then the clips hanging from a line in a sideways-scrolling strip, then a hint.
@@ -2156,59 +1723,6 @@ impl Controller {
             view.centerYAnchor().constraintEqualToAnchor(&body.centerYAnchor()).setActive(true);
         }
         MusicView { body, now, empty, art, title, subtitle, progress, elapsed, total, toggle }
-    }
-
-    /// One dark card holding the scrolling text view, with the placeholder and the ⌘↩
-    /// confirmation laid over it.
-    fn build_notes(&self, mtm: MainThreadMarker) -> NotesView {
-        let card = w::filled(&tone(SURFACE), 18.0, mtm);
-        let me = Weak::new(self);
-        let text = NoteView::new(
-            Box::new(move || {
-                if let Some(controller) = me.load() {
-                    controller.note_line_to_task();
-                }
-            }),
-            mtm,
-        );
-        text.setRichText(false);
-        text.setAutomaticQuoteSubstitutionEnabled(false);
-        text.setAutomaticDashSubstitutionEnabled(false);
-        text.setAutomaticTextReplacementEnabled(false);
-        text.setDrawsBackground(false);
-        text.setFont(Some(&NSFont::systemFontOfSize(13.0)));
-        text.setTextColor(Some(&white(0.9)));
-        text.setInsertionPointColor(Some(&white(0.9)));
-        text.setTextContainerInset(NSSize::new(0.0, 0.0));
-        text.setVerticallyResizable(true);
-        text.setHorizontallyResizable(false);
-        text.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
-
-        let scroll = NSScrollView::new(mtm);
-        scroll.setTranslatesAutoresizingMaskIntoConstraints(false);
-        scroll.setDrawsBackground(false);
-        scroll.setHasVerticalScroller(true);
-        scroll.setAutohidesScrollers(true);
-        scroll.setDocumentView(Some(&text));
-        card.addSubview(&scroll);
-        scroll.leadingAnchor().constraintEqualToAnchor_constant(&card.leadingAnchor(), 16.0).setActive(true);
-        scroll.trailingAnchor().constraintEqualToAnchor_constant(&card.trailingAnchor(), -16.0).setActive(true);
-        scroll.topAnchor().constraintEqualToAnchor_constant(&card.topAnchor(), 14.0).setActive(true);
-        scroll.bottomAnchor().constraintEqualToAnchor_constant(&card.bottomAnchor(), -14.0).setActive(true);
-
-        let hint = w::label("Jot anything · ⌘↩ turns a line into a task", 13.0, unsafe { NSFontWeightRegular }, &white(0.35), mtm);
-        let added = w::label("Added to Today", 12.0, unsafe { NSFontWeightMedium }, &white(0.7), mtm);
-        added.setHidden(true);
-        for label in [&hint, &added] {
-            label.setTranslatesAutoresizingMaskIntoConstraints(false);
-            card.addSubview(label);
-        }
-        hint.leadingAnchor().constraintEqualToAnchor_constant(&card.leadingAnchor(), 16.0).setActive(true);
-        hint.topAnchor().constraintEqualToAnchor_constant(&card.topAnchor(), 14.0).setActive(true);
-        added.trailingAnchor().constraintEqualToAnchor_constant(&card.trailingAnchor(), -16.0).setActive(true);
-        added.bottomAnchor().constraintEqualToAnchor_constant(&card.bottomAnchor(), -12.0).setActive(true);
-
-        NotesView { body: card, text, hint, added }
     }
 
     /// A card holding the terminal view.
@@ -2392,20 +1906,6 @@ fn rows_that_fit(tasks: &[Task], shown: &[usize], max_rows: usize) -> usize {
             used <= 2 * max_rows
         })
         .count()
-}
-
-/// Dot in the calendar's colour, `HH:mm` or "All day", then the title on one line.
-fn event_row(event: &Event, mtm: MainThreadMarker) -> Retained<NSView> {
-    let (r, g, b) = event.color;
-    let dot = w::filled(&rgba(r, g, b, 1.0), 3.0, mtm);
-    fixed_size(&dot, 6.0, 6.0);
-    let when = match event.start_minutes {
-        Some(m) => format!("{:02}:{:02}", m / 60, m % 60),
-        None => "All day".to_owned(),
-    };
-    let when = w::label(&when, 11.0, unsafe { NSFontWeightMedium }, &white(0.5), mtm);
-    let title = w::label(&event.title, 12.0, unsafe { NSFontWeightRegular }, &white(0.8), mtm);
-    w::stack(&[&dot, &when, &title], false, 6.0, mtm).into_super()
 }
 
 fn clear(stack: &NSStackView) {
