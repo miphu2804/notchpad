@@ -1,3 +1,16 @@
+### [2026-11-09 23:55 UTC+07:00] — [Refactor] Week strip moved from the focus card to Insights
+
+**Done:**
+- The pomodoro card no longer shows the week bars, "15m · 4 tasks" and the streak line; its column stays centred.
+- Insights' Focus time card now says "this week · N tasks"; streak and week bars were already there.
+- Removed `pomodoros::Week`, `week()` and the controller's `week` state; today's count comes from `Insights::build`.
+
+**Changed  files:**
+- `src/controller.rs`, `src/pomodoros.rs`, `src/insights_view.rs`, `README.md` — modified
+
+**Flow explained:**
+`reload_done_today` builds `Insights` from the log on each refresh and keeps today's pomodoro count for the goal row and break messages. Verified with 80 tests (the five `pomodoros` week tests went with the code; `insights` tests cover the same parsing) and renders of Workspace and Insights.
+
 ### [2026-11-09 23:10 UTC+07:00] — [Feature] Insights page in the dashboard
 
 **Done:**
@@ -126,25 +139,3 @@ The 2 s `reload:` tick calls `remind_tasks`, which works only when the minute ch
 
 **Flow explained:**
 `render_tabs` calls `fit_panel`, which computes `body_height(size, visible_height)` and hands the new rects to `NotchMotion::set_rects`. `apply` offsets the content by the height still to travel. `activeSpaceChanged:` comes from the NSWorkspace notification centre: it sets `space_collapsed` and collapses the panel. `mouseExited:` clears the latch.
-
-### [2026-11-09 18:25 UTC+07:00] — [Feature] Settings window, live waveform, countdown wing, install README
-
-**Done:**
-- Settings window (⌘, or the header menu): show or hide each section, and turn the collapsed-notch music and focus wings on or off. Saved in `settings.txt`.
-- The collapsed notch shows white animated bars while music plays. It is pure Core Animation, so it adds no CPU when idle and stops when Reduce Motion is on.
-- The countdown wing is widened to 50 pt and its digits are right-aligned. Measured clearance from the hardware notch is 7.2 pt.
-- The focus card's tomatoes sit in one row of 22 pt.
-- The two always-on timers get tolerance so their wakeups can be coalesced.
-- README rewritten with an Install for Mac button that points to the latest release zip.
-
-**Changed  files:**
-- `src/settings.rs` — created
-- `src/settings_window.rs` — created
-- `src/live_activity.rs` — modified
-- `src/controller.rs` — modified
-- `src/panel.rs` — modified
-- `README.md` — modified
-- `.gitignore` — modified
-
-**Flow explained:**
-`Settings::load()` runs at startup. `render_tabs` hides the pills of hidden sections and falls back to the first visible tab. `sync_activity` reads the wing flags. `SettingsWindow` saves each change and calls back into the controller, which applies it live. `LiveActivity::animate_bars` only adds or removes the CA animation when the shown state changes.

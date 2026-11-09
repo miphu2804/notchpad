@@ -37,6 +37,7 @@ struct Parts {
     streak: Retained<NSTextField>,
     streak_note: Retained<NSTextField>,
     focus_time: Retained<NSTextField>,
+    focus_note: Retained<NSTextField>,
     focus_bars: Retained<WeekBars>,
     best: Retained<NSTextField>,
     best_note: Retained<NSTextField>,
@@ -137,6 +138,7 @@ impl InsightsView {
 
         let week = data.recent(7);
         parts.focus_time.setStringValue(&NSString::from_str(&duration(week.iter().map(|d| d.focus_min).sum())));
+        parts.focus_note.setStringValue(&NSString::from_str(&format!("this week · {}", plural(week.iter().map(|d| d.tasks).sum(), "task"))));
         parts.focus_bars.set(
             std::array::from_fn(|i| week[i].focus_min),
             std::array::from_fn(|i| days::initial(i as i64 - 6)),
@@ -219,7 +221,7 @@ impl InsightsView {
         let (streak_card, streak, streak_note) = stat_card("Current streak", "flame", AMBER, None, "", mtm);
         let focus_bars = WeekBars::new(mtm);
         size(&focus_bars, week_bars::WIDTH, week_bars::HEIGHT);
-        let (focus_card, focus_time, _) = stat_card("Focus time", "timer", PINK, Some(&focus_bars), "this week", mtm);
+        let (focus_card, focus_time, focus_note) = stat_card("Focus time", "timer", PINK, Some(&focus_bars), "this week", mtm);
         let (best_card, best, best_note) = stat_card("Best day", "star", SAGE, None, "", mtm);
         let stats = w::stack(&[&active_card, &streak_card, &focus_card, &best_card], false, GAP, mtm);
         stats.setDistribution(NSStackViewDistribution::FillEqually);
@@ -292,7 +294,7 @@ impl InsightsView {
         empty.centerYAnchor().constraintEqualToAnchor(&body.centerYAnchor()).setActive(true);
 
         Parts {
-            body, scroll, empty, ring, active_pct, streak, streak_note, focus_time, focus_bars, best, best_note, heat, metric_pills,
+            body, scroll, empty, ring, active_pct, streak, streak_note, focus_time, focus_note, focus_bars, best, best_note, heat, metric_pills,
             petals, pulse_card, export, pulse, moon_month, moon,
         }
     }

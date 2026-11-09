@@ -35,9 +35,8 @@ use crate::notch_motion::NotchMotion;
 use crate::quick_add;
 use crate::terminal_view::{self, TerminalView};
 use crate::chime::Chime;
-use crate::pomodoros::{self, DAILY_GOAL, Week};
+use crate::pomodoros::{self, DAILY_GOAL};
 use crate::tomato_view::{Tomato, TomatoView};
-use crate::week_bars::{self, WeekBars};
 use crate::panel::{self, FileDrag, NotchPanel, NotchShape};
 use crate::store::{self, Task};
 use crate::task_alerts;
@@ -101,9 +100,6 @@ struct FocusCard {
     pause: Retained<NSButton>,
     end: Retained<NSButton>,
     plus: Retained<NSButton>,
-    bars: Retained<WeekBars>,
-    focused: Retained<NSTextField>,
-    streak: Retained<NSTextField>,
 }
 
 struct TaskCard {
@@ -254,8 +250,8 @@ pub struct State {
     hint: Cell<usize>,
     /// The last deleted task and where it stood, while Undo can still restore it.
     undo: RefCell<Option<(usize, Task, Instant)>>,
-    /// Last seven days of `pomodoros.txt`, read once per refresh.
-    week: Cell<Week>,
+    /// Sessions finished today, read from `pomodoros.txt` once per refresh.
+    done_today: Cell<usize>,
     ticker: RefCell<Option<Retained<NSTimer>>>,
     /// Modification time of `tasks.txt` as last loaded or saved by this process.
     seen_mtime: Cell<Option<std::time::SystemTime>>,
@@ -468,7 +464,7 @@ define_class!(
         fn clear_completed(&self, _sender: &AnyObject) {
             let today = days::key(0);
             for task in self.ivars().tasks.borrow_mut().iter_mut().filter(|t| t.done && t.day == today) {
-                // Off every list, yet `done_on` still counts it in the week's tasks done.
+                // Off every list, yet `done_on` still counts it in Insights.
                 task.day.clear();
             }
             self.save_and_refresh();
@@ -636,7 +632,7 @@ define_class!(
                 };
                 if let Some(minutes) = end_log_minutes(self.stopwatch(), elapsed) {
                     pomodoros::append(&days::stamp(), minutes, self.stopwatch());
-                    self.reload_week();
+                    self.reload_done_today();
                 }
             }
             state.on_break.set(false);
@@ -668,7 +664,7 @@ define_class!(
                     (Chime::BreakEnd, "timer", "Break over".to_owned(), format!("Ready for pomodoro {}", self.done_today() + 1))
                 } else {
                     pomodoros::append(&days::stamp(), planned_min, true);
-                    self.reload_week();
+                    self.reload_done_today();
                     let done = self.done_today();
                     let long = done % CYCLE == 0;
                     let settings = state.settings.borrow().clone();
@@ -949,19 +945,19 @@ impl Controller {
         task_alerts::sync(&self.ivars().tasks.borrow());
     }
 
-    fn reload_week(&self) {
-        let week_days = std::array::from_fn(|i| days::key(i as i64 - 6));
-        self.ivars().week.set(pomodoros::week(&week_days, &self.ivars().tasks.borrow()));
+    fn reload_done_today(&self) {
+        let data = Insights::build(&pomodoros::load_log(), &[], &days::key(0));
+        self.ivars().done_today.set(data.day(data.today()).pomodoros as usize);
     }
 
     /// Focus sessions completed today.
     fn done_today(&self) -> usize {
-        self.ivars().week.get().done[6] as usize
+        self.ivars().done_today.get()
     }
 
     fn refresh(&self) {
         // Re-read here (not per tick) so the count also rolls over at midnight.
-        self.reload_week();
+        self.reload_done_today();
         self.render_tabs();
         self.render_focus();
         self.render_task_card();
@@ -1293,11 +1289,6 @@ impl Controller {
         card.plus.setAlphaValue(if active && !stopwatch { 1.0 } else { 0.4 });
         let hint = (!active).then(|| NSString::from_str("Click to change the length"));
         card.time.setToolTip(hint.as_deref());
-        let week = state.week.get();
-        card.bars.set(week.done, std::array::from_fn(|i| days::initial(i as i64 - 6)));
-        let tasks = if week.tasks_done == 1 { "task" } else { "tasks" };
-        set(&card.focused, &format!("{} · {} {tasks}", focus_time(week.minutes), week.tasks_done));
-        set(&card.streak, &format!("{} day streak", week.streak));
         self.sync_activity();
     }
 
@@ -1825,18 +1816,7 @@ impl Controller {
         plus.widthAnchor().constraintEqualToConstant(PLUS_WIDTH).setActive(true);
         let buttons = w::stack(&[&pause, &end, &plus], false, 8.0, mtm);
 
-        let bars = WeekBars::new(mtm);
-        fixed_size(&bars, week_bars::WIDTH, week_bars::HEIGHT);
-        let focused = w::label("", 10.0, unsafe { NSFontWeightMedium }, &white(0.6), mtm);
-        let streak = w::label("", 10.0, unsafe { NSFontWeightMedium }, &white(0.6), mtm);
-        let flame = NSImageView::imageViewWithImage(&w::symbol("flame.fill"), mtm);
-        flame.setContentTintColor(Some(&coral));
-        let streak_line = w::stack(&[&flame, &streak], false, 3.0, mtm);
-        let stats = w::stack(&[&focused, &streak_line], true, 4.0, mtm);
-        stats.setAlignment(NSLayoutAttribute::Leading);
-        let insights = w::stack(&[&bars, &stats], false, 14.0, mtm);
-
-        let column = w::stack(&[&header, &grid, &task, &badge_pill, &time, &ends, &buttons, &insights], true, 2.0, mtm);
+        let column = w::stack(&[&header, &grid, &task, &badge_pill, &time, &ends, &buttons], true, 2.0, mtm);
         column.setAlignment(NSLayoutAttribute::CenterX);
         column.setCustomSpacing_afterView(7.0, &header);
         column.setCustomSpacing_afterView(7.0, &task);
@@ -1850,7 +1830,7 @@ impl Controller {
             view.widthAnchor().constraintEqualToConstant(inner).setActive(true);
         }
 
-        (card, FocusCard { count, tomatoes, task, badge, time, ends, pause, end, plus, bars, focused, streak })
+        (card, FocusCard { count, tomatoes, task, badge, time, ends, pause, end, plus })
     }
 
     fn build_task_card(&self, mtm: MainThreadMarker) -> (Retained<NSView>, TaskCard) {
@@ -2084,14 +2064,6 @@ fn end_log_minutes(stopwatch: bool, elapsed_secs: u64) -> Option<u64> {
 
 fn mmss(secs: u64) -> String {
     format!("{:02}:{:02}", secs / 60, secs % 60)
-}
-
-/// `3h 20m`, or `45m` under an hour.
-fn focus_time(minutes: u64) -> String {
-    match minutes {
-        0..60 => format!("{minutes}m"),
-        _ => format!("{}h {:02}m", minutes / 60, minutes % 60),
-    }
 }
 
 /// `m:ss` for a position or duration in seconds.
