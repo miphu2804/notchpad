@@ -1,7 +1,7 @@
 //! Session log in `pomodoros.txt`, beside `tasks.txt`.
 //!
 //! One line per finished session: `YYYY-MM-DD HH:MM <minutes> done|ended`. Only `done`
-//! lines count toward the daily goal; `ended` ones record a session stopped early.
+//! lines count toward the daily goal and the weekly insights; `ended` ones record a session stopped early.
 
 use std::{fs, io::Write, path::PathBuf};
 
@@ -28,38 +28,86 @@ pub fn append(stamp: &str, minutes: u64, done: bool) {
     }
 }
 
-/// Completed sessions logged for `today` (`YYYY-MM-DD`).
-pub fn done_today(today: &str) -> usize {
-    count_done(&fs::read_to_string(path()).unwrap_or_default(), today)
+/// Everything the insights strip shows, from one read of the log.
+#[derive(Clone, Copy, Default)]
+pub struct Week {
+    /// Completed sessions per day, oldest first, today last.
+    pub done: [u32; 7],
+    /// Minutes focused in those seven days.
+    pub minutes: u64,
+    pub streak: u32,
 }
 
-fn count_done(log: &str, today: &str) -> usize {
-    log.lines()
-        .filter(|line| {
-            let mut cols = line.split_whitespace();
-            cols.next() == Some(today) && cols.nth(2) == Some("done")
-        })
-        .count()
+/// Insights for the seven days in `days` (`YYYY-MM-DD`, oldest first, today last).
+pub fn week(days: &[String; 7]) -> Week {
+    week_of(&fs::read_to_string(path()).unwrap_or_default(), days)
+}
+
+fn week_of(log: &str, days: &[String; 7]) -> Week {
+    let mut done = [0u32; 7];
+    let mut minutes = 0;
+    for line in log.lines() {
+        let mut cols = line.split_whitespace();
+        let (Some(day), Some(_time), Some(mins), Some("done"), None) =
+            (cols.next(), cols.next(), cols.next(), cols.next(), cols.next())
+        else {
+            continue;
+        };
+        if let Some(i) = days.iter().position(|d| d == day) {
+            done[i] += 1;
+            minutes += mins.parse().unwrap_or(0);
+        }
+    }
+    Week { done, minutes, streak: streak(&done) }
+}
+
+/// Consecutive days with a done session, ending today or, while today is empty, yesterday.
+fn streak(done: &[u32; 7]) -> u32 {
+    let end = if done[6] > 0 { 7 } else { 6 };
+    done[..end].iter().rev().take_while(|&&n| n > 0).count() as u32
 }
 
 #[cfg(test)]
 mod tests {
-    use super::count_done;
+    use super::{streak, week_of};
 
-    #[test]
-    fn counts_only_todays_done_lines() {
-        let log = "2026-11-08 09:00 25 done\n\
-                   2026-11-09 09:00 25 done\n\
-                   2026-11-09 09:30 10 ended\n\
-                   2026-11-09 10:00 25 done\n";
-        assert_eq!(count_done(log, "2026-11-09"), 2);
-        assert_eq!(count_done(log, "2026-11-08"), 1);
+    fn days() -> [String; 7] {
+        std::array::from_fn(|i| format!("2026-11-{:02}", 3 + i))
     }
 
     #[test]
     fn skips_malformed_and_blank_lines() {
-        let log = "\ngarbage\n2026-11-09 09:00 done\n2026-11-09 09:00 25 done extra\n";
-        assert_eq!(count_done(log, "2026-11-09"), 1);
-        assert_eq!(count_done("", "2026-11-09"), 0);
+        let log = "\ngarbage\n2026-11-09 09:00 done\n2026-11-09 09:00 25 done extra\n2026-11-09 09:00 25 done\n";
+        assert_eq!(week_of(log, &days()).done[6], 1);
+        assert_eq!(week_of("", &days()).done, [0; 7]);
+    }
+
+    #[test]
+    fn week_counts_done_per_day_and_sums_minutes() {
+        let log = "2026-11-02 09:00 25 done\n\
+                   2026-11-03 09:00 25 done\n\
+                   2026-11-03 10:00 45 done\n\
+                   2026-11-04 09:00 10 ended\n\
+                   2026-11-09 09:00 15 done\n\
+                   2026-11-10 09:00 25 done\n\
+                   bad line\n";
+        let w = week_of(log, &days());
+        assert_eq!(w.done, [2, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(w.minutes, 85);
+        assert_eq!(w.streak, 1);
+    }
+
+    #[test]
+    fn streak_counts_back_from_today() {
+        assert_eq!(streak(&[0, 1, 0, 2, 1, 3, 1]), 4);
+        assert_eq!(streak(&[1, 1, 1, 1, 1, 1, 1]), 7);
+        assert_eq!(streak(&[0; 7]), 0);
+    }
+
+    #[test]
+    fn streak_without_today_counts_from_yesterday() {
+        assert_eq!(streak(&[0, 0, 1, 1, 1, 1, 0]), 4);
+        assert_eq!(streak(&[1, 1, 1, 1, 1, 1, 0]), 6);
+        assert_eq!(streak(&[1, 1, 0, 0, 0, 0, 0]), 0);
     }
 }
