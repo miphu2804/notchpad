@@ -637,6 +637,13 @@ define_class!(
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: &AnyObject) {
+            // In the dashboard window the same ✕ closes the window, returning the view to the notch.
+            if self.ivars().dashboard_open.get() {
+                if let Some(window) = self.ivars().dashboard.get() {
+                    window.performClose(None);
+                }
+                return;
+            }
             self.save_notes_now();
             self.ivars().now_playing.borrow_mut().stop();
             NSApplication::sharedApplication(self.mtm()).terminate(None);
