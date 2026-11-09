@@ -1,3 +1,18 @@
+### [2026-11-09 14:58 UTC+07:00] — [Feature] Calendar events in the Week tab
+
+**Done:**
+The Today and Tomorrow columns list that day's calendar events above the tasks: a dot in the calendar's colour, `HH:mm` or "All day", and a one-line title, at most 4 then "+N more". Read-only through EventKit. Access is never requested at launch: while undetermined, the Inbox column shows a "Show calendar events" pill that asks; denied shows nothing. Events re-fetch on launch, tab switch, expand and `EKEventStoreChangedNotification` — no polling, idle CPU 0.0%. Built by a Sonnet thread; accepted by fake-event state logs and unit tests (the real fetch and prompt need the bundled app and the user's click).
+
+**Changed  files:**
+- `src/calendar.rs` — created
+- `src/controller.rs` — modified
+- `src/main.rs` — modified
+- `Cargo.toml`, `Cargo.lock` — modified (`objc2-event-kit`, `block2`)
+- `macos/Info.plist` — modified (`NSCalendarsFullAccessUsageDescription`)
+
+**Flow explained:**
+`reload_events` asks `Calendar::events` (empty unless access is FullAccess) for today and tomorrow, splitting multi-day events per day, then `render_week` builds rows from the pure `day_rows` (all-day first, by start time, capped). The pill's click calls `requestFullAccessToEventsWithCompletion`, whose handler posts the change notification so the main-queue observer re-fetches.
+
 ### [2026-11-09 14:43 UTC+07:00] — [Feature] Live activity wings and terminal selection
 
 **Done:**
@@ -130,15 +145,3 @@ New Clips tab. Text, images and files you copy, new screenshots and screen recor
 
 **Flow explained:**
 Every 0.5 s `pollClips:` compares the general pasteboard's `changeCount` and, only when the screenshot folder's mtime changed, lists that folder (`com.apple.screencapture location`, else Desktop) for new files tagged `kMDItemIsScreenCapture` or named like screenshots. A new clip equal to an existing one moves that one to the front, so a clicked card (re-copied) also jumps to the front on the next poll. Cards are rebuilt only when the history changes, so a refresh never tears down a card mid-drag. A file dragged over the notch opens it on Clips; dropping adds the files, and the panel closes once the pointer leaves.
-
-### [2026-11-08 21:44 UTC+07:00] — [Feature] Notchpad.app bundle
-
-**Done:**
-`macos/bundle.sh` builds an ad-hoc signed `Notchpad.app` with the hexagon icon, and `--install` copies it to `/Applications`. It runs as an agent app: no Dock icon, no menu bar.
-
-**Changed  files:**
-- `macos/bundle.sh`, `macos/Info.plist`, `macos/AppIcon.icns` — created
-- `README.md` — modified (install section)
-
-**Flow explained:**
-The script runs `cargo build --release`, lays out `Contents/{MacOS,Resources}` with both binaries, the plist and the icon, signs with `codesign --sign -`, then optionally replaces the copy in `/Applications`. The icon is the `LogoMark` view rendered at 824 pt on a 1024 pt canvas and converted with `iconutil`.
