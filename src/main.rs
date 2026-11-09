@@ -5,6 +5,7 @@ mod days;
 mod drop_column;
 mod hotkey;
 mod list_row;
+mod note_view;
 mod notch_motion;
 mod panel;
 mod pill_button;
