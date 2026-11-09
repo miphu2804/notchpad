@@ -10,7 +10,7 @@ use block2::RcBlock;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSClickGestureRecognizer, NSControlStateValueOn, NSForegroundColorAttributeName, NSSound, 
+use objc2_app_kit::{NSClickGestureRecognizer, NSControlStateValueOn, NSForegroundColorAttributeName, NSStrikethroughStyleAttributeName, NSUnderlineStyle, NSSound, 
     NSAppearance, NSImageScaling, NSAppearanceCustomization, NSAppearanceNameDarkAqua,
     NSApplication, NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
@@ -20,7 +20,7 @@ use objc2_app_kit::{NSClickGestureRecognizer, NSControlStateValueOn, NSForegroun
     NSTrackingAreaOptions, NSView, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_event_kit::EKEventStoreChangedNotification;
-use objc2_foundation::{NSMutableAttributedString, NSNotification, NSNotificationCenter, NSObject, NSOperationQueue, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
+use objc2_foundation::{NSMutableAttributedString, NSNumber, NSRange, NSNotification, NSNotificationCenter, NSObject, NSOperationQueue, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 
 use crate::calendar::{self, Access, Calendar, Event, Reminder};
@@ -131,6 +131,8 @@ struct TaskCard {
     done: Retained<NSButton>,
     /// Clears today's completed tasks; shown only on the Completed list when it has any.
     clear: Retained<NSButton>,
+    /// One dot per entry of `PRIORITIES`, picking the priority of tasks added here.
+    dots: Vec<Retained<NSButton>>,
     rows: Retained<NSStackView>,
     input: Retained<NSTextField>,
 }
@@ -250,6 +252,8 @@ pub struct State {
     /// Runs only while the Music tab is visible and a track is playing.
     music_timer: RefCell<Option<Retained<NSTimer>>>,
     show_completed: Cell<bool>,
+    /// Priority given to tasks added from the Today card unless the text names one.
+    new_priority: Cell<usize>,
     /// Task index chosen with ▶; falls back to the first open task of today.
     focus: Cell<Option<usize>>,
     duration_idx: Cell<usize>,
@@ -344,7 +348,9 @@ define_class!(
                     TOMORROW => &tomorrow,
                     _ => &today,
                 };
-                self.push_task(text, default_day);
+                let from_card = std::ptr::eq(field, &*self.ui().tasks.input);
+                let priority = if from_card { PRIORITIES[self.ivars().new_priority.get()] } else { "" };
+                self.push_task(text, default_day, priority);
             }
             field.setStringValue(&NSString::new());
         }
@@ -387,6 +393,12 @@ define_class!(
                 task.priority = level;
             }
             self.save_and_refresh();
+        }
+
+        #[unsafe(method(pickPriority:))]
+        fn pick_priority(&self, sender: &NSButton) {
+            self.ivars().new_priority.set(sender.tag() as usize);
+            self.render_priority_dots();
         }
 
         #[unsafe(method(clearCompleted:))]
@@ -759,6 +771,7 @@ impl Controller {
             tasks: RefCell::new(store::load()),
             settings: RefCell::new(Settings::load()),
             duration_idx: Cell::new(1), // 25 min
+            new_priority: Cell::new(PRIORITIES.len() - 1), // no priority
             ..State::default()
         };
         let this = mtm.alloc::<Self>().set_ivars(state);
@@ -939,8 +952,12 @@ impl Controller {
     }
 
     /// Adds a typed line as a task; words like `6pm`, `!high` or `tomorrow` fill its fields.
-    fn push_task(&self, text: &str, default_day: &str) {
-        let task = quick_add::parse(text, default_day, &days::key(0), &days::key(1));
+    /// Adds a typed line as a task; `priority` applies when the line names none.
+    fn push_task(&self, text: &str, default_day: &str, priority: &str) {
+        let mut task = quick_add::parse(text, default_day, &days::key(0), &days::key(1));
+        if task.priority.is_empty() {
+            task.priority = priority.to_owned();
+        }
         self.ivars().tasks.borrow_mut().push(task);
         self.save_and_refresh();
     }
@@ -979,7 +996,7 @@ impl Controller {
         if line.is_empty() {
             return;
         }
-        self.push_task(line, &days::key(0));
+        self.push_task(line, &days::key(0), "");
         notes.text.setString(&NSString::from_str(&rest));
         notes.text.setSelectedRange(objc2_foundation::NSRange::new(caret, 0));
         self.after_note_edit();
@@ -1348,6 +1365,7 @@ impl Controller {
         w::fit_pill(&card.todo, 10.0);
         w::fit_pill(&card.done, 10.0);
         card.clear.setHidden(!show_completed || done.is_empty());
+        self.render_priority_dots();
 
         let before = list_row::snapshot(&card.rows);
         clear(&card.rows);
@@ -1366,13 +1384,26 @@ impl Controller {
         list_row::animate_changes(&card.rows, before);
     }
 
+    /// Rings the dot of the priority new tasks get and dims the others.
+    fn render_priority_dots(&self) {
+        let chosen = self.ivars().new_priority.get();
+        for (i, dot) in self.ui().tasks.dots.iter().enumerate() {
+            dot.setImage(Some(&w::symbol(if i == chosen { "record.circle" } else { "circle.fill" })));
+            dot.setAlphaValue(if i == chosen { 1.0 } else { 0.4 });
+        }
+    }
+
     fn card_row(&self, index: usize, task: &Task) -> Retained<NSView> {
         let mtm = self.mtm();
-        let circle = if task.done { "checkmark.circle.fill" } else { "circle" };
-        let check = w::icon_button(circle, "", 15.0, &white(0.7), self.target(), sel!(toggleTask:), mtm);
+        let (circle, tint) = if task.done { ("checkmark.circle.fill", white(0.45)) } else { ("circle", priority_color(&task.priority)) };
+        let check = w::icon_button(circle, "", 15.0, &tint, self.target(), sel!(toggleTask:), mtm);
         check.setTag(index as isize);
         let alpha = if task.done { 0.45 } else { 0.9 };
-        let title = with_meta(task, w::label(&task.text, 13.0, unsafe { NSFontWeightRegular }, &white(alpha), mtm), &white(0.5), mtm);
+        let label = w::label(&task.text, 13.0, unsafe { NSFontWeightRegular }, &white(alpha), mtm);
+        if task.done {
+            strike(&label);
+        }
+        let title = with_meta(task, label, &white(0.5), mtm);
         let play = w::icon_button("play.fill", "", 10.0, &white(0.45), self.target(), sel!(focusTask:), mtm);
         play.setTag(index as isize);
         play.setHidden(task.done);
@@ -1476,7 +1507,7 @@ impl Controller {
 
     fn week_row(&self, index: usize, task: &Task) -> Retained<NSView> {
         let mtm = self.mtm();
-        let check = w::icon_button("circle", "", 14.0, &white(0.55), self.target(), sel!(toggleTask:), mtm);
+        let check = w::icon_button("circle", "", 14.0, &priority_color(&task.priority), self.target(), sel!(toggleTask:), mtm);
         check.setTag(index as isize);
         let title = with_meta(task, w::label(&task.text, 13.0, unsafe { NSFontWeightRegular }, &white(0.9), mtm), &white(0.45), mtm);
         let content = w::stack(&[&check, &title], false, 8.0, mtm);
@@ -1947,6 +1978,17 @@ impl Controller {
 
         let input = w::input("Add a task · try 6pm !high #work 30m", &white(0.9), TODAY, self.target(), sel!(addTask:), mtm);
         let bottom = self.add_row(&input, &white(0.5), mtm);
+        let dots: Vec<_> = PRIORITIES
+            .iter()
+            .enumerate()
+            .map(|(i, level)| {
+                let dot = w::icon_button("circle.fill", "", 9.0, &priority_color(level), self.target(), sel!(pickPriority:), mtm);
+                dot.setTag(i as isize);
+                dot.setToolTip(Some(&NSString::from_str(&format!("New tasks: {}", if level.is_empty() { "no priority".to_owned() } else { meta_priority(level) }))));
+                dot
+            })
+            .collect();
+        bottom.addArrangedSubview(&w::stack(&dots.iter().map(|d| &**d as &NSView).collect::<Vec<_>>(), false, 6.0, mtm));
         let line = w::filled(&white(0.1), 0.0, mtm);
         card.addSubview(&line);
         card.addSubview(&bottom);
@@ -1958,7 +2000,7 @@ impl Controller {
         line.bottomAnchor().constraintEqualToAnchor_constant(&bottom.topAnchor(), -8.0).setActive(true);
         bottom.bottomAnchor().constraintEqualToAnchor_constant(&card.bottomAnchor(), -10.0).setActive(true);
 
-        (card, TaskCard { todo, done, clear, rows, input })
+        (card, TaskCard { todo, done, clear, dots, rows, input })
     }
 
     fn build_week(&self, mtm: MainThreadMarker) -> (Retained<NSStackView>, Vec<Column>) {
@@ -2264,7 +2306,8 @@ fn with_meta(task: &Task, title: Retained<NSTextField>, color: &NSColor, mtm: Ma
         title.into_super().into_super()
     } else {
         let line = w::label(&meta, 11.0, unsafe { NSFontWeightRegular }, color, mtm);
-        if let Some(tint) = priority_tint(&task.priority) {
+        if !task.priority.is_empty() {
+            let tint = priority_color(&task.priority);
             // Tints only the priority word, so the rest of the line stays quiet.
             let word = NSString::from_str(&meta_priority(&task.priority));
             let range = NSString::from_str(&meta).rangeOfString(&word);
@@ -2316,13 +2359,26 @@ fn priority_rank(priority: &str) -> u8 {
     }
 }
 
-/// Colour of the priority word: warm for high and medium; low stays dim like the rest.
-fn priority_tint(priority: &str) -> Option<Retained<NSColor>> {
+/// Priorities in the order of the Today card's dots: most urgent first, then none.
+const PRIORITIES: [&str; 4] = ["high", "medium", "low", ""];
+
+/// Colour of a priority's check circle, dot and metadata word.
+fn priority_color(priority: &str) -> Retained<NSColor> {
     match priority {
-        "high" => Some(rgba(235, 87, 87, 1.0)),
-        "medium" => Some(rgba(242, 153, 74, 1.0)),
-        _ => None,
+        "high" => rgba(235, 87, 87, 1.0),
+        "medium" => rgba(242, 153, 74, 1.0),
+        "low" => rgba(113, 124, 230, 1.0),
+        _ => white(0.6),
     }
+}
+
+/// Strikes through a done task's title.
+fn strike(label: &NSTextField) {
+    let text = NSMutableAttributedString::initWithAttributedString(NSMutableAttributedString::alloc(), &label.attributedStringValue());
+    let range = NSRange::new(0, text.length());
+    let style = NSNumber::new_isize(NSUnderlineStyle::Single.0);
+    unsafe { text.addAttribute_value_range(NSStrikethroughStyleAttributeName, &style, range) };
+    label.setAttributedStringValue(&text);
 }
 
 /// How many of `shown` fit in a list sized for `max_rows` plain rows. A row with a metadata
