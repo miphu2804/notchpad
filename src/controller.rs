@@ -26,6 +26,8 @@ use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 use crate::calendar::{self, Access, Calendar, Event, Reminder};
 use crate::clip_card::{self, ClipCard};
 use crate::clips::ClipHistory;
+use crate::settings::Settings;
+use crate::settings_window::SettingsWindow;
 use crate::days;
 use crate::drop_column::DropColumn;
 use crate::export;
@@ -171,6 +173,11 @@ enum Tab {
     Terminal,
 }
 
+impl Tab {
+    /// In header order, like [`crate::settings::SECTIONS`].
+    const ALL: [Tab; 6] = [Tab::Workspace, Tab::Week, Tab::Clips, Tab::Music, Tab::Notes, Tab::Terminal];
+}
+
 /// The header's views: close, the tab groups left and right of the notch, and each tab.
 struct Header {
     quit: Retained<NSButton>,
@@ -254,6 +261,9 @@ pub struct State {
     /// must not pull the notch open over an empty frame.
     dashboard: OnceCell<Retained<NSWindow>>,
     dashboard_open: Cell<bool>,
+    settings: RefCell<Settings>,
+    /// Made on first use and reused.
+    settings_window: OnceCell<Retained<SettingsWindow>>,
 }
 
 define_class!(
@@ -635,6 +645,11 @@ define_class!(
             self.show_dashboard();
         }
 
+        #[unsafe(method(openSettings:))]
+        fn open_settings(&self, _sender: Option<&AnyObject>) {
+            self.show_settings();
+        }
+
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: &AnyObject) {
             // In the dashboard window the same ✕ closes the window, returning the view to the notch.
@@ -672,6 +687,7 @@ impl Controller {
     pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let state = State {
             tasks: RefCell::new(store::load()),
+            settings: RefCell::new(Settings::load()),
             duration_idx: Cell::new(1), // 25 min
             ..State::default()
         };
@@ -724,9 +740,7 @@ impl Controller {
             let clips = NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.5, this.target(), sel!(pollClips:), None, true);
             clips.setTolerance(0.25);
         }
-        // The helper blocks on notifications, so it costs nothing while idle; it runs from
-        // launch so the collapsed notch can show music without the Music tab being opened.
-        this.ivars().now_playing.borrow_mut().start(this.target(), sel!(nowPlayingChanged:));
+        this.sync_now_playing();
         this.reload_events();
         this.refresh();
         this.render_clips();
@@ -1033,6 +1047,10 @@ impl Controller {
 
     fn render_tabs(&self) {
         let ui = self.ui();
+        let settings = self.ivars().settings.borrow();
+        if settings.hidden[self.ivars().tab.get() as usize] {
+            self.ivars().tab.set(Tab::ALL[settings.first_visible()]);
+        }
         let current = self.ivars().tab.get();
         let tabs: [(&NSView, &NSButton, Tab); 6] = [
             (&ui.workspace, &ui.tab_workspace, Tab::Workspace),
@@ -1047,6 +1065,7 @@ impl Controller {
         }
         for (body, pill, tab) in tabs {
             body.setHidden(tab != current);
+            pill.setHidden(settings.hidden[tab as usize]);
             if tab == current {
                 w::style_pill(pill, &white(1.0), &NSColor::blackColor(), 12.0);
             } else {
@@ -1172,9 +1191,10 @@ impl Controller {
     fn sync_activity(&self) {
         let state = self.ivars();
         let ui = self.ui();
-        let countdown = self.session_active().then(|| mmss(self.shown_secs()));
+        let settings = state.settings.borrow();
+        let countdown = (settings.wing_focus && self.session_active()).then(|| mmss(self.shown_secs()));
         let activity = Activity {
-            music: state.now_playing.borrow().track.as_ref().filter(|t| t.playing).map(|t| t.artwork.clone()),
+            music: state.now_playing.borrow().track.as_ref().filter(|t| t.playing && settings.wing_music).map(|t| t.artwork.clone()),
             countdown: countdown.as_deref().map(|text| (text, state.on_break.get())),
         };
         ui.activity.show(&activity, !state.expanded.get());
@@ -1342,12 +1362,49 @@ impl Controller {
         let mtm = self.mtm();
         let menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::new());
         menu.setAutoenablesItems(false);
-        for (title, action) in [("Open dashboard window", sel!(openDashboard:)), ("Export backup (JSON)…", sel!(exportBackup:))] {
-            let item = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(mtm.alloc(), &NSString::from_str(title), Some(action), &NSString::new()) };
+        let items = [
+            ("Open dashboard window", sel!(openDashboard:), ""),
+            ("Export backup (JSON)…", sel!(exportBackup:), ""),
+            ("Settings…", sel!(openSettings:), ","),
+        ];
+        for (title, action, key) in items {
+            let item = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(mtm.alloc(), &NSString::from_str(title), Some(action), &NSString::from_str(key)) };
             unsafe { item.setTarget(Some(self.target())) };
             menu.addItem(&item);
         }
         menu
+    }
+
+    fn show_settings(&self) {
+        let window = self.ivars().settings_window.get_or_init(|| {
+            let me = Weak::new(self);
+            let on_change = Box::new(move |settings: &Settings| {
+                if let Some(controller) = me.load() {
+                    controller.apply_settings(settings.clone());
+                }
+            });
+            SettingsWindow::new(self.ivars().settings.borrow().clone(), on_change, self.mtm())
+        });
+        window.show();
+    }
+
+    /// Live: pills, tab fallback and wings follow from a re-render.
+    fn apply_settings(&self, settings: Settings) {
+        *self.ivars().settings.borrow_mut() = settings;
+        self.sync_now_playing();
+        self.refresh();
+    }
+
+    /// The helper blocks on notifications, so it costs nothing while idle. It runs from launch
+    /// so the collapsed notch can show music without the Music tab being opened, and stops only
+    /// when neither the Music section nor the music wing wants it.
+    fn sync_now_playing(&self) {
+        let mut now_playing = self.ivars().now_playing.borrow_mut();
+        if self.ivars().settings.borrow().needs_now_playing() {
+            now_playing.start(self.target(), sel!(nowPlayingChanged:));
+        } else {
+            now_playing.stop();
+        }
     }
 
     /// Hosts the notch's content view in a normal window for when the panel feels too tight.
@@ -1508,6 +1565,8 @@ impl Controller {
                 | NSWindowCollectionBehavior::IgnoresCycle,
         );
         panel.setAppearance(unsafe { NSAppearance::appearanceNamed(NSAppearanceNameDarkAqua) }.as_deref());
+        // The delegate is on the action responder chain, which routes ⌘, to `openSettings:`.
+        panel.setDelegate(Some(ProtocolObject::from_ref(self)));
 
         let me = Weak::new(self);
         let on_file_drag = Box::new(move |event| {

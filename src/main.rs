@@ -15,6 +15,8 @@ mod panel;
 mod pill_button;
 mod pomodoros;
 mod quick_add;
+mod settings;
+mod settings_window;
 mod store;
 mod task_alerts;
 mod task_row;

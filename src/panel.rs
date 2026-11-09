@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSBezierPath, NSColor, NSDragOperation, NSDraggingInfo, NSPanel, NSPasteboardTypeFileURL, NSScreen, NSView,
+    NSApplication, NSBezierPath, NSColor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSPanel, NSPasteboardTypeFileURL, NSScreen, NSView,
 };
 use objc2_foundation::{NSArray, NSPoint, NSRect};
 
@@ -35,6 +35,20 @@ define_class!(
         #[unsafe(method(canBecomeKeyWindow))]
         fn can_become_key(&self) -> bool {
             true
+        }
+
+        // The panel has no menu bar, so ⌘, is caught here and sent up the responder chain
+        // (panel, then its delegate, the controller).
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            let flags = event.modifierFlags() & NSEventModifierFlags::DeviceIndependentFlagsMask;
+            let comma = event.charactersIgnoringModifiers().is_some_and(|c| c.to_string() == ",");
+            if flags == NSEventModifierFlags::Command && comma {
+                let app = NSApplication::sharedApplication(self.mtm());
+                unsafe { app.sendAction_to_from(sel!(openSettings:), None, Some(self.as_ref())) }
+            } else {
+                unsafe { msg_send![super(self), performKeyEquivalent: event] }
+            }
         }
 
         // The default implementation pushes the frame below the menu bar.
