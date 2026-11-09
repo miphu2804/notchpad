@@ -27,19 +27,35 @@ const SPRITE: [&str; 11] = [
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tomato {
     Ripe,
-    Growing,
+    /// The current session, ripening from green (0.0) to red (1.0) as it runs.
+    Growing(f64),
     Empty,
 }
+
+/// Body, highlight and shade at three points of ripening; in between they blend, passing
+/// through orange so the colour doesn't go muddy brown on the way from green to red.
+const GREEN: [[u8; 3]; 3] = [[98, 176, 74], [150, 214, 118], [56, 112, 48]];
+const ORANGE: [[u8; 3]; 3] = [[232, 142, 58], [250, 188, 112], [170, 92, 38]];
+const RED: [[u8; 3]; 3] = [[214, 62, 52], [244, 122, 104], [150, 36, 34]];
 
 impl Tomato {
     /// (stem, body, highlight, shade)
     fn palette(self) -> [Retained<NSColor>; 4] {
-        match self {
-            Tomato::Ripe => [rgba(86, 150, 64, 1.0), rgba(214, 62, 52, 1.0), rgba(244, 122, 104, 1.0), rgba(150, 36, 34, 1.0)],
-            Tomato::Growing => [rgba(86, 150, 64, 1.0), rgba(98, 176, 74, 1.0), rgba(150, 214, 118, 1.0), rgba(56, 112, 48, 1.0)],
-            Tomato::Empty => [rgba(62, 96, 54, 1.0), rgba(74, 72, 78, 1.0), rgba(90, 88, 94, 1.0), rgba(58, 56, 62, 1.0)],
+        let stem = rgba(86, 150, 64, 1.0);
+        let [body, light, shade] = match self {
+            Tomato::Ripe => RED,
+            Tomato::Growing(ripeness) => ripen(ripeness),
+            Tomato::Empty => return [rgba(62, 96, 54, 1.0), rgba(74, 72, 78, 1.0), rgba(90, 88, 94, 1.0), rgba(58, 56, 62, 1.0)],
         }
+        .map(|[r, g, b]| rgba(r, g, b, 1.0));
+        [stem, body, light, shade]
     }
+}
+
+fn ripen(ripeness: f64) -> [[u8; 3]; 3] {
+    let t = ripeness.clamp(0.0, 1.0);
+    let (from, to, k) = if t < 0.5 { (GREEN, ORANGE, t * 2.0) } else { (ORANGE, RED, t * 2.0 - 1.0) };
+    std::array::from_fn(|i| std::array::from_fn(|c| (f64::from(from[i][c]) + (f64::from(to[i][c]) - f64::from(from[i][c])) * k).round() as u8))
 }
 
 define_class!(
@@ -96,5 +112,20 @@ impl TomatoView {
         if self.ivars().replace(state) != state {
             self.setNeedsDisplay(true);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ripening_runs_green_through_orange_to_red() {
+        assert_eq!(ripen(0.0), GREEN);
+        assert_eq!(ripen(0.5), ORANGE);
+        assert_eq!(ripen(1.0), RED);
+        assert_eq!(ripen(-1.0), GREEN);
+        assert_eq!(ripen(2.0), RED);
+        assert_eq!(ripen(0.25)[0], [165, 159, 66]);
     }
 }
