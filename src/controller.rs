@@ -24,7 +24,6 @@ use crate::clips::ClipHistory;
 use crate::days;
 use crate::drop_column::DropColumn;
 use crate::list_row::{self, ListRow};
-use crate::logo::LogoMark;
 use crate::notch_motion::NotchMotion;
 use crate::task_row::TaskRow;
 use crate::panel::{self, FileDrag, NotchPanel, NotchShape};
@@ -746,8 +745,9 @@ impl Controller {
         content.setHidden(true);
         background.addSubview(&content);
 
-        // The header sits in the menu-bar band: name left of the hardware notch, tabs right of it.
-        let (brand, tabs, tab_workspace, tab_week, tab_clips) = self.build_header(mtm);
+        // The header sits in the menu-bar band: close top-left as on macOS windows, tabs right
+        // of the hardware notch.
+        let (quit, tabs, tab_workspace, tab_week, tab_clips) = self.build_header(mtm);
         let header = NSView::new(mtm);
         header.setTranslatesAutoresizingMaskIntoConstraints(false);
         content.addSubview(&header);
@@ -756,11 +756,12 @@ impl Controller {
         header.topAnchor().constraintEqualToAnchor(&content.topAnchor()).setActive(true);
         let header_height = header.heightAnchor().constraintEqualToConstant(header_band(safe_top));
         header_height.setActive(true);
-        for group in [&brand, &tabs] {
+        for group in [&*quit, &**tabs] {
+            group.setTranslatesAutoresizingMaskIntoConstraints(false);
             header.addSubview(group);
             group.centerYAnchor().constraintEqualToAnchor(&header.centerYAnchor()).setActive(true);
         }
-        brand.leadingAnchor().constraintEqualToAnchor_constant(&header.leadingAnchor(), 14.0).setActive(true);
+        quit.leadingAnchor().constraintEqualToAnchor_constant(&header.leadingAnchor(), 14.0).setActive(true);
         tabs.trailingAnchor().constraintEqualToAnchor_constant(&header.trailingAnchor(), -14.0).setActive(true);
         // The panel is centred on the screen, so the header's centre is the notch's centre.
         let notch_gap = tabs.leadingAnchor().constraintGreaterThanOrEqualToAnchor_constant(&header.centerXAnchor(), notch_gap(collapsed, safe_top));
@@ -788,14 +789,11 @@ impl Controller {
         Ui { panel, content, workspace, week, tab_workspace, tab_week, tab_clips, clips, focus, tasks, columns, expanded: Cell::new(expanded), header_height, notch_gap, motion }
     }
 
-    /// Returns the logo-and-name group, the tabs group, and the three tab buttons.
+    /// Returns the close button, the tabs group, and the three tab buttons.
     fn build_header(
         &self,
         mtm: MainThreadMarker,
-    ) -> (Retained<NSStackView>, Retained<NSStackView>, Retained<NSButton>, Retained<NSButton>, Retained<NSButton>) {
-        let logo = LogoMark::new(20.0, mtm);
-        fixed_size(&logo, 20.0, 20.0);
-        let name = w::label("Notchpad", 14.0, unsafe { NSFontWeightSemibold }, &white(1.0), mtm);
+    ) -> (Retained<NSButton>, Retained<NSStackView>, Retained<NSButton>, Retained<NSButton>, Retained<NSButton>) {
         let tab_workspace = w::pill("Workspace", 24.0, self.target(), sel!(showWorkspace:), mtm);
         let tab_week = w::pill("Week", 24.0, self.target(), sel!(showWeek:), mtm);
         let tab_clips = w::pill("Clips", 24.0, self.target(), sel!(showClips:), mtm);
@@ -804,10 +802,8 @@ impl Controller {
         }
         let quit = w::icon_button("xmark", "", 10.0, &white(0.55), self.target(), sel!(quit:), mtm);
 
-        // Close sits top-left, as on macOS windows, leaving the space right of the notch to the tabs.
-        let brand = w::stack(&[&quit, &logo, &name], false, 8.0, mtm);
         let tabs = w::stack(&[&tab_workspace, &tab_week, &tab_clips], false, 6.0, mtm);
-        (brand, tabs, tab_workspace, tab_week, tab_clips)
+        (quit, tabs, tab_workspace, tab_week, tab_clips)
     }
 
     fn build_focus_card(&self, mtm: MainThreadMarker) -> (Retained<NSView>, FocusCard) {
