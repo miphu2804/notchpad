@@ -6,6 +6,7 @@ mod drop_column;
 mod hotkey;
 mod list_row;
 mod now_playing;
+mod note_view;
 mod notch_motion;
 mod panel;
 mod pill_button;

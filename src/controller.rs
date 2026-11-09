@@ -13,7 +13,7 @@ use objc2_app_kit::{
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
     NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSLayoutConstraint,
     NSLayoutConstraintOrientation, NSMainMenuWindowLevel, NSMenu, NSMenuItem, NSScreen, NSScrollView, NSStackView,
-    NSStackViewDistribution, NSTextAlignment, NSTextField, NSTrackingArea,
+    NSStackViewDistribution, NSTextAlignment, NSTextDidChangeNotification, NSTextDidEndEditingNotification, NSTextField, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSNotificationSuspensionBehavior, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
@@ -25,6 +25,7 @@ use crate::days;
 use crate::drop_column::DropColumn;
 use crate::list_row::{self, ListRow};
 use crate::now_playing::{self, Command, NowPlaying, Source};
+use crate::note_view::{self, NoteView};
 use crate::notch_motion::NotchMotion;
 use crate::task_row::TaskRow;
 use crate::quick_add;
@@ -43,12 +44,14 @@ const DEFAULT_NOTCH: (f64, f64) = (185.0, 32.0);
 const FOCUS_CARD_WIDTH: f64 = 236.0;
 const PROGRESS_WIDTH: f64 = 150.0;
 const MUSIC_PROGRESS_WIDTH: f64 = 340.0;
-const MUSIC_TAB_WIDTH: f64 = 28.0;
+const ICON_TAB_WIDTH: f64 = 32.0;
 const ARTWORK_SIZE: f64 = 120.0;
 const MAX_CARD_ROWS: usize = 5;
 const MAX_COLUMN_ROWS: usize = 6;
 /// Gap between Today rows; a hairline is drawn in its middle.
 const CARD_ROW_GAP: f64 = 15.0;
+/// Quiet period after the last keystroke before the note is written to disk.
+const NOTES_SAVE_DELAY: f64 = 0.5;
 const DURATIONS_MIN: [u64; 4] = [15, 25, 45, 60];
 
 /// Week columns, also used as the add-field tag that picks the new task's day.
@@ -112,6 +115,15 @@ struct MusicView {
     toggle: Retained<NSButton>,
 }
 
+struct NotesView {
+    body: Retained<NSView>,
+    text: Retained<NoteView>,
+    /// Placeholder shown while the note is empty.
+    hint: Retained<NSTextField>,
+    /// Brief confirmation after ⌘↩ turns a line into a task.
+    added: Retained<NSTextField>,
+}
+
 #[derive(Clone, Copy, PartialEq, Default)]
 enum Tab {
     #[default]
@@ -119,6 +131,19 @@ enum Tab {
     Week,
     Clips,
     Music,
+    Notes,
+}
+
+/// The header's views: close, the tab groups left and right of the notch, and each tab.
+struct Header {
+    quit: Retained<NSButton>,
+    left: Retained<NSStackView>,
+    right: Retained<NSStackView>,
+    workspace: Retained<NSButton>,
+    week: Retained<NSButton>,
+    clips: Retained<NSButton>,
+    music: Retained<NSButton>,
+    notes: Retained<NSButton>,
 }
 
 struct Ui {
@@ -130,16 +155,18 @@ struct Ui {
     tab_week: Retained<NSButton>,
     tab_clips: Retained<NSButton>,
     tab_music: Retained<NSButton>,
+    tab_notes: Retained<NSButton>,
     clips: ClipsView,
     music: MusicView,
+    notes: NotesView,
     focus: FocusCard,
     tasks: TaskCard,
     columns: Vec<Column>,
     expanded: Cell<NSRect>,
     /// Height of the header band beside the notch; follows the display's safe area.
     header_height: Retained<NSLayoutConstraint>,
-    /// Keeps the tabs right of the hardware notch: half the notch width plus a margin.
-    notch_gap: Retained<NSLayoutConstraint>,
+    /// Keep the tab groups clear of the hardware notch: half its width plus a margin.
+    notch_gaps: [Retained<NSLayoutConstraint>; 2],
     motion: Retained<NotchMotion>,
 }
 
@@ -206,9 +233,7 @@ define_class!(
                     TOMORROW => &tomorrow,
                     _ => &today,
                 };
-                let task = quick_add::parse(text, default_day, &today, &tomorrow);
-                self.ivars().tasks.borrow_mut().push(task);
-                self.save_and_refresh();
+                self.push_task(text, default_day);
             }
             field.setStringValue(&NSString::new());
         }
@@ -329,6 +354,35 @@ define_class!(
             self.render_music();
         }
 
+        #[unsafe(method(showNotes:))]
+        fn show_notes(&self, _sender: &AnyObject) {
+            self.ivars().tab.set(Tab::Notes);
+            self.refresh();
+        }
+
+        /// Text changed: toggles the placeholder and saves once typing pauses.
+        #[unsafe(method(notesChanged:))]
+        fn notes_changed(&self, _notification: &NSNotification) {
+            self.after_note_edit();
+        }
+
+        #[unsafe(method(saveNotes:))]
+        fn save_notes(&self, _arg: Option<&AnyObject>) {
+            self.save_notes_now();
+        }
+
+        /// Focus left the note (clicked elsewhere): the hover may have ended meanwhile.
+        #[unsafe(method(notesEditingEnded:))]
+        fn notes_editing_ended(&self, _notification: &NSNotification) {
+            self.save_notes_now();
+            self.collapse_when_left();
+        }
+
+        #[unsafe(method(clearAdded:))]
+        fn clear_added(&self, _arg: Option<&AnyObject>) {
+            self.ivars().ui.get().expect("ui is built in new()").notes.added.setHidden(true);
+        }
+
         #[unsafe(method(clearClips:))]
         fn clear_clips(&self, _sender: &AnyObject) {
             self.ivars().clips.borrow_mut().clear();
@@ -402,7 +456,9 @@ define_class!(
             let ui = self.ui();
             ui.expanded.set(expanded);
             ui.header_height.setConstant(header_band(safe_top));
-            ui.notch_gap.setConstant(notch_gap(collapsed, safe_top));
+            for constraint in &ui.notch_gaps {
+                constraint.setConstant(notch_gap(collapsed, safe_top));
+            }
             ui.motion.set_rects(collapsed, expanded);
             self.collapse_when_left();
         }
@@ -414,6 +470,7 @@ define_class!(
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: &AnyObject) {
+            self.save_notes_now();
             NSApplication::sharedApplication(self.mtm()).terminate(None);
         }
     }
@@ -431,7 +488,13 @@ impl Controller {
         let ui = this.build_ui(mtm);
         this.ivars().ui.set(ui).ok().expect("ui is built once");
         this.ivars().seen_mtime.set(store::modified());
+        this.ui().notes.text.setString(&NSString::from_str(&store::load_notes()));
+        this.after_note_edit_without_save();
         unsafe {
+            let center = NSNotificationCenter::defaultCenter();
+            let text: &AnyObject = this.ui().notes.text.as_ref();
+            center.addObserver_selector_name_object(this.target(), sel!(notesChanged:), Some(NSTextDidChangeNotification), Some(text));
+            center.addObserver_selector_name_object(this.target(), sel!(notesEditingEnded:), Some(NSTextDidEndEditingNotification), Some(text));
             // The controller lives for the process. Re-anchor after hot-plug, resolution,
             // primary-display or arrangement changes instead of keeping startup coordinates.
             NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
@@ -486,7 +549,7 @@ impl Controller {
     }
 
     fn collapse_when_left(&self) {
-        if !self.ivars().expanded.get() || self.ivars().pinned.get() {
+        if !self.ivars().expanded.get() || self.ivars().pinned.get() || self.note_has_focus() {
             return;
         }
         if self.pointer_over_panel() {
@@ -528,7 +591,70 @@ impl Controller {
         if self.ivars().expanded.replace(on) != on {
             self.ui().motion.set_open(on);
             self.sync_music_timer();
+            if !on {
+                self.save_notes_now();
+                if self.note_has_focus() {
+                    self.ui().panel.makeFirstResponder(None);
+                }
+            }
         }
+    }
+
+    /// An open note keeps the panel up while typing, even with the pointer elsewhere.
+    fn note_has_focus(&self) -> bool {
+        let ui = self.ui();
+        let note: &AnyObject = ui.notes.text.as_ref();
+        ui.panel.isKeyWindow() && ui.panel.firstResponder().is_some_and(|r| std::ptr::eq(&*r as *const _ as *const u8, note as *const _ as *const u8))
+    }
+
+    /// Adds a typed line as a task; words like `6pm`, `!high` or `tomorrow` fill its fields.
+    fn push_task(&self, text: &str, default_day: &str) {
+        let task = quick_add::parse(text, default_day, &days::key(0), &days::key(1));
+        self.ivars().tasks.borrow_mut().push(task);
+        self.save_and_refresh();
+    }
+
+    fn after_note_edit(&self) {
+        self.after_note_edit_without_save();
+        let none: Option<&AnyObject> = None;
+        let _: () = unsafe {
+            msg_send![
+                NSObject::class(),
+                cancelPreviousPerformRequestsWithTarget: self,
+                selector: sel!(saveNotes:),
+                object: none
+            ]
+        };
+        let _: () = unsafe { msg_send![self, performSelector: sel!(saveNotes:), withObject: none, afterDelay: NOTES_SAVE_DELAY] };
+    }
+
+    fn after_note_edit_without_save(&self) {
+        let notes = &self.ui().notes;
+        notes.hint.setHidden(notes.text.string().length() > 0);
+    }
+
+    fn save_notes_now(&self) {
+        if let Err(err) = store::save_notes(&self.ui().notes.text.string().to_string()) {
+            eprintln!("notchpad: could not save notes: {err}");
+        }
+    }
+
+    /// ⌘↩: the line under the caret becomes a task for today and leaves the note.
+    fn note_line_to_task(&self) {
+        let notes = &self.ui().notes;
+        let text = notes.text.string().to_string();
+        let (line, rest, caret) = note_view::take_line(&text, notes.text.selectedRange().location);
+        let line = line.trim();
+        if line.is_empty() {
+            return;
+        }
+        self.push_task(line, &days::key(0));
+        notes.text.setString(&NSString::from_str(&rest));
+        notes.text.setSelectedRange(objc2_foundation::NSRange::new(caret, 0));
+        self.after_note_edit();
+        notes.added.setHidden(false);
+        let none: Option<&AnyObject> = None;
+        let _: () = unsafe { msg_send![self, performSelector: sel!(clearAdded:), withObject: none, afterDelay: 1.5f64] };
     }
 
     fn save_and_refresh(&self) {
@@ -605,11 +731,12 @@ impl Controller {
     fn render_tabs(&self) {
         let ui = self.ui();
         let current = self.ivars().tab.get();
-        let tabs: [(&NSView, &NSButton, Tab); 4] = [
+        let tabs: [(&NSView, &NSButton, Tab); 5] = [
             (&ui.workspace, &ui.tab_workspace, Tab::Workspace),
             (&ui.week, &ui.tab_week, Tab::Week),
             (&ui.clips.body, &ui.tab_clips, Tab::Clips),
             (&ui.music.body, &ui.tab_music, Tab::Music),
+            (&ui.notes.body, &ui.tab_notes, Tab::Notes),
         ];
         if !ui.content.isHidden() && tabs.iter().any(|(body, _, tab)| body.isHidden() == (*tab == current)) {
             crossfade(&ui.content);
@@ -927,9 +1054,9 @@ impl Controller {
         content.setHidden(true);
         background.addSubview(&content);
 
-        // The header sits in the menu-bar band: close top-left as on macOS windows, tabs right
-        // of the hardware notch.
-        let (quit, tabs, tab_workspace, tab_week, tab_clips, tab_music) = self.build_header(mtm);
+        // The header sits in the menu-bar band: close top-left as on macOS windows, then two
+        // tab groups, one each side of the hardware notch.
+        let head = self.build_header(mtm);
         let header = NSView::new(mtm);
         header.setTranslatesAutoresizingMaskIntoConstraints(false);
         content.addSubview(&header);
@@ -938,16 +1065,23 @@ impl Controller {
         header.topAnchor().constraintEqualToAnchor(&content.topAnchor()).setActive(true);
         let header_height = header.heightAnchor().constraintEqualToConstant(header_band(safe_top));
         header_height.setActive(true);
-        for group in [&*quit, &**tabs] {
+        for group in [&*head.quit, &**head.left, &**head.right] {
             group.setTranslatesAutoresizingMaskIntoConstraints(false);
             header.addSubview(group);
             group.centerYAnchor().constraintEqualToAnchor(&header.centerYAnchor()).setActive(true);
         }
-        quit.leadingAnchor().constraintEqualToAnchor_constant(&header.leadingAnchor(), 14.0).setActive(true);
-        tabs.trailingAnchor().constraintEqualToAnchor_constant(&header.trailingAnchor(), -14.0).setActive(true);
+        head.quit.leadingAnchor().constraintEqualToAnchor_constant(&header.leadingAnchor(), 14.0).setActive(true);
+        head.left.leadingAnchor().constraintEqualToAnchor_constant(&head.quit.trailingAnchor(), 12.0).setActive(true);
+        head.right.trailingAnchor().constraintEqualToAnchor_constant(&header.trailingAnchor(), -14.0).setActive(true);
         // The panel is centred on the screen, so the header's centre is the notch's centre.
-        let notch_gap = tabs.leadingAnchor().constraintGreaterThanOrEqualToAnchor_constant(&header.centerXAnchor(), notch_gap(collapsed, safe_top));
-        notch_gap.setActive(true);
+        let gap = notch_gap(collapsed, safe_top);
+        let notch_gaps = [
+            header.centerXAnchor().constraintGreaterThanOrEqualToAnchor_constant(&head.left.trailingAnchor(), gap),
+            head.right.leadingAnchor().constraintGreaterThanOrEqualToAnchor_constant(&header.centerXAnchor(), gap),
+        ];
+        for constraint in &notch_gaps {
+            constraint.setActive(true);
+        }
 
         let (focus_view, focus) = self.build_focus_card(mtm);
         let (task_view, tasks) = self.build_task_card(mtm);
@@ -957,7 +1091,8 @@ impl Controller {
         let (week, columns) = self.build_week(mtm);
         let clips = self.build_clips(mtm);
         let music = self.build_music(mtm);
-        for body in [&*workspace, &*week, &*clips.body, &*music.body] {
+        let notes = self.build_notes(mtm);
+        for body in [&*workspace, &*week, &*clips.body, &*music.body, &*notes.body] {
             content.addSubview(body);
             body.leadingAnchor().constraintEqualToAnchor_constant(&content.leadingAnchor(), 12.0).setActive(true);
             body.trailingAnchor().constraintEqualToAnchor_constant(&content.trailingAnchor(), -12.0).setActive(true);
@@ -969,29 +1104,57 @@ impl Controller {
         }
 
         let motion = NotchMotion::new(panel.clone(), content.clone(), collapsed, expanded, mtm);
-        Ui { panel, content, workspace, week, tab_workspace, tab_week, tab_clips, tab_music, clips, music, focus, tasks, columns, expanded: Cell::new(expanded), header_height, notch_gap, motion }
+        Ui {
+            panel,
+            content,
+            workspace,
+            week,
+            tab_workspace: head.workspace,
+            tab_week: head.week,
+            tab_clips: head.clips,
+            tab_music: head.music,
+            tab_notes: head.notes,
+            clips,
+            music,
+            notes,
+            focus,
+            tasks,
+            columns,
+            expanded: Cell::new(expanded),
+            header_height,
+            notch_gaps,
+            motion,
+        }
     }
 
-    /// Returns the close button, the tabs group, and the four tab buttons.
-    fn build_header(
-        &self,
-        mtm: MainThreadMarker,
-    ) -> (Retained<NSButton>, Retained<NSStackView>, Retained<NSButton>, Retained<NSButton>, Retained<NSButton>, Retained<NSButton>) {
-        let tab_workspace = w::pill("Workspace", 24.0, self.target(), sel!(showWorkspace:), mtm);
-        let tab_week = w::pill("Week", 24.0, self.target(), sel!(showWeek:), mtm);
-        let tab_clips = w::pill("Clips", 24.0, self.target(), sel!(showClips:), mtm);
-        for tab in [&tab_workspace, &tab_week, &tab_clips] {
-            w::fit_pill(tab, 7.0);
+    fn build_header(&self, mtm: MainThreadMarker) -> Header {
+        let pill = |title: &str, action| {
+            let pill = w::pill(title, 24.0, self.target(), action, mtm);
+            w::fit_pill(&pill, 10.0);
+            pill
+        };
+        let icon_pill = |symbol: &str, action| {
+            let pill = w::pill("", 24.0, self.target(), action, mtm);
+            pill.setImage(Some(&w::symbol(symbol)));
+            pill.setImagePosition(NSCellImagePosition::ImageOnly);
+            pill.widthAnchor().constraintEqualToConstant(ICON_TAB_WIDTH).setActive(true);
+            pill
+        };
+        let workspace = pill("Workspace", sel!(showWorkspace:));
+        let week = pill("Week", sel!(showWeek:));
+        let clips = pill("Clips", sel!(showClips:));
+        let music = icon_pill("music.note", sel!(showMusic:));
+        let notes = icon_pill("note.text", sel!(showNotes:));
+        Header {
+            quit: w::icon_button("xmark", "", 10.0, &white(0.55), self.target(), sel!(quit:), mtm),
+            left: w::stack(&[&workspace, &week], false, 6.0, mtm),
+            right: w::stack(&[&clips, &music, &notes], false, 6.0, mtm),
+            workspace,
+            week,
+            clips,
+            music,
+            notes,
         }
-        // Icon only: a fourth text pill would not fit between the notch and the right edge.
-        let tab_music = w::pill("", 24.0, self.target(), sel!(showMusic:), mtm);
-        tab_music.setImage(Some(&w::symbol("music.note")));
-        tab_music.setImagePosition(NSCellImagePosition::ImageOnly);
-        tab_music.widthAnchor().constraintEqualToConstant(MUSIC_TAB_WIDTH).setActive(true);
-        let quit = w::icon_button("xmark", "", 10.0, &white(0.55), self.target(), sel!(quit:), mtm);
-
-        let tabs = w::stack(&[&tab_workspace, &tab_week, &tab_clips, &tab_music], false, 4.0, mtm);
-        (quit, tabs, tab_workspace, tab_week, tab_clips, tab_music)
     }
 
     fn build_focus_card(&self, mtm: MainThreadMarker) -> (Retained<NSView>, FocusCard) {
@@ -1224,6 +1387,59 @@ impl Controller {
             view.centerYAnchor().constraintEqualToAnchor(&body.centerYAnchor()).setActive(true);
         }
         MusicView { body, now, empty, art, title, subtitle, progress, elapsed, total, toggle }
+    }
+
+    /// One dark card holding the scrolling text view, with the placeholder and the ⌘↩
+    /// confirmation laid over it.
+    fn build_notes(&self, mtm: MainThreadMarker) -> NotesView {
+        let card = w::filled(&rgba(42, 42, 45, 1.0), 18.0, mtm);
+        let me = Weak::new(self);
+        let text = NoteView::new(
+            Box::new(move || {
+                if let Some(controller) = me.load() {
+                    controller.note_line_to_task();
+                }
+            }),
+            mtm,
+        );
+        text.setRichText(false);
+        text.setAutomaticQuoteSubstitutionEnabled(false);
+        text.setAutomaticDashSubstitutionEnabled(false);
+        text.setAutomaticTextReplacementEnabled(false);
+        text.setDrawsBackground(false);
+        text.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        text.setTextColor(Some(&white(0.9)));
+        text.setInsertionPointColor(Some(&white(0.9)));
+        text.setTextContainerInset(NSSize::new(0.0, 0.0));
+        text.setVerticallyResizable(true);
+        text.setHorizontallyResizable(false);
+        text.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
+
+        let scroll = NSScrollView::new(mtm);
+        scroll.setTranslatesAutoresizingMaskIntoConstraints(false);
+        scroll.setDrawsBackground(false);
+        scroll.setHasVerticalScroller(true);
+        scroll.setAutohidesScrollers(true);
+        scroll.setDocumentView(Some(&text));
+        card.addSubview(&scroll);
+        scroll.leadingAnchor().constraintEqualToAnchor_constant(&card.leadingAnchor(), 16.0).setActive(true);
+        scroll.trailingAnchor().constraintEqualToAnchor_constant(&card.trailingAnchor(), -16.0).setActive(true);
+        scroll.topAnchor().constraintEqualToAnchor_constant(&card.topAnchor(), 14.0).setActive(true);
+        scroll.bottomAnchor().constraintEqualToAnchor_constant(&card.bottomAnchor(), -14.0).setActive(true);
+
+        let hint = w::label("Jot anything · ⌘↩ turns a line into a task", 13.0, unsafe { NSFontWeightRegular }, &white(0.35), mtm);
+        let added = w::label("Added to Today", 12.0, unsafe { NSFontWeightMedium }, &white(0.7), mtm);
+        added.setHidden(true);
+        for label in [&hint, &added] {
+            label.setTranslatesAutoresizingMaskIntoConstraints(false);
+            card.addSubview(label);
+        }
+        hint.leadingAnchor().constraintEqualToAnchor_constant(&card.leadingAnchor(), 16.0).setActive(true);
+        hint.topAnchor().constraintEqualToAnchor_constant(&card.topAnchor(), 14.0).setActive(true);
+        added.trailingAnchor().constraintEqualToAnchor_constant(&card.trailingAnchor(), -16.0).setActive(true);
+        added.bottomAnchor().constraintEqualToAnchor_constant(&card.bottomAnchor(), -12.0).setActive(true);
+
+        NotesView { body: card, text, hint, added }
     }
 
     /// "+ <input>" row used under every task list.
