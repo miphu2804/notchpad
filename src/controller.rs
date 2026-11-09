@@ -2,7 +2,10 @@
 //! Week tabs. Every change re-renders from `State`; the views hold no state of their own.
 
 use std::cell::{Cell, OnceCell, RefCell};
+use std::ptr::NonNull;
 use std::time::{Duration, Instant};
+
+use block2::RcBlock;
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyObject;
@@ -16,9 +19,11 @@ use objc2_app_kit::{NSClickGestureRecognizer, NSSound,
     NSStackViewDistribution, NSTextAlignment, NSTextDidChangeNotification, NSTextDidEndEditingNotification, NSTextField, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
+use objc2_event_kit::EKEventStoreChangedNotification;
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSOperationQueue, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 
+use crate::calendar::{self, Access, Calendar, Event};
 use crate::clip_card::{self, ClipCard};
 use crate::clips::ClipHistory;
 use crate::days;
@@ -50,6 +55,10 @@ const ICON_TAB_WIDTH: f64 = 32.0;
 const ARTWORK_SIZE: f64 = 120.0;
 const MAX_CARD_ROWS: usize = 5;
 const MAX_COLUMN_ROWS: usize = 6;
+/// Calendar rows per day before "+N more".
+const MAX_DAY_EVENTS: usize = 4;
+/// The Week tab shows today (0) and tomorrow (1).
+const WEEK_LAST_OFFSET: i64 = 1;
 /// Gap between Today rows; a hairline is drawn in its middle.
 const CARD_ROW_GAP: f64 = 15.0;
 /// Quiet period after the last keystroke before the note is written to disk.
@@ -77,6 +86,8 @@ fn white(alpha: f64) -> Retained<NSColor> {
 }
 
 struct Column {
+    /// Calendar rows above the tasks; the Inbox column hosts the access pill instead.
+    events: Retained<NSStackView>,
     list: Retained<NSStackView>,
     count: Retained<NSTextField>,
 }
@@ -194,6 +205,9 @@ pub struct State {
     pinned: Cell<bool>,
     tab: Cell<Tab>,
     clips: RefCell<ClipHistory>,
+    calendar: Calendar,
+    /// Today and tomorrow, refetched on tab switch, panel open and `EKEventStoreChanged`.
+    events: RefCell<Vec<Event>>,
     now_playing: RefCell<NowPlaying>,
     /// Runs only while the Music tab is visible and a track is playing.
     music_timer: RefCell<Option<Retained<NSTimer>>>,
@@ -329,7 +343,13 @@ define_class!(
         #[unsafe(method(showWeek:))]
         fn show_week(&self, _sender: &AnyObject) {
             self.ivars().tab.set(Tab::Week);
+            self.reload_events();
             self.refresh();
+        }
+
+        #[unsafe(method(requestCalendar:))]
+        fn request_calendar(&self, _sender: &AnyObject) {
+            self.ivars().calendar.request_access();
         }
 
         #[unsafe(method(showClips:))]
@@ -556,6 +576,16 @@ impl Controller {
         unsafe {
             let center = NSNotificationCenter::defaultCenter();
             let text: &AnyObject = this.ui().notes.text.as_ref();
+            // Delivered on the main queue: EventKit also posts this from background threads.
+            let me = Weak::new(&*this);
+            let changed = RcBlock::new(move |_: NonNull<NSNotification>| {
+                if let Some(controller) = me.load() {
+                    controller.reload_events();
+                }
+            });
+            center.addObserverForName_object_queue_usingBlock(
+                Some(EKEventStoreChangedNotification), None, Some(&NSOperationQueue::mainQueue()), &changed,
+            );
             center.addObserver_selector_name_object(this.target(), sel!(notesChanged:), Some(NSTextDidChangeNotification), Some(text));
             center.addObserver_selector_name_object(this.target(), sel!(notesEditingEnded:), Some(NSTextDidEndEditingNotification), Some(text));
             let terminal: &AnyObject = this.ui().terminal.view.as_ref();
@@ -573,6 +603,7 @@ impl Controller {
             // Reading the pasteboard's change count is cheap, so copies show up within half a second.
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.5, this.target(), sel!(pollClips:), None, true);
         }
+        this.reload_events();
         this.refresh();
         this.render_clips();
         this.ui().panel.orderFrontRegardless();
@@ -650,6 +681,9 @@ impl Controller {
         if self.ivars().expanded.replace(on) != on {
             self.ui().motion.set_open(on);
             self.sync_music_timer();
+            if on {
+                self.reload_events();
+            }
             if !on {
                 self.save_notes_now();
                 if self.note_has_focus() {
@@ -728,6 +762,12 @@ impl Controller {
             eprintln!("notchpad: could not save tasks: {err}");
         }
         self.ivars().seen_mtime.set(store::modified());
+    }
+
+    /// Fetches the Week tab's days; a no-op returning nothing until access is granted.
+    fn reload_events(&self) {
+        *self.ivars().events.borrow_mut() = self.ivars().calendar.events(WEEK_LAST_OFFSET);
+        self.render_week();
     }
 
     fn refresh(&self) {
@@ -993,9 +1033,11 @@ impl Controller {
                 })
                 .collect();
             ui.count.setStringValue(&NSString::from_str(&shown.len().to_string()));
+            let event_rows = self.render_events(column, ui);
             let before = list_row::snapshot(&ui.list);
             clear(&ui.list);
-            let fit = rows_that_fit(&tasks, &shown, MAX_COLUMN_ROWS);
+            // An event row is about half a task row tall.
+            let fit = rows_that_fit(&tasks, &shown, MAX_COLUMN_ROWS - event_rows.div_ceil(2));
             for &i in shown.iter().take(fit) {
                 let row = ListRow::new(&tasks[i].text, &self.week_row(i, &tasks[i]), &white(0.07), self.mtm());
                 unsafe { row.setMenu(Some(&self.task_menu(i))) };
@@ -1004,6 +1046,35 @@ impl Controller {
             self.add_overflow_note(&ui.list, shown.len(), fit, "", &white(0.4));
             list_row::animate_changes(&ui.list, before);
         }
+    }
+
+    /// Fills the column's calendar rows (or the access pill) and returns how many lines it used.
+    fn render_events(&self, column: isize, ui: &Column) -> usize {
+        let mtm = self.mtm();
+        clear(&ui.events);
+        let mut lines = 0;
+        if column == INBOX {
+            if calendar::access() == Access::NotDetermined {
+                let pill = w::pill("Show calendar events", 22.0, self.target(), sel!(requestCalendar:), mtm);
+                w::fit_pill(&pill, 10.0);
+                w::style_pill(&pill, &white(0.1), &white(0.8), 11.0);
+                ui.events.addArrangedSubview(&pill);
+                lines = 2;
+            }
+        } else {
+            let day = days::key(if column == TODAY { 0 } else { 1 });
+            let events = self.ivars().events.borrow();
+            let (rows, more) = calendar::day_rows(&events, &day, MAX_DAY_EVENTS);
+            for event in &rows {
+                add_full_width(&ui.events, &event_row(event, mtm), None);
+            }
+            if more > 0 {
+                add_full_width(&ui.events, &w::label(&format!("+{more} more"), 12.0, unsafe { NSFontWeightRegular }, &white(0.4), mtm), None);
+            }
+            lines = rows.len() + usize::from(more > 0);
+        }
+        ui.events.setHidden(lines == 0);
+        lines
     }
 
     fn week_row(&self, index: usize, task: &Task) -> Retained<NSView> {
@@ -1396,18 +1467,20 @@ impl Controller {
             let date = w::label(&date_text, 12.0, unsafe { NSFontWeightRegular }, &white(0.45), mtm);
             let count = w::label("0", 12.0, unsafe { NSFontWeightMedium }, &white(0.45), mtm);
             let head = w::stack(&[&title, &date, &w::spacer(mtm), &count], false, 6.0, mtm);
+            let events = w::stack(&[], true, 4.0, mtm);
+            events.setAlignment(objc2_app_kit::NSLayoutAttribute::Leading);
             let list = w::stack(&[], true, 8.0, mtm);
             let input = w::input("Add task", &white(0.9), tag, self.target(), sel!(addTask:), mtm);
             let add = self.add_row(&input, &white(0.45), mtm);
-            let inner = w::stack(&[&head, &list, &add], true, 12.0, mtm);
+            let inner = w::stack(&[&head, &events, &list, &add], true, 12.0, mtm);
             card.addSubview(&inner);
             w::pin(&inner, &card, 12.0, None);
-            for view in [&*head, &*list, &*add] {
+            for view in [&*head, &*events, &*list, &*add] {
                 view.widthAnchor().constraintEqualToAnchor(&inner.widthAnchor()).setActive(true);
             }
             week.addArrangedSubview(&card);
             card.heightAnchor().constraintEqualToAnchor(&week.heightAnchor()).setActive(true);
-            columns.push(Column { list, count });
+            columns.push(Column { events, list, count });
         }
         (week, columns)
     }
@@ -1675,6 +1748,20 @@ fn rows_that_fit(tasks: &[Task], shown: &[usize], max_rows: usize) -> usize {
             used <= 2 * max_rows
         })
         .count()
+}
+
+/// Dot in the calendar's colour, `HH:mm` or "All day", then the title on one line.
+fn event_row(event: &Event, mtm: MainThreadMarker) -> Retained<NSView> {
+    let (r, g, b) = event.color;
+    let dot = w::filled(&rgba(r, g, b, 1.0), 3.0, mtm);
+    fixed_size(&dot, 6.0, 6.0);
+    let when = match event.start_minutes {
+        Some(m) => format!("{:02}:{:02}", m / 60, m % 60),
+        None => "All day".to_owned(),
+    };
+    let when = w::label(&when, 11.0, unsafe { NSFontWeightMedium }, &white(0.5), mtm);
+    let title = w::label(&event.title, 12.0, unsafe { NSFontWeightRegular }, &white(0.8), mtm);
+    w::stack(&[&dot, &when, &title], false, 6.0, mtm).into_super()
 }
 
 fn clear(stack: &NSStackView) {
