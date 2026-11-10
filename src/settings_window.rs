@@ -429,7 +429,7 @@ impl SettingsWindow {
         let general = [Row { symbol: "power", name: "Open at login", switch: Some((opens_at_login(), sel!(toggleLogin:))), ..Row::default() }];
         let sections_pane = self.pane("Sections", &sections, mtm);
         let insights = [Row {
-            symbol: "chart.bar.xaxis", name: "Insights", blurb: Some("Activity, focus and streaks in the dashboard"),
+            symbol: "macwindow", name: "Insights window", blurb: Some("Insights in a larger, resizable window"),
             button: Some(("Open", sel!(openInsights:))), ..Row::default()
         }];
         sections_pane.addSubview(&self.card(&insights, 100.0 + SECTIONS.len() as f64 * ROW, 0, mtm));

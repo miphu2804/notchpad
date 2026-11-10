@@ -2,7 +2,7 @@
 //! reduced to levels and counts; each `draw_*` function below is only geometry.
 
 use std::cell::RefCell;
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::TAU;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -13,7 +13,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSAttributedStringKey, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
-use crate::insights::{Kind, LEVELS};
+use crate::insights::Kind;
 use crate::widgets::rgba;
 
 pub type Rgb = (u8, u8, u8);
@@ -22,8 +22,6 @@ pub const PURPLE: Rgb = (156, 139, 232);
 pub const AMBER: Rgb = (224, 162, 103);
 pub const SAGE: Rgb = (111, 201, 160);
 pub const PINK: Rgb = (232, 125, 160);
-/// The moons' light: a warm cream.
-pub const MOON: Rgb = (232, 215, 154);
 
 #[derive(Clone, PartialEq)]
 pub enum Plot {
@@ -34,9 +32,6 @@ pub enum Plot {
     /// One petal per day, oldest first: its effort as a fraction of the busiest day's and the
     /// kind that led it (none when idle); a few dates around the ring as `(day index, text)`.
     Petals { days: Vec<(f64, Option<Kind>)>, labels: Vec<(usize, String)>, active: u32 },
-    /// The month as a calendar: weekday of the 1st (Monday 0), a level per day (`None` once the
-    /// day has not come), and the index of today.
-    Moon { lead: u32, days: Vec<Option<u8>>, today: usize },
 }
 
 define_class!(
@@ -59,7 +54,6 @@ define_class!(
                 Plot::Blank => {}
                 Plot::Ring { active, total } => draw_ring(size, *active, *total),
                 Plot::Petals { days, labels, active } => draw_petals(size, days, labels, *active),
-                Plot::Moon { lead, days, today } => draw_moon(size, *lead, days, *today),
             }
         }
     }
@@ -103,11 +97,6 @@ fn text(s: &str, x: f64, y: f64, align: f64, size: f64, semibold: bool, color: &
     width
 }
 
-/// How wide [`text`] would draw `s` at `size` without semibold.
-fn text_width(s: &str, size: f64) -> f64 {
-    unsafe { NSString::from_str(s).sizeWithAttributes(Some(&attributes(size, false, &white(1.0)))) }.width
-}
-
 fn attributes(size: f64, semibold: bool, color: &NSColor) -> Retained<NSDictionary<NSAttributedStringKey, AnyObject>> {
     let weight = if semibold { unsafe { NSFontWeightSemibold } } else { unsafe { NSFontWeightMedium } };
     let font = NSFont::systemFontOfSize_weight(size, weight);
@@ -147,13 +136,14 @@ fn draw_ring(size: NSSize, active: u32, total: u32) {
 }
 
 fn draw_petals(size: NSSize, days: &[(f64, Option<Kind>)], labels: &[(usize, String)], active: u32) {
-    const FOOTER: f64 = 40.0;
-    const LABELS: f64 = 22.0;
+    // Room for the dates: beside the ring left and right, one line above and below.
+    const SIDE_LABELS: f64 = 48.0;
+    const TOP_LABELS: f64 = 22.0;
     // Below this share of the busiest day a petal would be a stub, so the day stays a tinted dot.
     const SHORTEST: f64 = 0.12;
-    let (cx, cy) = (size.width / 2.0, (size.height - FOOTER) / 2.0);
-    let outer = (size.width.min(size.height - FOOTER) / 2.0 - LABELS).max(1.0);
-    let inner = outer * 0.58;
+    let (cx, cy) = (size.width / 2.0, size.height / 2.0);
+    let outer = (size.width / 2.0 - SIDE_LABELS).min(size.height / 2.0 - TOP_LABELS).max(1.0);
+    let inner = outer * 0.5;
     let angle_of = |i: usize| TAU * i as f64 / days.len().max(1) as f64;
     // Thick petals read best, but neighbours must not touch at the base.
     let width = (TAU * inner / days.len().max(1) as f64 * 0.7).min(6.0);
@@ -163,8 +153,8 @@ fn draw_petals(size: NSSize, days: &[(f64, Option<Kind>)], labels: &[(usize, Str
         let angle = angle_of(i);
         let base = on_circle(cx, cy, inner, angle);
         match kind {
-            None => dot(base, 1.6, &white(0.12)),
-            Some(kind) if *length < SHORTEST => dot(base, width / 2.0, &color(hue(*kind), 0.4)),
+            None => dot(base, 1.8, &white(0.2)),
+            Some(kind) if *length < SHORTEST => dot(base, width * 0.6, &color(hue(*kind), 0.55)),
             Some(kind) => {
                 let petal = NSBezierPath::bezierPath();
                 petal.moveToPoint(base);
@@ -176,19 +166,21 @@ fn draw_petals(size: NSSize, days: &[(f64, Option<Kind>)], labels: &[(usize, Str
             }
         }
     }
-    let dim = white(0.38);
-    for (i, label) in labels {
+    let dim = white(0.4);
+    // The ring runs clockwise from the oldest day at the top round to today just left of it, so
+    // the top names both ends instead of a date.
+    let top = on_circle(cx, cy, outer + 14.0, 0.0);
+    text("start", top.x + 6.0, top.y - 7.0, 0.0, 10.0, false, &dim);
+    text("today", top.x - 6.0, top.y - 7.0, 1.0, 10.0, false, &dim);
+    for (i, label) in labels.iter().filter(|(i, _)| *i != 0) {
         let angle = angle_of(*i);
         let at = on_circle(cx, cy, outer + 14.0, angle);
-        // Left and right labels hang off the ring; top and bottom ones centre on it.
+        // Left and right labels hang off the ring; the bottom one centres on it.
         text(label, at.x, at.y - 7.0, 0.5 - 0.5 * angle.sin(), 10.0, false, &dim);
     }
-    text(&format!("last {} days", days.len()), cx, cy - 31.0, 0.5, 10.0, false, &dim);
-    text(&active.to_string(), cx, cy - 19.0, 0.5, 26.0, true, &white(0.95));
-    text("active days", cx, cy + 12.0, 0.5, 10.0, false, &dim);
-    let y = size.height - FOOTER + 4.0;
-    legend(&[("mostly deep focus", Kind::Focus), ("mostly pomodoros", Kind::Pomodoros), ("mostly tasks", Kind::Tasks)], cx, y, 0.5);
-    text("petal length = that day's contribution", cx, y + 20.0, 0.5, 10.0, false, &white(0.3));
+    text(&format!("last {} days", days.len()), cx, cy - 27.0, 0.5, 10.0, false, &dim);
+    text(&active.to_string(), cx, cy - 16.0, 0.5, 24.0, true, &white(0.95));
+    text("active days", cx, cy + 13.0, 0.5, 10.0, false, &dim);
 }
 
 fn hue(kind: Kind) -> Rgb {
@@ -212,83 +204,3 @@ fn dotted_circle(cx: f64, cy: f64, radius: f64) {
     }
 }
 
-/// A row of coloured dots with names; `align` places the row at `x` as [`text`] does.
-fn legend(entries: &[(&str, Kind)], x: f64, y: f64, align: f64) {
-    const DOT: f64 = 7.0;
-    const SPACING: f64 = 16.0;
-    let widths: Vec<f64> = entries.iter().map(|(name, _)| text_width(name, 10.0)).collect();
-    let total = widths.iter().map(|w| DOT + 6.0 + w).sum::<f64>() + SPACING * (entries.len().max(1) - 1) as f64;
-    let mut left = x - total * align;
-    for ((name, kind), width) in entries.iter().zip(widths) {
-        dot(NSPoint::new(left + DOT / 2.0, y + 7.0), DOT / 2.0, &color(hue(*kind), 0.9));
-        text(name, left + DOT + 6.0, y, 0.0, 10.0, false, &white(0.5));
-        left += DOT + 6.0 + width + SPACING;
-    }
-}
-
-/// A moon whose lit part grows with `level`: crescent, half, gibbous, full.
-fn draw_moon_disc(cx: f64, cy: f64, radius: f64, level: u8, hue: Rgb) {
-    let disc = NSBezierPath::bezierPathWithOvalInRect(rect(cx - radius, cy - radius, 2.0 * radius, 2.0 * radius));
-    white(0.09).setFill();
-    disc.fill();
-    if level == 0 {
-        return;
-    }
-    if level >= 3 {
-        let halo = NSBezierPath::bezierPathWithOvalInRect(rect(cx - radius - 2.5, cy - radius - 2.5, 2.0 * radius + 5.0, 2.0 * radius + 5.0));
-        color(hue, 0.12).setFill();
-        halo.fill();
-    }
-    // The lit area is bounded by the right half of the rim and a terminator ellipse; `bulge` is
-    // positive for a crescent (terminator on the right) and negative for a gibbous moon.
-    let lit = f64::from(level) / f64::from(LEVELS);
-    let bulge = 1.0 - 2.0 * lit;
-    let path = NSBezierPath::bezierPath();
-    let steps = 24;
-    for i in 0..=steps {
-        let a = PI * i as f64 / steps as f64;
-        let point = NSPoint::new(cx + radius * a.sin(), cy - radius * a.cos());
-        if i == 0 { path.moveToPoint(point) } else { path.lineToPoint(point) }
-    }
-    for i in (0..=steps).rev() {
-        let a = PI * i as f64 / steps as f64;
-        path.lineToPoint(NSPoint::new(cx + bulge * radius * a.sin(), cy - radius * a.cos()));
-    }
-    path.closePath();
-    color(hue, 1.0).setFill();
-    path.fill();
-}
-
-fn draw_moon(size: NSSize, lead: u32, days: &[Option<u8>], today: usize) {
-    const HEADER: f64 = 16.0;
-    let rows = (lead as usize + days.len()).div_ceil(7);
-    // A wide card keeps the grid compact and centred instead of spreading seven far-apart columns.
-    let pitch_x = (size.width / 7.0).min(60.0);
-    let left = (size.width - 7.0 * pitch_x) / 2.0;
-    let pitch_y = (size.height - HEADER) / rows.max(1) as f64;
-    let radius = ((pitch_x - 8.0).min(pitch_y - 18.0) / 2.0).clamp(4.0, 14.0);
-    for (i, initial) in ["M", "T", "W", "T", "F", "S", "S"].iter().enumerate() {
-        text(initial, left + (i as f64 + 0.5) * pitch_x, 0.0, 0.5, 10.0, false, &white(0.4));
-    }
-    for (i, level) in days.iter().enumerate() {
-        let slot = lead as usize + i;
-        let (cx, top) = ((slot % 7) as f64 + 0.5, HEADER + (slot / 7) as f64 * pitch_y);
-        let (cx, cy) = (left + cx * pitch_x, top + 2.0 + radius);
-        match level {
-            Some(level) => draw_moon_disc(cx, cy, radius, *level, MOON),
-            None => {
-                let ring = NSBezierPath::bezierPathWithOvalInRect(rect(cx - radius, cy - radius, 2.0 * radius, 2.0 * radius));
-                white(0.07).setStroke();
-                ring.stroke();
-            }
-        }
-        if i == today {
-            let ring = NSBezierPath::bezierPathWithOvalInRect(rect(cx - radius - 3.0, cy - radius - 3.0, 2.0 * radius + 6.0, 2.0 * radius + 6.0));
-            ring.setLineWidth(1.5);
-            white(0.7).setStroke();
-            ring.stroke();
-        }
-        let number = if i == today { white(0.95) } else { white(if level.is_some() { 0.45 } else { 0.25 }) };
-        text(&(i + 1).to_string(), cx, cy + radius + 3.0, 0.5, 9.0, i == today, &number);
-    }
-}

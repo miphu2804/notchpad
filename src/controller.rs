@@ -169,13 +169,12 @@ enum Tab {
     Clips,
     Music,
     Terminal,
-    /// Only in the dashboard window; not a notch section, so it has no setting.
     Insights,
 }
 
 impl Tab {
     /// The notch sections in header order, like [`crate::settings::SECTIONS`].
-    const ALL: [Tab; 4] = [Tab::Workspace, Tab::Clips, Tab::Music, Tab::Terminal];
+    const ALL: [Tab; 5] = [Tab::Workspace, Tab::Clips, Tab::Music, Tab::Terminal, Tab::Insights];
 }
 
 /// The header's views: close, the tab groups left and right of the notch, and each tab.
@@ -1244,10 +1243,8 @@ impl Controller {
     fn render_tabs(&self) {
         let ui = self.ui();
         let settings = self.ivars().settings.borrow();
-        let hidden = |tab: Tab| match tab {
-            Tab::Insights => !self.ivars().dashboard_open.get(),
-            tab => settings.hidden[tab as usize],
-        };
+        // Settings' "Open" shows Insights in the dashboard even while the notch hides it.
+        let hidden = |tab: Tab| settings.hidden[tab as usize] && !(tab == Tab::Insights && self.ivars().dashboard_open.get());
         if hidden(self.ivars().tab.get()) {
             self.ivars().tab.set(Tab::ALL[settings.first_visible()]);
         }
@@ -1753,7 +1750,6 @@ impl Controller {
             host.addSubview(&ui.content);
             self.ivars().pinned.set(false);
             self.set_expanded(false);
-            // The Insights tab shows only here.
             self.refresh();
         }
         window.makeKeyAndOrderFront(None);
@@ -1767,7 +1763,7 @@ impl Controller {
         attach_to_notch(&ui.content, &ui.panel.contentView().expect("panel has a content view"), ui.expanded.get().size.height - TOP_SLOP);
         self.ivars().dashboard_open.set(false);
         ui.motion.drive_content(true);
-        // Back in the notch: the Insights tab goes, and a view left on it falls back to a section.
+        // Back in the notch: a hidden Insights tab goes, and a view left on it falls back.
         self.refresh();
     }
 
@@ -1972,7 +1968,7 @@ impl Controller {
             pill
         };
         let workspace = pill("Workspace", sel!(showWorkspace:));
-        let insights = pill("Insights", sel!(showInsights:));
+        let insights = icon_pill("chart.bar.xaxis", sel!(showInsights:));
         let clips = icon_pill("doc.on.clipboard", sel!(showClips:));
         let music = icon_pill("play.circle", sel!(showMusic:));
         let terminal = pill("Terminal", sel!(showTerminal:));
@@ -1981,8 +1977,8 @@ impl Controller {
         settings.setToolTip(Some(&NSString::from_str("Settings (⌘,)")));
         Header {
             quit: w::icon_button("xmark", "", 10.0, &white(0.55), self.target(), sel!(quit:), mtm),
-            left: w::stack(&[&settings, &workspace, &insights], false, 8.0, mtm),
-            right: w::stack(&[&clips, &music, &terminal], false, 6.0, mtm),
+            left: w::stack(&[&settings, &workspace], false, 8.0, mtm),
+            right: w::stack(&[&clips, &music, &terminal, &insights], false, 6.0, mtm),
             workspace,
             insights,
             clips,
