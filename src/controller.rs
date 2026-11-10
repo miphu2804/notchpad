@@ -1845,7 +1845,7 @@ impl Controller {
         panel.setLevel(NSMainMenuWindowLevel + 1);
         panel.setCollectionBehavior(
             NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::Stationary
+                | NSWindowCollectionBehavior::Transient
                 | NSWindowCollectionBehavior::FullScreenAuxiliary
                 | NSWindowCollectionBehavior::IgnoresCycle,
         );
