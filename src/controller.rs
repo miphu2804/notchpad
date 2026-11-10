@@ -64,7 +64,9 @@ const BAR: (f64, f64) = (160.0, 24.0);
 const FOCUS_CARD_WIDTH: f64 = 236.0;
 const MUSIC_PROGRESS_WIDTH: f64 = 440.0;
 const ICON_TAB_WIDTH: f64 = 32.0;
-const ARTWORK_SIZE: f64 = 200.0;
+/// The box artwork fits in; the view takes the image's own shape, so a wide video still has
+/// no bars.
+const ARTWORK_SIZE: f64 = 220.0;
 const MAX_CARD_ROWS: usize = 5;
 /// Calendar events shown above the tasks; the rest of today's stay in the calendar app.
 const MAX_EVENT_ROWS: usize = 3;
@@ -149,6 +151,8 @@ struct MusicView {
     now: Retained<NSStackView>,
     empty: Retained<NSTextField>,
     art: Retained<NSImageView>,
+    /// Width and height of `art`.
+    art_size: [Retained<NSLayoutConstraint>; 2],
     title: Marquee,
     subtitle: Marquee,
     progress: Retained<NSLayoutConstraint>,
@@ -1298,7 +1302,13 @@ impl Controller {
             view.now.setHidden(now.track.is_none());
             view.empty.setHidden(now.track.is_some());
             if let Some(track) = &now.track {
-                view.art.setImage(Some(&track.artwork.clone().unwrap_or_else(|| w::symbol("music.note"))));
+                let image = track.artwork.clone().unwrap_or_else(|| w::symbol("music.note"));
+                let size = if track.artwork.is_some() { image.size() } else { NSSize::new(1.0, 1.0) };
+                let aspect = if size.width > 0.0 && size.height > 0.0 { size.width / size.height } else { 1.0 };
+                let (width, height) = if aspect >= 1.0 { (ARTWORK_SIZE, ARTWORK_SIZE / aspect) } else { (ARTWORK_SIZE * aspect, ARTWORK_SIZE) };
+                view.art_size[0].setConstant(width);
+                view.art_size[1].setConstant(height);
+                view.art.setImage(Some(&image));
                 view.title.set_text(&track.title);
                 let credits = [track.artist.as_str(), track.album.as_str()];
                 view.subtitle.set_text(&credits.iter().filter(|c| !c.is_empty()).copied().collect::<Vec<_>>().join(" · "));
@@ -2188,7 +2198,11 @@ impl Controller {
         let art = NSImageView::new(mtm);
         art.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
         art.setContentTintColor(Some(&white(0.4)));
-        fixed_size(&art, ARTWORK_SIZE, ARTWORK_SIZE);
+        art.setTranslatesAutoresizingMaskIntoConstraints(false);
+        let art_size = [art.widthAnchor().constraintEqualToConstant(ARTWORK_SIZE), art.heightAnchor().constraintEqualToConstant(ARTWORK_SIZE)];
+        for constraint in &art_size {
+            constraint.setActive(true);
+        }
         w::paint(&art, &white(0.08), 14.0);
         if let Some(layer) = art.layer() {
             layer.setMasksToBounds(true);
@@ -2236,7 +2250,7 @@ impl Controller {
             view.centerXAnchor().constraintEqualToAnchor(&body.centerXAnchor()).setActive(true);
             view.centerYAnchor().constraintEqualToAnchor(&body.centerYAnchor()).setActive(true);
         }
-        MusicView { body, now, empty, art, title, subtitle, progress, elapsed, total, toggle }
+        MusicView { body, now, empty, art, art_size, title, subtitle, progress, elapsed, total, toggle }
     }
 
     /// A card holding the terminal view.
