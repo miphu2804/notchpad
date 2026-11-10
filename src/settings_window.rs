@@ -57,6 +57,9 @@ const BUTTON_WIDTH: f64 = 90.0;
 const FIELD_WIDTH: f64 = 120.0;
 /// Index of the Integrations pane in [`PANES`].
 const INTEGRATIONS_PANE: usize = 3;
+const GENERAL_PANE: usize = 4;
+/// The Synced lyrics switch's row in the General pane, and so its tag.
+const LYRICS_ROW: isize = 1;
 
 /// One settings row: symbol, name, optional dim description, and its controls, laid out right to
 /// left: a button (title, action), a switch (state, action) and left of those a menu (items,
@@ -322,6 +325,15 @@ impl SettingsWindow {
         window.makeKeyAndOrderFront(None);
         #[allow(deprecated)] // `activate()` needs macOS 14
         NSApplication::sharedApplication(self.mtm()).activateIgnoringOtherApps(true);
+    }
+
+    /// Follows the lyrics button in the notch, so a later change here does not undo it.
+    pub fn set_lyrics(&self, on: bool) {
+        self.ivars().settings.borrow_mut().lyrics = on;
+        let pane = &self.ivars().parts.get().expect("built in new()").panes[GENERAL_PANE];
+        if let Some(switch) = pane.viewWithTag(LYRICS_ROW).and_then(|v| v.downcast::<NSSwitch>().ok()) {
+            switch.setState(if on { NSControlStateValueOn } else { 0 });
+        }
     }
 
     pub fn window(&self) -> &NSWindow {

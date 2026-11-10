@@ -25,7 +25,7 @@ Each section is a tab in the open notch; hide or resize any of them in **Setting
 | **Workspace** | Today's tasks a few at a time (**+N more** shows the next few), one-line quick add and undo, a pomodoro timer tied to a task, and today's calendar events. Click a task to see and edit every field. |
 | **Insights** | Month rings of the last 36 days, active days this month, current streak, focus time this week and the best day. |
 | **Clips** | Clipboard history, fresh screenshots and dropped files, ready to drag into any app. |
-| **Playing** | Now Playing with artwork, progress, playback controls and, if turned on, synced lyrics that scroll with the song. |
+| **Playing** | Now Playing with artwork, progress, playback controls and synced lyrics that scroll with the song; the lyrics button beside the controls turns them on. |
 | **Terminal** | A shell in the notch. |
 
 Around the sections:
@@ -140,7 +140,7 @@ With a personal automation this turns incoming mail or messages into tasks: on m
 
 ## Privacy
 
-Everything stays on your Mac, as plain text in `~/Library/Application Support/notchpad/`. NotchGo makes network requests only to Linear, if you connect it, and to lrclib.net with the playing song's title, artist and length, if you turn on **Settings › General › Synced lyrics**. Calendar, Reminders and Music/Spotify access are requested from macOS only when the feature is used.
+Everything stays on your Mac, as plain text in `~/Library/Application Support/notchpad/`. NotchGo makes network requests only to Linear, if you connect it, and to lrclib.net with the playing song's title, artist and length, if you turn on lyrics with the button in Playing or **Settings › General › Synced lyrics**. Calendar, Reminders and Music/Spotify access are requested from macOS only when the feature is used.
 
 ## Development
 
