@@ -22,15 +22,15 @@ Each section is a tab in the open notch; hide or resize any of them in **Setting
 
 | Section | What it holds |
 |---|---|
-| **Workspace** | Today's tasks with one-line quick add and undo, a pomodoro timer tied to a task, and today's calendar events. |
+| **Workspace** | Today's tasks a few at a time (**+N more** shows the next few), one-line quick add and undo, a pomodoro timer tied to a task, and today's calendar events. Click a task to see and edit every field. |
 | **Insights** | Month rings of the last 36 days, active days this month, current streak, focus time this week and the best day. |
 | **Clips** | Clipboard history, fresh screenshots and dropped files, ready to drag into any app. |
-| **Playing** | Now Playing with artwork, progress and playback controls. |
+| **Playing** | Now Playing with artwork, progress, playback controls and, if turned on, synced lyrics that scroll with the song. |
 | **Terminal** | A shell in the notch. |
 
 Around the sections:
 
-- **Alerts** drop out of the notch when a focus session or break ends and before a timed task, with Snooze and Done.
+- **Alerts** drop out of the notch when a focus session or break ends, and before and at a timed task, with Snooze and Done. While NotchGo is not running, the same task reminders arrive in Notification Center instead.
 - **Live wings** beside the closed notch show the current track and the focus countdown.
 - **Integrations** with Claude (MCP), Calendar, Linear, Apple Reminders and Shortcuts. See [Integrations](#integrations).
 
@@ -56,7 +56,11 @@ To start at login, turn on **Settings › General › Open at login**.
 
 ## Usage
 
-Hover the notch or press **Option-N** to open it; quit with the ✕. Right-click the header for **Plan the rest of today** (gives today's untimed tasks a start in the free gaps until 22:00, high priority first, around calendar events and timed tasks), Insights, the JSON backup export and copying today's tasks as a Markdown checklist.
+Hover the notch or press **Option-N** to open it; quit with the ✕. Right-click the header for **Plan my day**, Insights, the JSON backup export and copying today's tasks as a Markdown checklist.
+
+**Plan my day** rearranges the rest of today: untimed tasks, timed tasks whose slot has passed and tasks overdue from earlier days get a start in the free gaps until 22:00, high priority first, around calendar events and upcoming timed tasks. What does not fit moves to tomorrow. A card under the notch says what moved.
+
+Click a task's title to open it in the input as a quick-add line with all its fields; Return saves, Esc cancels. Right-click a task for priority, Move to Tomorrow and Delete.
 
 Quick add reads one line; recognised words set fields and are removed from the title:
 
@@ -80,7 +84,7 @@ All integrations are off until you turn them on in **Settings › Integrations**
 | [Calendar](#calendar) | Today's events above your tasks, read-only | macOS Calendars permission |
 | [Linear](#linear) | Assigned issues become tasks; done in NotchGo closes them | OAuth or a personal API key, kept in the Keychain |
 | [Reminders](#apple-reminders) | Two-way sync with a "NotchGo" list, so tasks reach iPhone and Watch | macOS Reminders permission |
-| [Shortcuts](#shortcuts-and-automation) | Add tasks from a shell command or an automation | None |
+| [Shortcuts](#shortcuts-and-automation) | Add tasks or plan the day from a `notchgo://` link, a shell command or an automation | None |
 
 ### Claude (Code and Desktop)
 
@@ -115,19 +119,28 @@ Your open assigned issues become tasks on their due date (or today), refreshed a
 
 ### Shortcuts and automation
 
-`notchpad-mcp add` adds a task using the quick-add syntax. It goes to today unless the line names another day.
+NotchGo opens two links, so Shortcuts, Raycast, Alfred or a browser can drive it:
+
+| Link | Does |
+|---|---|
+| `notchgo://add?text=Pay%20rent%205pm%20!high` | Adds a task with the quick-add syntax (URL-encoded) to today unless it names another day |
+| `notchgo://plan` | Runs **Plan my day** |
+
+In Shortcuts use **URL Encode** on your text, then **Open URLs** with `notchgo://add?text=` followed by the encoded text. No script permission is needed. A personal automation at a time of day with **Open URLs** `notchgo://plan` plans every morning on its own.
+
+`notchpad-mcp add` does the same from a shell. It goes to today unless the line names another day.
 
 ```bash
 /Applications/NotchGo.app/Contents/MacOS/notchpad-mcp add "Pay rent 5pm !high #home"
 ```
 
-In Shortcuts, turn on **Settings › Advanced › Allow Running Scripts**, add a **Run Shell Script** action with that command and pass your text as an argument.
+To use it in Shortcuts instead of a link, turn on **Settings › Advanced › Allow Running Scripts**, add a **Run Shell Script** action with that command and pass your text as an argument.
 
-With a personal automation this turns incoming mail or messages into tasks: on macOS Tahoe, trigger on **Email** or **Message**, filter by sender or subject (for example, your bank's transaction emails), then run the command with a line such as `Review transaction #finance`. Shortcuts has no "any notification" trigger, so only its listed triggers work.
+With a personal automation this turns incoming mail or messages into tasks: on macOS Tahoe, trigger on **Email** or **Message**, filter by sender or subject (for example, your bank's transaction emails), then open a link or run the command with a line such as `Review transaction #finance`. Shortcuts has no "any notification" trigger, so only its listed triggers work.
 
 ## Privacy
 
-Everything stays on your Mac, as plain text in `~/Library/Application Support/notchpad/`. NotchGo makes network requests only to Linear, and only if you connect it. Calendar, Reminders and Music/Spotify access are requested from macOS only when the feature is used.
+Everything stays on your Mac, as plain text in `~/Library/Application Support/notchpad/`. NotchGo makes network requests only to Linear, if you connect it, and to lrclib.net with the playing song's title, artist and length, if you turn on **Settings › General › Synced lyrics**. Calendar, Reminders and Music/Spotify access are requested from macOS only when the feature is used.
 
 ## Development
 

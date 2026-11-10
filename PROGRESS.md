@@ -1,3 +1,20 @@
+### [2026-11-10 10:34 UTC+07:00] — [Feature] Plan my day, notchgo:// links, task editing and paging, synced lyrics
+
+**Done:**
+- Plan my day moves missed, overdue and untimed tasks into free gaps until 22:00 by priority; what does not fit goes to tomorrow.
+- Task reminders use one wording for the notch card and Notification Center, at the lead time and at the task time.
+- `notchgo://add?text=…` and `notchgo://plan` for Shortcuts and other launchers.
+- Click a task title to edit every field as a quick-add line (Return saves, Esc cancels); the list shows a few tasks with a "+N more" pill.
+- Optional synced lyrics from lrclib.net in Playing, sliding up line by line.
+
+**Changed  files:**
+- `src/day_plan.rs`, `src/task_alerts.rs`, `src/controller.rs`, `src/quick_add.rs`, `src/linear.rs` — modified
+- `src/url_command.rs`, `src/lyrics.rs`, `src/lyrics_view.rs` — created
+- `src/settings.rs`, `src/settings_window.rs`, `src/main.rs`, `macos/Info.plist`, `README.md` — modified
+
+**Flow explained:**
+`planDay:` / `notchgo://plan` → `day_plan::plan` (busy = calendar + upcoming timed tasks) → slots written to the store → notice card. Apple Event `GURL` → `url_command::parse` → add or plan. Playing render → `Lyrics::want` (background curl) → `lyricsFetched:` → `LyricsView::show` on a 0.25 s timer.
+
 ### [2026-11-10 10:15 UTC+07:00] — [Fix] Bar shape drawn as a smaller notch
 
 **Done:** The Bar shape was a flat rectangle with square top corners, which looked out of place beside the hardware notch. It now uses the notch silhouette (concave ears, rounded bottom corners) at the smaller Bar size (160×24).
@@ -112,18 +129,3 @@ EventKit returns events overlapping the range, so an event under way stays until
 
 **Flow explained:**
 - The 2 s reload tick starts a Reminders fetch when the switch is on, access is granted, and the task file changed or 30 s passed. The fetch completes on an EventKit queue; on the main thread `reminders_sync::reconcile` compares tasks, reminders and the last snapshot (`reminders.txt`) to decide pulls, pushes, deletes and new links, then `Reminders::apply` writes them and the snapshot is saved. A pass is skipped if `tasks.txt` changed on disk meanwhile.
-
-### [2026-11-10 00:51 UTC+07:00] — [Fix] Verify the integrations, alerts and Insights pass
-
-**Done:**
-- Linear connects with a personal API key when no OAuth client ID is built in; the key is checked against Linear before it is stored.
-- A timed task no longer gets both a system notification and the notch card in the same minute; the scheduler leaves the next minute to the card.
-- Integration logos share one rounded tile; Claude Desktop shows the installed app's icon.
-- Insights keeps the stat cards, month rings and moon calendar; the heatmap and the 30-day pulse with PNG export are gone.
-
-**Changed  files:**
-- `src/linear.rs`, `src/settings_window.rs`, `src/task_alerts.rs`, `src/controller.rs`, `src/brand_logos.rs` — modified
-- `src/insights.rs`, `src/insights_chart.rs`, `src/insights_view.rs`, `README.md` — modified
-
-**Flow explained:**
-- `remind_tasks` withdraws pending system requests for tasks due next minute, and `task_alerts::sync` schedules from the minute after; the notch card covers the gap.
