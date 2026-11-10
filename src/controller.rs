@@ -594,13 +594,14 @@ define_class!(
         /// overwritten; the reload picks it up and the next pass runs on it.
         #[unsafe(method(remindersFetched:))]
         fn reminders_fetched(&self, _arg: Option<&AnyObject>) {
-            let Some((found, list_created)) = self.ivars().reminders.borrow_mut().take() else { return };
+            let Some((found, modified, list_created)) = self.ivars().reminders.borrow_mut().take() else { return };
             if store::modified() != self.ivars().seen_mtime.get() {
                 return;
             }
             let changed = {
                 let mut tasks = self.ivars().tasks.borrow_mut();
-                let changes = reminders_sync::reconcile(&mut tasks, &found, &reminders_sync::load_snapshot(), list_created);
+                let clocks = reminders_sync::Clocks { tasks: store::modified(), reminders: modified };
+                let changes = reminders_sync::reconcile(&mut tasks, &found, &reminders_sync::load_snapshot(), &clocks, list_created);
                 let linked = self.ivars().reminders.borrow_mut().apply(&changes, &mut tasks);
                 if let Err(err) = reminders_sync::save_snapshot(&reminders_sync::snapshot_of(&tasks)) {
                     eprintln!("notchpad: could not save the Reminders snapshot: {err}");
@@ -620,9 +621,13 @@ define_class!(
             self.sync_reminders();
         }
 
-        /// Called when the user answers the calendar prompt and whenever the calendars change.
+        /// Called when the user answers the calendar prompt and whenever the calendars or
+        /// reminders change (`EKEventStoreChangedNotification`), which also pulls the Reminders
+        /// list at once instead of at the next interval.
         #[unsafe(method(reloadEvents:))]
         fn reload_events(&self, _arg: Option<&AnyObject>) {
+            self.ivars().reminders.borrow_mut().store_changed();
+            self.sync_reminders();
             self.load_events();
             self.render_task_card();
         }
