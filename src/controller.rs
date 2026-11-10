@@ -170,6 +170,8 @@ struct MusicView {
     elapsed: Retained<NSTextField>,
     total: Retained<NSTextField>,
     toggle: Retained<NSButton>,
+    /// Turns synced lyrics on and off; bright while on.
+    lyrics_button: Retained<NSButton>,
     lyrics: LyricsView,
 }
 
@@ -638,6 +640,20 @@ define_class!(
         #[unsafe(method(musicNext:))]
         fn music_next(&self, _sender: &AnyObject) {
             self.ivars().now_playing.borrow_mut().send(Command::Next);
+        }
+
+        /// The lyrics button: the same setting as Settings › General › Synced lyrics.
+        #[unsafe(method(toggleLyrics:))]
+        fn toggle_lyrics(&self, _sender: &AnyObject) {
+            let mut settings = self.ivars().settings.borrow().clone();
+            settings.lyrics = !settings.lyrics;
+            if let Err(err) = settings.save() {
+                eprintln!("notchpad: could not save settings: {err}");
+            }
+            if let Some(window) = self.ivars().settings_window.get() {
+                window.set_lyrics(settings.lyrics);
+            }
+            self.apply_settings(settings);
         }
 
         /// A lyrics lookup finished; see `Lyrics::want`.
@@ -1436,8 +1452,10 @@ impl Controller {
                 view.progress.setConstant(MUSIC_PROGRESS_WIDTH * fraction.clamp(0.0, 1.0));
                 view.toggle.setImage(Some(&w::symbol(if track.playing { "pause.fill" } else { "play.fill" })));
             }
+            let on = self.ivars().settings.borrow().lyrics;
+            view.lyrics_button.setContentTintColor(Some(&white(if on { 0.95 } else { 0.4 })));
             let mut lyrics = self.ivars().lyrics.borrow_mut();
-            match now.track.as_ref().filter(|_| self.ivars().settings.borrow().lyrics) {
+            match now.track.as_ref().filter(|_| on) {
                 Some(track) => {
                     lyrics.want(&track.artist, &track.title, track.duration, self.target(), sel!(lyricsFetched:));
                     view.lyrics.show(lyrics.around(track.position()));
@@ -2405,7 +2423,11 @@ impl Controller {
         let previous = button("backward.fill", 20.0, sel!(musicPrevious:));
         let toggle = button("play.fill", 30.0, sel!(musicPlayPause:));
         let next = button("forward.fill", 20.0, sel!(musicNext:));
-        let controls = w::stack(&[&previous, &toggle, &next], false, 10.0, mtm);
+        let lyrics_button = w::icon_button("quote.bubble", "", 17.0, &white(0.4), self.target(), sel!(toggleLyrics:), mtm);
+        lyrics_button.setToolTip(Some(&NSString::from_str("Synced lyrics")));
+        fixed_size(&lyrics_button, 44.0, 44.0);
+        let controls = w::stack(&[&previous, &toggle, &next, &w::spacer(mtm), &lyrics_button], false, 10.0, mtm);
+        controls.widthAnchor().constraintEqualToConstant(MUSIC_PROGRESS_WIDTH).setActive(true);
 
         let lyrics = LyricsView::new(MUSIC_PROGRESS_WIDTH, mtm);
         let column = w::stack(&[&title.view, &subtitle.view, &lyrics.view, &track, &times, &controls], true, 6.0, mtm);
@@ -2423,7 +2445,7 @@ impl Controller {
             view.centerXAnchor().constraintEqualToAnchor(&body.centerXAnchor()).setActive(true);
             view.centerYAnchor().constraintEqualToAnchor(&body.centerYAnchor()).setActive(true);
         }
-        MusicView { body, now, empty, art, art_size, title, subtitle, progress, elapsed, total, toggle, lyrics }
+        MusicView { body, now, empty, art, art_size, title, subtitle, progress, elapsed, total, toggle, lyrics_button, lyrics }
     }
 
     /// A card holding the terminal view.
