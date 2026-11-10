@@ -56,7 +56,7 @@ To start at login, turn on **Settings › General › Open at login**.
 
 ## Usage
 
-Hover the notch or press **Option-N** to open it; quit with the ✕. Right-click the header for the JSON backup export, Insights and copying today's tasks as a Markdown checklist.
+Hover the notch or press **Option-N** to open it; quit with the ✕. Right-click the header for **Plan the rest of today** (gives today's untimed tasks a start in the free gaps until 22:00, high priority first, around calendar events and timed tasks), Insights, the JSON backup export and copying today's tasks as a Markdown checklist.
 
 Quick add reads one line; recognised words set fields and are removed from the title:
 
