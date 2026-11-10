@@ -25,7 +25,7 @@ use crate::clip_card::{self, ClipCard};
 use crate::clips::ClipHistory;
 use crate::settings::{self as prefs, Background, Settings, Shape, Size, TimerStyle};
 use crate::settings_window::SettingsWindow;
-use crate::day_plan;
+use crate::day_plan::{self, Slot};
 use crate::days;
 use crate::export;
 use crate::focus_ring::FocusRing;
@@ -47,7 +47,7 @@ use crate::pomodoros::{self, DAILY_GOAL};
 use crate::tomato_view::{Tomato, TomatoView};
 use crate::panel::{self, FileDrag, NotchPanel, NotchShape};
 use crate::store::{self, Task};
-use crate::task_alerts;
+use crate::task_alerts::{self, clock_12h};
 use crate::widgets::{self as w, SURFACE, rgba};
 
 const WIDTH: f64 = 720.0;
@@ -85,6 +85,8 @@ const CYCLE: usize = 4;
 const UNDO_SECS: f64 = 6.0;
 /// How long a task reminder card stays without an answer; the system notification remains.
 const REMINDER_SECS: f64 = 60.0;
+/// How long the card saying what "Plan my day" moved stays.
+const PLAN_NOTICE_SECS: f64 = 6.0;
 /// How long a pomodoro card stays: it asks nothing.
 const SESSION_NOTICE_SECS: f64 = 8.0;
 const SNOOZE_MIN: u32 = 5;
@@ -466,19 +468,9 @@ define_class!(
             }
         }
 
-        /// Gives today's untimed open tasks a start in the free gaps; see `day_plan::plan`.
         #[unsafe(method(planDay:))]
         fn plan_day(&self, _item: &NSMenuItem) {
-            let Some(now) = now_minutes() else { return };
-            let busy: Vec<(u32, u32)> = self.ivars().events.borrow().iter().filter_map(|e| e.span).collect();
-            let planned = day_plan::plan(&self.ivars().tasks.borrow(), &days::key(0), now, &busy);
-            if planned.is_empty() {
-                return;
-            }
-            for (i, time) in planned {
-                self.ivars().tasks.borrow_mut()[i].time = time;
-            }
-            self.save_and_refresh();
+            self.plan_today();
         }
 
         #[unsafe(method(copyMarkdown:))]
@@ -791,7 +783,7 @@ define_class!(
                 *self.ivars().toast.borrow_mut() = Some(format!("{title} · {subtitle}"));
                 self.refresh();
                 let notice = Notice { symbol, tint: &tone(CORAL), title: &title, subtitle: &subtitle, actions: false };
-                self.notify(chime, &notice, SESSION_NOTICE_SECS);
+                self.notify(Some(chime), &notice, SESSION_NOTICE_SECS);
             } else {
                 self.render_focus();
             }
@@ -1114,7 +1106,7 @@ impl Controller {
             eprintln!("notchpad: could not save tasks: {err}");
         }
         self.ivars().seen_mtime.set(store::modified());
-        task_alerts::sync(&self.ivars().tasks.borrow(), self.ivars().settings.borrow().remind.is_some());
+        task_alerts::sync(&self.ivars().tasks.borrow(), self.ivars().settings.borrow().remind);
     }
 
     fn reload_done_today(&self) {
@@ -1373,8 +1365,8 @@ impl Controller {
 
     /// Rings `chime` (unless sounds are off) and hangs `notice` from the notch for `seconds`.
     /// The card never takes the keyboard, so it is safe while another app is being typed in.
-    fn notify(&self, chime: Chime, notice: &Notice, seconds: f64) {
-        if self.ivars().settings.borrow().sound {
+    fn notify(&self, chime: Option<Chime>, notice: &Notice, seconds: f64) {
+        if let Some(chime) = chime.filter(|_| self.ivars().settings.borrow().sound) {
             let sound = chime.sound();
             if let Some(sound) = &sound {
                 sound.play();
@@ -1385,6 +1377,41 @@ impl Controller {
         self.ui().banner.show(collapsed, notice);
         self.ivars().banner_until.set(Some(Instant::now() + Duration::from_secs_f64(seconds)));
         unsafe { NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(seconds, self.target(), sel!(bannerExpired:), None, false) };
+    }
+
+    /// Rearranges the rest of today (see `day_plan::plan`) and says what moved in a quiet card.
+    fn plan_today(&self) {
+        let Some(now) = now_minutes() else { return };
+        let busy: Vec<(u32, u32)> = self.ivars().events.borrow().iter().filter_map(|e| e.span).collect();
+        let planned = day_plan::plan(&self.ivars().tasks.borrow(), &days::key(0), now, &busy);
+        let today: Vec<(usize, &String)> = planned.iter().filter_map(|(i, slot)| if let Slot::Today(t) = slot { Some((*i, t)) } else { None }).collect();
+        let later = planned.len() - today.len();
+        let title = match (planned.is_empty(), today.len()) {
+            (true, _) => "Today is already planned".to_owned(),
+            (false, 0) => "No free time left today".to_owned(),
+            (false, n) => format!("Planned {n} task{}", if n == 1 { "" } else { "s" }),
+        };
+        let mut notes = Vec::new();
+        if let Some((i, time)) = today.iter().min_by_key(|(_, t)| *t) {
+            notes.push(format!("Next: {} at {}", self.ivars().tasks.borrow()[*i].text, clock_12h(time).unwrap_or_default()));
+        }
+        if later > 0 {
+            notes.push(format!("{later} moved to tomorrow"));
+        }
+        let subtitle = notes.join(" · ");
+        {
+            let mut tasks = self.ivars().tasks.borrow_mut();
+            for (i, slot) in planned {
+                let task = &mut tasks[i];
+                match slot {
+                    Slot::Today(time) => (task.day, task.time) = (days::key(0), time),
+                    Slot::Tomorrow => (task.day, task.time) = (days::key(1), String::new()),
+                }
+            }
+        }
+        self.save_and_refresh();
+        let notice = Notice { symbol: "calendar.badge.clock", tint: &rgba(120, 170, 255, 1.0), title: &title, subtitle: &subtitle, actions: false };
+        self.notify(None, &notice, PLAN_NOTICE_SECS);
     }
 
     fn hide_banner(&self) {
@@ -1404,7 +1431,7 @@ impl Controller {
         }
         let (today, clock) = stamp.split_once(' ').unwrap_or_default();
         let Some(now) = task_alerts::minutes(clock) else { return };
-        task_alerts::withdraw_next_minute(&self.ivars().tasks.borrow(), today, now);
+        task_alerts::withdraw_next_minute(&self.ivars().tasks.borrow(), today, now, lead);
         let earliest = now.saturating_sub(REMIND_GRACE_MIN);
         let after = match last.split_once(' ') {
             Some((day, clock)) if day == today => task_alerts::minutes(clock).unwrap_or(now).max(earliest),
@@ -1425,7 +1452,7 @@ impl Controller {
             subtitle.push_str(&format!(" · +{} more", due.len() - 1));
         }
         let notice = Notice { symbol: "bell.fill", tint: &rgba(255, 176, 32, 1.0), title: &first.text, subtitle: &subtitle, actions: true };
-        self.notify(Chime::Reminder, &notice, REMINDER_SECS);
+        self.notify(Some(Chime::Reminder), &notice, REMINDER_SECS);
         *self.ivars().reminding.borrow_mut() = Some(first.clone());
     }
 
@@ -1671,7 +1698,7 @@ impl Controller {
         let menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::new());
         menu.setAutoenablesItems(false);
         let items = [
-            ("Plan the rest of today", sel!(planDay:), ""),
+            ("Plan my day", sel!(planDay:), ""),
             ("Open Insights", sel!(openInsights:), ""),
             ("Open dashboard window", sel!(openDashboard:), ""),
             ("Export backup (JSON)…", sel!(exportBackup:), ""),
@@ -2438,13 +2465,6 @@ fn meta_line(task: &Task) -> String {
         parts.push(format!("{} min", task.minutes));
     }
     parts.join(" · ")
-}
-
-/// `17:00` → `5:00 PM`.
-fn clock_12h(time: &str) -> Option<String> {
-    let (h, m) = time.split_once(':')?;
-    let h: u32 = h.parse().ok()?;
-    Some(format!("{}:{m} {}", (h + 11) % 12 + 1, if h < 12 { "AM" } else { "PM" }))
 }
 
 /// Minute of the day now.

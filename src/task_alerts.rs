@@ -30,30 +30,44 @@ pub struct Alert {
     pub body: String,
 }
 
-/// Undone tasks with a `day` and a `time` that is still ahead, from now until `days_ahead` days out.
-pub fn due_alerts(tasks: &[Task], now_day: &str, now_minutes: u32, days_ahead: i64) -> Vec<Alert> {
+/// Notifications for undone tasks with a `day` and a `time`, from now until `days_ahead` days out:
+/// one `lead` minutes before the time (none when `lead` is 0 or would fall on the day before) and
+/// one at it, worded like the notch card. Only those still ahead of `now_minutes` are kept.
+pub fn due_alerts(tasks: &[Task], now_day: &str, now_minutes: u32, days_ahead: i64, lead: u32) -> Vec<Alert> {
     let Some(today) = day_number(now_day) else { return Vec::new() };
-    tasks
-        .iter()
-        .filter(|t| !t.done)
-        .filter_map(|t| {
-            let offset = day_number(&t.day)? - today;
-            let (hour, minute) = clock(&t.time)?;
-            let ahead = offset > 0 || (offset == 0 && hour * 60 + minute > now_minutes);
-            if !ahead || offset > days_ahead {
-                return None;
+    let mut alerts = Vec::new();
+    for t in tasks.iter().filter(|t| !t.done) {
+        let (Some(day), Some(at)) = (day_number(&t.day), minutes(&t.time)) else { continue };
+        let offset = day - today;
+        if !(0..=days_ahead).contains(&offset) {
+            continue;
+        }
+        let key = format!("{}\t{}\t{}", t.day, t.time, t.text);
+        let project = if t.project.is_empty() { String::new() } else { format!(" · #{}", t.project) };
+        let time = clock_12h(&t.time).unwrap_or_default();
+        let early = (lead > 0 && at >= lead).then(|| (at - lead, format!("{key}\tlead"), format!("in {lead} min")));
+        for (fire, id, when) in early.into_iter().chain([(at, key.clone(), "now".to_owned())]) {
+            if offset == 0 && fire <= now_minutes {
+                continue;
             }
-            let project = if t.project.is_empty() { String::new() } else { format!(" · #{}", t.project) };
-            Some(Alert {
-                id: format!("{ID_PREFIX}{:016x}", fnv1a(&format!("{}\t{}\t{}", t.day, t.time, t.text))),
+            alerts.push(Alert {
+                id: format!("{ID_PREFIX}{:016x}", fnv1a(&id)),
                 day: t.day.clone(),
-                hour,
-                minute,
+                hour: fire / 60,
+                minute: fire % 60,
                 title: t.text.clone(),
-                body: format!("Scheduled for {}{project}", t.time),
-            })
-        })
-        .collect()
+                body: format!("{time} · {when}{project}"),
+            });
+        }
+    }
+    alerts
+}
+
+/// `HH:MM` on a 12-hour clock, such as `5:30 PM`; `None` for malformed text.
+pub fn clock_12h(time: &str) -> Option<String> {
+    let (h, m) = time.split_once(':')?;
+    let h: u32 = h.parse().ok()?;
+    Some(format!("{}:{m} {}", (h + 11) % 12 + 1, if h < 12 { "AM" } else { "PM" }))
 }
 
 /// A timed task the notch reminds of: the task's text and `HH:MM`, and its minute of the day.
@@ -89,10 +103,11 @@ pub fn minutes(text: &str) -> Option<u32> {
     clock(text).map(|(h, m)| h * 60 + m)
 }
 
-/// Replaces the pending task notifications with those `tasks` need. `notch_cards` says the notch
-/// shows its own reminder card, which then owns the next minute. Silently does nothing in an
-/// unbundled binary, where `UNUserNotificationCenter` would throw.
-pub fn sync(tasks: &[Task], notch_cards: bool) {
+/// Replaces the pending task notifications with those `tasks` need. `remind` is the reminder
+/// lead from the settings: with it set, the notch shows its own card for each notification and
+/// owns the next minute; with it off, only the at-the-time notification is kept. Silently does
+/// nothing in an unbundled binary, where `UNUserNotificationCenter` would throw.
+pub fn sync(tasks: &[Task], remind: Option<u32>) {
     if NSBundle::mainBundle().bundleIdentifier().is_none() {
         return;
     }
@@ -102,8 +117,8 @@ pub fn sync(tasks: &[Task], notch_cards: bool) {
     // With notch cards on, the next minute belongs to the card (see `withdraw_next_minute`), so a
     // save in it does not put back the notification just withdrawn. Without them the system
     // notification is the only reminder and must stay.
-    let from = now_minutes + u32::from(notch_cards);
-    let alerts = due_alerts(tasks, now_day, from, DAYS_AHEAD);
+    let from = now_minutes + u32::from(remind.is_some());
+    let alerts = due_alerts(tasks, now_day, from, DAYS_AHEAD, remind.unwrap_or(0));
 
     let center = UNUserNotificationCenter::currentNotificationCenter();
     let handler = RcBlock::new({
@@ -120,16 +135,16 @@ pub fn sync(tasks: &[Task], notch_cards: bool) {
     center.getNotificationSettingsWithCompletionHandler(&handler);
 }
 
-/// Ids of the notifications for open tasks of `today` due in the minute after `now`.
-pub fn next_minute_ids(tasks: &[Task], today: &str, now: u32) -> Vec<String> {
-    due_alerts(tasks, today, now, 0).into_iter().filter(|a| a.hour * 60 + a.minute == now + 1).map(|a| a.id).collect()
+/// Ids of the notifications for open tasks of `today` that fire in the minute after `now`.
+pub fn next_minute_ids(tasks: &[Task], today: &str, now: u32, lead: u32) -> Vec<String> {
+    due_alerts(tasks, today, now, 0, lead).into_iter().filter(|a| a.hour * 60 + a.minute == now + 1).map(|a| a.id).collect()
 }
 
-/// While the app runs, the notch card reminds of a task, so its system notification would only
+/// While the app runs, the notch card reminds of a task, so a system notification would only
 /// repeat it with a second sound. Withdrawn a minute ahead, it still fires when the app is not
 /// running, and stays scheduled when the notch reminders are off (the caller does not call this).
-pub fn withdraw_next_minute(tasks: &[Task], today: &str, now: u32) {
-    let ids = next_minute_ids(tasks, today, now);
+pub fn withdraw_next_minute(tasks: &[Task], today: &str, now: u32, lead: u32) {
+    let ids = next_minute_ids(tasks, today, now, lead);
     if ids.is_empty() || NSBundle::mainBundle().bundleIdentifier().is_none() {
         return;
     }
@@ -229,13 +244,16 @@ mod tests {
         let mut done = task("2026-11-09", "10:01", "done");
         done.done = true;
         let tasks = [task("2026-11-09", "10:01", "soon"), task("2026-11-09", "10:02", "later"), task("2026-11-10", "10:01", "tomorrow"), done];
-        let soon = due_alerts(&tasks[..1], "2026-11-09", 0, 0)[0].id.clone();
-        assert_eq!(next_minute_ids(&tasks, "2026-11-09", 600), vec![soon]);
-        assert!(next_minute_ids(&tasks, "2026-11-09", 602).is_empty());
+        let soon = due_alerts(&tasks[..1], "2026-11-09", 0, 0, 0)[0].id.clone();
+        assert_eq!(next_minute_ids(&tasks, "2026-11-09", 600, 0), vec![soon]);
+        assert!(next_minute_ids(&tasks, "2026-11-09", 602, 0).is_empty());
+        // With a lead, the early notification of "later" is the one due at 09:52.
+        let early = due_alerts(&tasks[1..2], "2026-11-09", 0, 0, 10)[0].id.clone();
+        assert_eq!(next_minute_ids(&tasks, "2026-11-09", 591, 10), vec![early]);
     }
 
     fn ids(tasks: &[Task], now_minutes: u32) -> Vec<String> {
-        due_alerts(tasks, "2026-11-09", now_minutes, 7).into_iter().map(|a| a.title).collect()
+        due_alerts(tasks, "2026-11-09", now_minutes, 7, 0).into_iter().map(|a| a.title).collect()
     }
 
     #[test]
@@ -265,15 +283,15 @@ mod tests {
 
     #[test]
     fn window_crosses_month_and_year() {
-        let alerts = due_alerts(&[task("2027-01-03", "09:00", "x")], "2026-12-30", 0, 7);
+        let alerts = due_alerts(&[task("2027-01-03", "09:00", "x")], "2026-12-30", 0, 7, 0);
         assert_eq!(alerts.len(), 1);
     }
 
     #[test]
     fn ids_are_stable_and_distinct() {
-        let a = due_alerts(&[task("2026-11-10", "09:00", "gym")], "2026-11-09", 0, 7);
-        let b = due_alerts(&[task("2026-11-10", "09:00", "gym")], "2026-11-09", 0, 7);
-        let c = due_alerts(&[task("2026-11-10", "09:01", "gym")], "2026-11-09", 0, 7);
+        let a = due_alerts(&[task("2026-11-10", "09:00", "gym")], "2026-11-09", 0, 7, 10);
+        let b = due_alerts(&[task("2026-11-10", "09:00", "gym")], "2026-11-09", 0, 7, 10);
+        let c = due_alerts(&[task("2026-11-10", "09:01", "gym")], "2026-11-09", 0, 7, 10);
         assert_eq!(a[0].id, b[0].id);
         assert_ne!(a[0].id, c[0].id);
         assert!(a[0].id.starts_with(ID_PREFIX));
@@ -323,12 +341,16 @@ mod tests {
     }
 
     #[test]
-    fn body_names_time_and_project() {
+    fn reminds_ahead_and_at_the_time_worded_like_the_notch_card() {
         let mut t = task("2026-11-10", "18:00", "gym");
-        assert_eq!(due_alerts(std::slice::from_ref(&t), "2026-11-09", 0, 7)[0].body, "Scheduled for 18:00");
         t.project = "Health".into();
-        let a = &due_alerts(&[t], "2026-11-09", 0, 7)[0];
-        assert_eq!(a.body, "Scheduled for 18:00 · #Health");
-        assert_eq!((a.hour, a.minute), (18, 0));
+        let alerts = due_alerts(&[t], "2026-11-09", 0, 7, 10);
+        let got: Vec<_> = alerts.iter().map(|a| (a.hour, a.minute, a.body.as_str())).collect();
+        assert_eq!(got, [(17, 50, "6:00 PM · in 10 min · #Health"), (18, 0, "6:00 PM · now · #Health")]);
+        assert_ne!(alerts[0].id, alerts[1].id);
+        // Once the early minute has passed only the at-the-time notification is left.
+        assert_eq!(due_alerts(&[task("2026-11-09", "18:00", "gym")], "2026-11-09", 17 * 60 + 55, 7, 10).len(), 1);
+        // No early notification on the day before.
+        assert_eq!(due_alerts(&[task("2026-11-10", "00:05", "early")], "2026-11-09", 0, 7, 10).len(), 1);
     }
 }
