@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
 use objc2::{AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSClickGestureRecognizer, NSControl, NSControlTextEditingDelegate, NSTextFieldDelegate, NSTextView, NSLineBreakMode, NSPasteboard, NSPasteboardTypeString, NSControlStateValueOn, NSForegroundColorAttributeName, NSStrikethroughStyleAttributeName, NSUnderlineStyle, NSSound, 
+use objc2_app_kit::{NSUserInterfaceItemIdentification, NSClickGestureRecognizer, NSControl, NSControlTextEditingDelegate, NSTextFieldDelegate, NSTextView, NSLineBreakMode, NSPasteboard, NSPasteboardTypeString, NSControlStateValueOn, NSForegroundColorAttributeName, NSStrikethroughStyleAttributeName, NSUnderlineStyle, NSSound, 
     NSAppearance, NSImageScaling, NSAppearanceCustomization, NSAppearanceNameDarkAqua,
     NSApplication, NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
@@ -17,7 +17,7 @@ use objc2_app_kit::{NSClickGestureRecognizer, NSControl, NSControlTextEditingDel
     NSTrackingAreaOptions, NSView, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_event_kit::EKEventStoreChangedNotification;
-use objc2_foundation::{NSMutableAttributedString, NSNumber, NSRange, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
+use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager, NSMutableAttributedString, NSNumber, NSRange, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 
 use crate::calendar::{self, Access, Calendar, Event};
@@ -25,7 +25,10 @@ use crate::clip_card::{self, ClipCard};
 use crate::clips::ClipHistory;
 use crate::settings::{self as prefs, Background, Settings, Shape, Size, TimerStyle};
 use crate::settings_window::SettingsWindow;
-use crate::day_plan;
+use crate::day_plan::{self, Slot};
+use crate::url_command::{self, UrlCommand};
+use crate::lyrics::Lyrics;
+use crate::lyrics_view::LyricsView;
 use crate::days;
 use crate::export;
 use crate::focus_ring::FocusRing;
@@ -47,7 +50,7 @@ use crate::pomodoros::{self, DAILY_GOAL};
 use crate::tomato_view::{Tomato, TomatoView};
 use crate::panel::{self, FileDrag, NotchPanel, NotchShape};
 use crate::store::{self, Task};
-use crate::task_alerts;
+use crate::task_alerts::{self, clock_12h};
 use crate::widgets::{self as w, SURFACE, rgba};
 
 const WIDTH: f64 = 720.0;
@@ -69,6 +72,8 @@ const ICON_TAB_WIDTH: f64 = 32.0;
 /// no bars.
 const ARTWORK_SIZE: f64 = 220.0;
 const MAX_CARD_ROWS: usize = 5;
+const ADD_PLACEHOLDER: &str = "Add a task · type ! # or / for hints";
+const EDIT_PLACEHOLDER: &str = "Edit task · Return saves · Esc cancels";
 /// Calendar events shown above the tasks; the rest of today's stay in the calendar app.
 const MAX_EVENT_ROWS: usize = 3;
 /// Gap between Today rows; a hairline is drawn in its middle.
@@ -85,6 +90,11 @@ const CYCLE: usize = 4;
 const UNDO_SECS: f64 = 6.0;
 /// How long a task reminder card stays without an answer; the system notification remains.
 const REMINDER_SECS: f64 = 60.0;
+/// Apple Event class and id of an "open this URL" event ('GURL'), and its direct-object key ('----').
+const GET_URL: u32 = u32::from_be_bytes(*b"GURL");
+const KEY_DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
+/// How long the card saying what "Plan my day" moved stays.
+const PLAN_NOTICE_SECS: f64 = 6.0;
 /// How long a pomodoro card stays: it asks nothing.
 const SESSION_NOTICE_SECS: f64 = 8.0;
 const SNOOZE_MIN: u32 = 5;
@@ -160,6 +170,7 @@ struct MusicView {
     elapsed: Retained<NSTextField>,
     total: Retained<NSTextField>,
     toggle: Retained<NSButton>,
+    lyrics: LyricsView,
 }
 
 struct TerminalPane {
@@ -243,7 +254,14 @@ pub struct State {
     wings: Cell<f64>,
     /// Runs only while the Music tab is visible and a track is playing.
     music_timer: RefCell<Option<Retained<NSTimer>>>,
+    lyrics: RefCell<Lyrics>,
     show_completed: Cell<bool>,
+    /// First row of the page of today's list on screen; "+N more" moves it on, so only a few
+    /// tasks show at a time.
+    list_start: Cell<usize>,
+    /// The task open in the input for editing, as (index, title when opened); the title guards
+    /// against the list changing underneath.
+    editing: RefCell<Option<(usize, String)>>,
     /// Priority given to tasks added from the Today card unless the text names one.
     new_priority: Cell<usize>,
     /// Task index chosen with ▶; falls back to the first open task of today.
@@ -315,7 +333,11 @@ define_class!(
         /// While hints show, ↑/↓ move between them, Tab or Return takes one and Esc hides them;
         /// otherwise the field handles the key (Return adds the task).
         #[unsafe(method(control:textView:doCommandBySelector:))]
-        fn control_do_command(&self, _control: &NSControl, _editor: &NSTextView, command: Sel) -> Bool {
+        fn control_do_command(&self, control: &NSControl, _editor: &NSTextView, command: Sel) -> Bool {
+            if command == sel!(cancelOperation:) && self.ivars().hints.borrow().is_empty() && self.end_edit().is_some() {
+                control.setStringValue(&NSString::new());
+                return Bool::YES;
+            }
             Bool::new(self.hint_command(command))
         }
     }
@@ -369,10 +391,33 @@ define_class!(
         fn add_task(&self, field: &NSTextField) {
             let text = field.stringValue().to_string();
             let text = text.trim();
-            if !text.is_empty() {
+            if let Some(editing) = self.end_edit() {
+                self.apply_edit(editing, text);
+            } else if !text.is_empty() {
                 self.push_task(text, &days::key(0), PRIORITIES[self.ivars().new_priority.get()]);
             }
             field.setStringValue(&NSString::new());
+        }
+
+        /// A click on a task's title opens it in the input with all its fields; see `begin_edit`.
+        #[unsafe(method(editTask:))]
+        fn edit_task(&self, click: &NSClickGestureRecognizer) {
+            let index = click.view().and_then(|v| v.identifier()).and_then(|id| id.to_string().strip_prefix("task:")?.parse().ok());
+            if let Some(index) = index {
+                self.begin_edit(index);
+            }
+        }
+
+        #[unsafe(method(editTaskFromMenu:))]
+        fn edit_task_from_menu(&self, item: &NSMenuItem) {
+            self.begin_edit(item.tag() as usize);
+        }
+
+        /// "+N more" shows the next few tasks; past the last page it goes back to the first.
+        #[unsafe(method(nextPage:))]
+        fn next_page(&self, sender: &NSButton) {
+            self.ivars().list_start.set(sender.tag() as usize);
+            self.render_task_card();
         }
 
         #[unsafe(method(toggleTask:))]
@@ -466,19 +511,26 @@ define_class!(
             }
         }
 
-        /// Gives today's untimed open tasks a start in the free gaps; see `day_plan::plan`.
         #[unsafe(method(planDay:))]
         fn plan_day(&self, _item: &NSMenuItem) {
-            let Some(now) = now_minutes() else { return };
-            let busy: Vec<(u32, u32)> = self.ivars().events.borrow().iter().filter_map(|e| e.span).collect();
-            let planned = day_plan::plan(&self.ivars().tasks.borrow(), &days::key(0), now, &busy);
-            if planned.is_empty() {
-                return;
+            self.plan_today();
+        }
+
+        /// A `notchgo://` link opened by Shortcuts, a launcher or a browser; see `url_command`.
+        #[unsafe(method(handleURL:withReply:))]
+        fn handle_url(&self, event: &NSAppleEventDescriptor, _reply: &NSAppleEventDescriptor) {
+            let param: Option<Retained<NSAppleEventDescriptor>> = unsafe { msg_send![event, paramDescriptorForKeyword: KEY_DIRECT_OBJECT] };
+            let url = param.and_then(|d| d.stringValue()).map(|s| s.to_string());
+            match url.as_deref().and_then(url_command::parse) {
+                Some(UrlCommand::Plan) => self.plan_today(),
+                Some(UrlCommand::Add(line)) => {
+                    self.push_task(&line, &days::key(0), "");
+                    let title = self.ivars().tasks.borrow().last().map(|t| t.text.clone()).unwrap_or_default();
+                    let notice = Notice { symbol: "plus.circle.fill", tint: &rgba(120, 170, 255, 1.0), title: &title, subtitle: "Added to today", actions: false };
+                    self.notify(None, &notice, PLAN_NOTICE_SECS);
+                }
+                None => eprintln!("notchpad: ignored link {url:?}"),
             }
-            for (i, time) in planned {
-                self.ivars().tasks.borrow_mut()[i].time = time;
-            }
-            self.save_and_refresh();
         }
 
         #[unsafe(method(copyMarkdown:))]
@@ -538,12 +590,14 @@ define_class!(
         #[unsafe(method(showTodo:))]
         fn show_todo(&self, _sender: &AnyObject) {
             self.ivars().show_completed.set(false);
+            self.ivars().list_start.set(0);
             self.refresh();
         }
 
         #[unsafe(method(showCompleted:))]
         fn show_completed(&self, _sender: &AnyObject) {
             self.ivars().show_completed.set(true);
+            self.ivars().list_start.set(0);
             self.refresh();
         }
 
@@ -584,6 +638,14 @@ define_class!(
         #[unsafe(method(musicNext:))]
         fn music_next(&self, _sender: &AnyObject) {
             self.ivars().now_playing.borrow_mut().send(Command::Next);
+        }
+
+        /// A lyrics lookup finished; see `Lyrics::want`.
+        #[unsafe(method(lyricsFetched:))]
+        fn lyrics_fetched(&self, _arg: Option<&AnyObject>) {
+            if self.ivars().lyrics.borrow_mut().take() {
+                self.render_music();
+            }
         }
 
         #[unsafe(method(nowPlayingChanged:))]
@@ -791,7 +853,7 @@ define_class!(
                 *self.ivars().toast.borrow_mut() = Some(format!("{title} · {subtitle}"));
                 self.refresh();
                 let notice = Notice { symbol, tint: &tone(CORAL), title: &title, subtitle: &subtitle, actions: false };
-                self.notify(chime, &notice, SESSION_NOTICE_SECS);
+                self.notify(Some(chime), &notice, SESSION_NOTICE_SECS);
             } else {
                 self.render_focus();
             }
@@ -923,6 +985,9 @@ impl Controller {
             let clips = NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.5, this.target(), sel!(pollClips:), None, true);
             clips.setTolerance(0.25);
         }
+        // Registered before the run loop starts, so a link that launches the app is not lost.
+        let events = NSAppleEventManager::sharedAppleEventManager();
+        let _: () = unsafe { msg_send![&events, setEventHandler: this.target(), andSelector: sel!(handleURL:withReply:), forEventClass: GET_URL, andEventID: GET_URL] };
         this.sync_now_playing();
         this.load_events();
         this.refresh();
@@ -1101,6 +1166,38 @@ impl Controller {
         self.refresh();
     }
 
+    /// Puts the task at `index` in the input as a quick-add line with all its fields, so it can be
+    /// read in full and changed; Return saves it and Esc leaves it as it was.
+    fn begin_edit(&self, index: usize) {
+        let Some((title, line)) = self.ivars().tasks.borrow().get(index).map(|t| (t.text.clone(), quick_add::line(t, &days::key(1)))) else { return };
+        *self.ivars().editing.borrow_mut() = Some((index, title));
+        let input = &self.ui().tasks.input;
+        input.setStringValue(&NSString::from_str(&line));
+        input.setPlaceholderString(Some(&NSString::from_str(EDIT_PLACEHOLDER)));
+        let panel = &self.ui().panel;
+        panel.makeKeyWindow();
+        panel.makeFirstResponder(Some(input));
+    }
+
+    /// Leaves edit mode, if on, and returns what was being edited.
+    fn end_edit(&self) -> Option<(usize, String)> {
+        let editing = self.ivars().editing.borrow_mut().take()?;
+        self.ui().tasks.input.setPlaceholderString(Some(&NSString::from_str(ADD_PLACEHOLDER)));
+        Some(editing)
+    }
+
+    /// Rewrites the edited task's fields from `line`; its day stays unless the line names one.
+    /// An empty line, or a task that is no longer at its index, changes nothing.
+    fn apply_edit(&self, (index, title): (usize, String), line: &str) {
+        {
+            let mut tasks = self.ivars().tasks.borrow_mut();
+            let Some(task) = tasks.get_mut(index).filter(|t| t.text == title && !line.is_empty()) else { return };
+            let new = quick_add::parse(line, &task.day, &days::key(0), &days::key(1));
+            (task.text, task.day, task.time, task.priority, task.project, task.minutes) = (new.text, new.day, new.time, new.priority, new.project, new.minutes);
+        }
+        self.save_and_refresh();
+    }
+
     /// Starts a Reminders pass when the sync is on, allowed, and due.
     fn sync_reminders(&self) {
         let on = self.ivars().settings.borrow().reminders && reminders::access() == Access::Granted;
@@ -1114,7 +1211,7 @@ impl Controller {
             eprintln!("notchpad: could not save tasks: {err}");
         }
         self.ivars().seen_mtime.set(store::modified());
-        task_alerts::sync(&self.ivars().tasks.borrow(), self.ivars().settings.borrow().remind.is_some());
+        task_alerts::sync(&self.ivars().tasks.borrow(), self.ivars().settings.borrow().remind);
     }
 
     fn reload_done_today(&self) {
@@ -1253,10 +1350,15 @@ impl Controller {
     fn sync_music_timer(&self) {
         let state = self.ivars();
         let wanted = state.expanded.get() && state.tab.get() == Tab::Music && state.now_playing.borrow().playing();
+        // Lyrics need a finer tick than the clock, or a line would show up to a second late.
+        let every = if state.lyrics.borrow().has_lines() { 0.25 } else { 1.0 };
         let mut timer = state.music_timer.borrow_mut();
+        if timer.as_ref().is_some_and(|t| t.timeInterval() != every) {
+            timer.take().expect("checked above").invalidate();
+        }
         if wanted && timer.is_none() {
             *timer = Some(unsafe {
-                NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(1.0, self.target(), sel!(tickMusic:), None, true)
+                NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(every, self.target(), sel!(tickMusic:), None, true)
             });
         } else if !wanted && let Some(timer) = timer.take() {
             timer.invalidate();
@@ -1334,6 +1436,14 @@ impl Controller {
                 view.progress.setConstant(MUSIC_PROGRESS_WIDTH * fraction.clamp(0.0, 1.0));
                 view.toggle.setImage(Some(&w::symbol(if track.playing { "pause.fill" } else { "play.fill" })));
             }
+            let mut lyrics = self.ivars().lyrics.borrow_mut();
+            match now.track.as_ref().filter(|_| self.ivars().settings.borrow().lyrics) {
+                Some(track) => {
+                    lyrics.want(&track.artist, &track.title, track.duration, self.target(), sel!(lyricsFetched:));
+                    view.lyrics.show(lyrics.around(track.position()));
+                }
+                None => view.lyrics.show(None),
+            }
         }
         self.sync_music_timer();
     }
@@ -1373,8 +1483,8 @@ impl Controller {
 
     /// Rings `chime` (unless sounds are off) and hangs `notice` from the notch for `seconds`.
     /// The card never takes the keyboard, so it is safe while another app is being typed in.
-    fn notify(&self, chime: Chime, notice: &Notice, seconds: f64) {
-        if self.ivars().settings.borrow().sound {
+    fn notify(&self, chime: Option<Chime>, notice: &Notice, seconds: f64) {
+        if let Some(chime) = chime.filter(|_| self.ivars().settings.borrow().sound) {
             let sound = chime.sound();
             if let Some(sound) = &sound {
                 sound.play();
@@ -1385,6 +1495,41 @@ impl Controller {
         self.ui().banner.show(collapsed, notice);
         self.ivars().banner_until.set(Some(Instant::now() + Duration::from_secs_f64(seconds)));
         unsafe { NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(seconds, self.target(), sel!(bannerExpired:), None, false) };
+    }
+
+    /// Rearranges the rest of today (see `day_plan::plan`) and says what moved in a quiet card.
+    fn plan_today(&self) {
+        let Some(now) = now_minutes() else { return };
+        let busy: Vec<(u32, u32)> = self.ivars().events.borrow().iter().filter_map(|e| e.span).collect();
+        let planned = day_plan::plan(&self.ivars().tasks.borrow(), &days::key(0), now, &busy);
+        let today: Vec<(usize, &String)> = planned.iter().filter_map(|(i, slot)| if let Slot::Today(t) = slot { Some((*i, t)) } else { None }).collect();
+        let later = planned.len() - today.len();
+        let title = match (planned.is_empty(), today.len()) {
+            (true, _) => "Today is already planned".to_owned(),
+            (false, 0) => "No free time left today".to_owned(),
+            (false, n) => format!("Planned {n} task{}", if n == 1 { "" } else { "s" }),
+        };
+        let mut notes = Vec::new();
+        if let Some((i, time)) = today.iter().min_by_key(|(_, t)| *t) {
+            notes.push(format!("Next: {} at {}", self.ivars().tasks.borrow()[*i].text, clock_12h(time).unwrap_or_default()));
+        }
+        if later > 0 {
+            notes.push(format!("{later} moved to tomorrow"));
+        }
+        let subtitle = notes.join(" · ");
+        {
+            let mut tasks = self.ivars().tasks.borrow_mut();
+            for (i, slot) in planned {
+                let task = &mut tasks[i];
+                match slot {
+                    Slot::Today(time) => (task.day, task.time) = (days::key(0), time),
+                    Slot::Tomorrow => (task.day, task.time) = (days::key(1), String::new()),
+                }
+            }
+        }
+        self.save_and_refresh();
+        let notice = Notice { symbol: "calendar.badge.clock", tint: &rgba(120, 170, 255, 1.0), title: &title, subtitle: &subtitle, actions: false };
+        self.notify(None, &notice, PLAN_NOTICE_SECS);
     }
 
     fn hide_banner(&self) {
@@ -1404,7 +1549,7 @@ impl Controller {
         }
         let (today, clock) = stamp.split_once(' ').unwrap_or_default();
         let Some(now) = task_alerts::minutes(clock) else { return };
-        task_alerts::withdraw_next_minute(&self.ivars().tasks.borrow(), today, now);
+        task_alerts::withdraw_next_minute(&self.ivars().tasks.borrow(), today, now, lead);
         let earliest = now.saturating_sub(REMIND_GRACE_MIN);
         let after = match last.split_once(' ') {
             Some((day, clock)) if day == today => task_alerts::minutes(clock).unwrap_or(now).max(earliest),
@@ -1425,7 +1570,7 @@ impl Controller {
             subtitle.push_str(&format!(" · +{} more", due.len() - 1));
         }
         let notice = Notice { symbol: "bell.fill", tint: &rgba(255, 176, 32, 1.0), title: &first.text, subtitle: &subtitle, actions: true };
-        self.notify(Chime::Reminder, &notice, REMINDER_SECS);
+        self.notify(Some(Chime::Reminder), &notice, REMINDER_SECS);
         *self.ivars().reminding.borrow_mut() = Some(first.clone());
     }
 
@@ -1543,8 +1688,9 @@ impl Controller {
             }
             add_full_width(&card.rows, &row, None);
         }
-        let fit = rows_that_fit(&tasks, shown, MAX_CARD_ROWS - events.len());
-        for (k, &i) in shown.iter().take(fit).enumerate() {
+        let start = Some(self.ivars().list_start.get()).filter(|&s| s < shown.len()).unwrap_or(0);
+        let fit = rows_that_fit(&tasks, &shown[start..], MAX_CARD_ROWS - events.len());
+        for (k, &i) in shown[start..].iter().take(fit).enumerate() {
             let row = ListRow::new(&tasks[i].text, &self.card_row(i, &tasks[i]), &white(0.07), self.mtm());
             unsafe { row.setMenu(Some(&self.task_menu(i, &tasks[i].priority))) };
             if k > 0 || !events.is_empty() {
@@ -1553,7 +1699,17 @@ impl Controller {
             add_full_width(&card.rows, &row, None);
         }
         let empty = if show_completed { "Nothing completed yet today" } else { "All clear. Add a task below." };
-        self.add_overflow_note(&card.rows, shown.len(), fit, empty, &white(0.5));
+        let after = shown.len() - start - fit;
+        if shown.is_empty() {
+            card.rows.addArrangedSubview(&w::label(empty, 12.0, unsafe { NSFontWeightRegular }, &white(0.5), self.mtm()));
+        } else if after > 0 || start > 0 {
+            let (title, next) = if after > 0 { (format!("+{after} more ›"), start + fit) } else { ("‹ Back to the first".to_owned(), 0) };
+            let more = w::pill(&title, 20.0, self.target(), sel!(nextPage:), self.mtm());
+            more.setTag(next as isize);
+            w::style_pill(&more, &white(0.0), &white(0.5), 6.0);
+            w::fit_pill(&more, 6.0);
+            card.rows.addArrangedSubview(&more);
+        }
         list_row::animate_changes(&card.rows, before);
     }
 
@@ -1658,6 +1814,10 @@ impl Controller {
             strike(&label);
         }
         let title = with_meta(task, label, &white(0.5), mtm);
+        title.setIdentifier(Some(&NSString::from_str(&format!("task:{index}"))));
+        let open = unsafe { NSClickGestureRecognizer::initWithTarget_action(mtm.alloc(), Some(self.target()), Some(sel!(editTask:))) };
+        title.addGestureRecognizer(&open);
+        title.setToolTip(Some(&NSString::from_str("Click to see and edit every field")));
         let play = w::icon_button("play.fill", "", 10.0, &white(0.45), self.target(), sel!(focusTask:), mtm);
         play.setTag(index as isize);
         play.setToolTip(Some(&NSString::from_str("Focus on this in the pomodoro")));
@@ -1671,7 +1831,7 @@ impl Controller {
         let menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::new());
         menu.setAutoenablesItems(false);
         let items = [
-            ("Plan the rest of today", sel!(planDay:), ""),
+            ("Plan my day", sel!(planDay:), ""),
             ("Open Insights", sel!(openInsights:), ""),
             ("Open dashboard window", sel!(openDashboard:), ""),
             ("Export backup (JSON)…", sel!(exportBackup:), ""),
@@ -1824,6 +1984,7 @@ impl Controller {
         let add = |title: &str, action| menu.addItem(&item(title, action));
         let parent = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(mtm.alloc(), &NSString::from_str("Priority"), None, &NSString::new()) };
         parent.setSubmenu(Some(&levels));
+        add("Edit…", sel!(editTaskFromMenu:));
         menu.addItem(&parent);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         add("Move to Tomorrow", sel!(moveToTomorrow:));
@@ -1840,17 +2001,6 @@ impl Controller {
         self.save_and_refresh();
     }
 
-
-    fn add_overflow_note(&self, list: &NSStackView, total: usize, max: usize, empty: &str, color: &NSColor) {
-        let text = if total > max {
-            format!("+{} more", total - max)
-        } else if total == 0 && !empty.is_empty() {
-            empty.to_owned()
-        } else {
-            return;
-        };
-        list.addArrangedSubview(&w::label(&text, 12.0, unsafe { NSFontWeightRegular }, color, self.mtm()));
-    }
 
     // ---- building ------------------------------------------------------------------
 
@@ -2126,7 +2276,7 @@ impl Controller {
             view.widthAnchor().constraintEqualToAnchor(&top.widthAnchor()).setActive(true);
         }
 
-        let input = w::input("Add a task · type ! # or / for hints", &white(0.9), 0, self.target(), sel!(addTask:), mtm);
+        let input = w::input(ADD_PLACEHOLDER, &white(0.9), 0, self.target(), sel!(addTask:), mtm);
         unsafe { input.setDelegate(Some(ProtocolObject::from_ref(self))) };
         let bottom = self.add_row(&input, &white(0.5), mtm);
         let dots: Vec<_> = PRIORITIES
@@ -2257,8 +2407,10 @@ impl Controller {
         let next = button("forward.fill", 20.0, sel!(musicNext:));
         let controls = w::stack(&[&previous, &toggle, &next], false, 10.0, mtm);
 
-        let column = w::stack(&[&title.view, &subtitle.view, &track, &times, &controls], true, 6.0, mtm);
+        let lyrics = LyricsView::new(MUSIC_PROGRESS_WIDTH, mtm);
+        let column = w::stack(&[&title.view, &subtitle.view, &lyrics.view, &track, &times, &controls], true, 6.0, mtm);
         column.setCustomSpacing_afterView(18.0, &subtitle.view);
+        column.setCustomSpacing_afterView(16.0, &lyrics.view);
         column.setCustomSpacing_afterView(12.0, &times);
         let now = w::stack(&[&art, &column], false, 24.0, mtm);
 
@@ -2271,7 +2423,7 @@ impl Controller {
             view.centerXAnchor().constraintEqualToAnchor(&body.centerXAnchor()).setActive(true);
             view.centerYAnchor().constraintEqualToAnchor(&body.centerYAnchor()).setActive(true);
         }
-        MusicView { body, now, empty, art, art_size, title, subtitle, progress, elapsed, total, toggle }
+        MusicView { body, now, empty, art, art_size, title, subtitle, progress, elapsed, total, toggle, lyrics }
     }
 
     /// A card holding the terminal view.
@@ -2364,22 +2516,7 @@ fn today_lists(tasks: &[Task], today: &str) -> (Vec<usize>, Vec<usize>) {
 /// A Markdown checklist in the quick-add syntax, so a line pasted back into the input keeps
 /// its time, priority and project.
 fn checklist<'a>(tasks: impl Iterator<Item = &'a Task>) -> String {
-    tasks
-        .map(|t| {
-            let mut line = format!("- [{}] ", if t.done { 'x' } else { ' ' });
-            if !t.time.is_empty() {
-                line += &format!("{} ", t.time);
-            }
-            line += &t.text;
-            if !t.priority.is_empty() {
-                line += &format!(" !{}", t.priority);
-            }
-            if !t.project.is_empty() {
-                line += &format!(" #{}", t.project);
-            }
-            line + "\n"
-        })
-        .collect()
+    tasks.map(|t| format!("- [{}] {}\n", if t.done { 'x' } else { ' ' }, quick_add::line(t, ""))).collect()
 }
 
 fn is_open_today(task: &Task, today: &str) -> bool {
@@ -2438,13 +2575,6 @@ fn meta_line(task: &Task) -> String {
         parts.push(format!("{} min", task.minutes));
     }
     parts.join(" · ")
-}
-
-/// `17:00` → `5:00 PM`.
-fn clock_12h(time: &str) -> Option<String> {
-    let (h, m) = time.split_once(':')?;
-    let h: u32 = h.parse().ok()?;
-    Some(format!("{}:{m} {}", (h + 11) % 12 + 1, if h < 12 { "AM" } else { "PM" }))
 }
 
 /// Minute of the day now.
@@ -2606,7 +2736,7 @@ mod tests {
     fn checklist_keeps_time_priority_and_project() {
         let open = Task { text: "Gym".into(), time: "18:00".into(), priority: "high".into(), project: "Health".into(), ..Task::default() };
         let done = Task { text: "Mail".into(), done: true, ..Task::default() };
-        assert_eq!(checklist([&open, &done].into_iter()), "- [ ] 18:00 Gym !high #Health\n- [x] Mail\n");
+        assert_eq!(checklist([&open, &done].into_iter()), "- [ ] Gym 18:00 !high #Health\n- [x] Mail\n");
     }
 
     #[test]

@@ -364,7 +364,7 @@ fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
-fn percent_decode(text: &str) -> Option<String> {
+pub fn percent_decode(text: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(text.len());
     let mut chars = text.as_bytes().iter().copied();
     while let Some(byte) = chars.next() {

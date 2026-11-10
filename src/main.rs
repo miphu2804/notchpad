@@ -17,6 +17,8 @@ mod insights_view;
 mod list_row;
 mod linear;
 mod live_activity;
+mod lyrics;
+mod lyrics_view;
 mod marquee;
 mod notch_banner;
 mod now_playing;
@@ -36,6 +38,7 @@ mod terminal_palette;
 mod terminal_session;
 mod terminal_view;
 mod tomato_view;
+mod url_command;
 mod week_bars;
 mod widgets;
 
