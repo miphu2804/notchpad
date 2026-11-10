@@ -137,7 +137,7 @@ impl NotchBanner {
         let buttons = if notice.actions { button_widths.iter().sum::<f64>() + 8.0 } else { 0.0 };
         let text = self.title.intrinsicContentSize().width.max(self.subtitle.intrinsicContentSize().width);
         let notch_width = notch.size.width - 2.0 * panel::ear(notch.size.height);
-        let width = (TEXT_X + text.max(buttons) + PAD + 4.0).clamp(notch_width, MAX_WIDTH);
+        let width = (TEXT_X + text.max(buttons) + PAD + 4.0).clamp(notch_width.min(MAX_WIDTH), MAX_WIDTH);
         // Icon to the end of the longer of text and buttons, centred in the card; at the cap the
         // text truncates instead.
         let content = (TEXT_X - PAD + text.max(buttons) + 4.0).min(width - 2.0 * PAD);

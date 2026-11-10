@@ -1509,7 +1509,15 @@ impl Controller {
             }
             *self.ivars().chime.borrow_mut() = sound;
         }
-        let (collapsed, _, _) = self.rects();
+        let (mut collapsed, _, _) = self.rects();
+        // Hang the card from the notch as it looks now, live wings included, so the two read as
+        // one shape rather than a narrow card under a wider bar.
+        let state = self.ivars();
+        if !state.expanded.get() {
+            let wings = state.wings.get();
+            collapsed.origin.x -= wings;
+            collapsed.size.width += 2.0 * wings;
+        }
         self.ui().banner.show(collapsed, notice);
         self.ivars().banner_until.set(Some(Instant::now() + Duration::from_secs_f64(seconds)));
         unsafe { NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(seconds, self.target(), sel!(bannerExpired:), None, false) };
