@@ -17,11 +17,12 @@ pub struct Section {
     pub blurb: &'static str,
 }
 
-pub const SECTIONS: [Section; 4] = [
+pub const SECTIONS: [Section; 5] = [
     Section { key: "workspace", name: "Workspace", symbol: "checklist", blurb: "Today's tasks and the focus timer" },
     Section { key: "clips", name: "Clips", symbol: "doc.on.clipboard", blurb: "Clipboard history and dropped files" },
     Section { key: "music", name: "Playing", symbol: "play.circle", blurb: "Now playing and playback controls" },
     Section { key: "terminal", name: "Terminal", symbol: "terminal", blurb: "A shell in the notch" },
+    Section { key: "insights", name: "Insights", symbol: "chart.bar.xaxis", blurb: "Active days, streaks and focus time" },
 ];
 
 /// How tall the expanded notch is for a section, as a multiple of the compact body height.
@@ -414,7 +415,7 @@ mod tests {
     fn unknown_size_words_and_sections_are_ignored() {
         // `week` and `notes` were sections once; files that still name them load as before.
         let settings = parse("size=terminal:huge,bogus:tall,week:tall,clips:tall,notes\n");
-        assert_eq!(settings.sizes, [Size::Compact, Size::Tall, Size::Compact, Size::Compact]);
+        assert_eq!(settings.sizes, [Size::Compact, Size::Tall, Size::Compact, Size::Compact, Size::Compact]);
     }
 
     #[test]
@@ -462,14 +463,14 @@ mod tests {
     #[test]
     fn unknown_keys_and_names_are_ignored() {
         let settings = parse("theme=dark\nhidden=notes,bogus,music\nwing_focus=0\n");
-        assert_eq!(settings.hidden, [false, false, true, false]);
+        assert_eq!(settings.hidden, [false, false, true, false, false]);
         assert!(!settings.wing_focus);
     }
 
     #[test]
     fn garbage_lines_are_ignored() {
         let settings = parse("???\n\n=\nwing_music=maybe\nhidden\n  hidden = clips \n");
-        assert_eq!(settings.hidden, [false, true, false, false]);
+        assert_eq!(settings.hidden, [false, true, false, false, false]);
         assert!(settings.wing_music);
     }
 
@@ -482,12 +483,12 @@ mod tests {
     #[test]
     fn the_last_visible_section_cannot_be_hidden() {
         let mut settings = Settings::default();
-        for i in 0..3 {
+        for i in 0..4 {
             assert!(settings.set_shown(i, false));
         }
-        assert!(!settings.set_shown(3, false));
-        assert!(!settings.hidden[3]);
-        assert_eq!(settings.first_visible(), 3);
+        assert!(!settings.set_shown(4, false));
+        assert!(!settings.hidden[4]);
+        assert_eq!(settings.first_visible(), 4);
         assert!(settings.set_shown(0, true));
     }
 
