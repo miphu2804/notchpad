@@ -14,7 +14,7 @@ use objc2_foundation::{NSCalendar, NSCalendarOptions, NSCalendarUnit, NSDate, NS
 
 use crate::days;
 
-/// One calendar event of today.
+/// One calendar event of today that has not ended yet.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Event {
     pub title: String,
@@ -22,6 +22,14 @@ pub struct Event {
     pub time: String,
     /// Seconds since the Cocoa reference date, to order events that share a day.
     start: f64,
+    /// When it ends, in the same seconds; past this it leaves the list.
+    end: f64,
+}
+
+impl Event {
+    pub fn ended(&self) -> bool {
+        self.end <= NSDate::now().timeIntervalSinceReferenceDate()
+    }
 }
 
 /// What macOS lets NotchGo do with the user's calendars.
@@ -73,16 +81,19 @@ impl Calendar {
             return Vec::new();
         }
         let calendar = NSCalendar::currentCalendar();
-        let start = calendar.startOfDayForDate(&NSDate::now());
-        let Some(end) = calendar.dateByAddingUnit_value_toDate_options(NSCalendarUnit::Day, 1, &start, NSCalendarOptions::empty()) else {
+        // From now, not midnight: EventKit returns what overlaps the range, so the event under
+        // way stays and the finished ones drop out.
+        let now = NSDate::now();
+        let midnight = calendar.startOfDayForDate(&now);
+        let Some(end) = calendar.dateByAddingUnit_value_toDate_options(NSCalendarUnit::Day, 1, &midnight, NSCalendarOptions::empty()) else {
             return Vec::new();
         };
         let store = self.store();
         let events = unsafe {
-            let predicate = store.predicateForEventsWithStartDate_endDate_calendars(&start, &end, None);
+            let predicate = store.predicateForEventsWithStartDate_endDate_calendars(&now, &end, None);
             store.eventsMatchingPredicate(&predicate).iter().map(|e| {
                 let time = if e.isAllDay() { String::new() } else { days::clock_of(&e.startDate()) };
-                Event { title: e.title().to_string(), time, start: e.startDate().timeIntervalSinceReferenceDate() }
+                Event { title: e.title().to_string(), time, start: e.startDate().timeIntervalSinceReferenceDate(), end: e.endDate().timeIntervalSinceReferenceDate() }
             }).collect()
         };
         ordered(events)
@@ -104,7 +115,7 @@ mod tests {
     use super::*;
 
     fn event(title: &str, time: &str, start: f64) -> Event {
-        Event { title: title.to_owned(), time: time.to_owned(), start }
+        Event { title: title.to_owned(), time: time.to_owned(), start, end: start + 1.0 }
     }
 
     #[test]
@@ -112,5 +123,12 @@ mod tests {
         let sorted = ordered(vec![event("lunch", "12:30", 30.0), event("holiday", "", 0.0), event("standup", "09:00", 10.0)]);
         let titles: Vec<_> = sorted.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, ["holiday", "standup", "lunch"]);
+    }
+
+    #[test]
+    fn an_event_has_ended_once_its_end_is_past() {
+        let now = NSDate::now().timeIntervalSinceReferenceDate();
+        assert!(event("breakfast", "08:30", now - 3600.0).ended());
+        assert!(!Event { end: now + 3600.0, ..event("exam", "12:30", now - 60.0) }.ended());
     }
 }

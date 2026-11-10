@@ -81,7 +81,7 @@ impl NotchBanner {
         panel.setLevel(NSMainMenuWindowLevel + 2);
         panel.setCollectionBehavior(
             NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::Stationary
+                | NSWindowCollectionBehavior::Transient
                 | NSWindowCollectionBehavior::FullScreenAuxiliary
                 | NSWindowCollectionBehavior::IgnoresCycle,
         );
