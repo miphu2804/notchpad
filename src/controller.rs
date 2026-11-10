@@ -25,6 +25,7 @@ use crate::clip_card::{self, ClipCard};
 use crate::clips::ClipHistory;
 use crate::settings::{self as prefs, Background, Settings, Shape, Size, TimerStyle};
 use crate::settings_window::SettingsWindow;
+use crate::day_plan;
 use crate::days;
 use crate::export;
 use crate::focus_ring::FocusRing;
@@ -463,6 +464,21 @@ define_class!(
             if self.ivars().banner_until.get().is_some_and(|until| Instant::now() + Duration::from_millis(100) >= until) {
                 self.hide_banner();
             }
+        }
+
+        /// Gives today's untimed open tasks a start in the free gaps; see `day_plan::plan`.
+        #[unsafe(method(planDay:))]
+        fn plan_day(&self, _item: &NSMenuItem) {
+            let Some(now) = now_minutes() else { return };
+            let busy: Vec<(u32, u32)> = self.ivars().events.borrow().iter().filter_map(|e| e.span).collect();
+            let planned = day_plan::plan(&self.ivars().tasks.borrow(), &days::key(0), now, &busy);
+            if planned.is_empty() {
+                return;
+            }
+            for (i, time) in planned {
+                self.ivars().tasks.borrow_mut()[i].time = time;
+            }
+            self.save_and_refresh();
         }
 
         #[unsafe(method(copyMarkdown:))]
@@ -1655,6 +1671,7 @@ impl Controller {
         let menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::new());
         menu.setAutoenablesItems(false);
         let items = [
+            ("Plan the rest of today", sel!(planDay:), ""),
             ("Open Insights", sel!(openInsights:), ""),
             ("Open dashboard window", sel!(openDashboard:), ""),
             ("Export backup (JSON)…", sel!(exportBackup:), ""),

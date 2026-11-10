@@ -24,6 +24,8 @@ pub struct Event {
     start: f64,
     /// When it ends, in the same seconds; past this it leaves the list.
     end: f64,
+    /// Minutes since today's midnight it covers, clamped to today; `None` for an all-day event.
+    pub span: Option<(u32, u32)>,
 }
 
 impl Event {
@@ -88,12 +90,16 @@ impl Calendar {
         let Some(end) = calendar.dateByAddingUnit_value_toDate_options(NSCalendarUnit::Day, 1, &midnight, NSCalendarOptions::empty()) else {
             return Vec::new();
         };
+        let day_start = midnight.timeIntervalSinceReferenceDate();
         let store = self.store();
         let events = unsafe {
             let predicate = store.predicateForEventsWithStartDate_endDate_calendars(&now, &end, None);
             store.eventsMatchingPredicate(&predicate).iter().map(|e| {
                 let time = if e.isAllDay() { String::new() } else { days::clock_of(&e.startDate()) };
-                Event { title: e.title().to_string(), time, start: e.startDate().timeIntervalSinceReferenceDate(), end: e.endDate().timeIntervalSinceReferenceDate() }
+                let (start, end) = (e.startDate().timeIntervalSinceReferenceDate(), e.endDate().timeIntervalSinceReferenceDate());
+                let minute = |at: f64| ((at - day_start) / 60.0).clamp(0.0, 24.0 * 60.0) as u32;
+                let span = (!e.isAllDay()).then(|| (minute(start), minute(end)));
+                Event { title: e.title().to_string(), time, start, end, span }
             }).collect()
         };
         ordered(events)
@@ -115,7 +121,7 @@ mod tests {
     use super::*;
 
     fn event(title: &str, time: &str, start: f64) -> Event {
-        Event { title: title.to_owned(), time: time.to_owned(), start, end: start + 1.0 }
+        Event { title: title.to_owned(), time: time.to_owned(), start, end: start + 1.0, span: None }
     }
 
     #[test]

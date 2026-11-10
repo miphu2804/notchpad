@@ -6,6 +6,7 @@ mod claude_mcp;
 mod clip_card;
 mod clips;
 mod controller;
+mod day_plan;
 mod days;
 mod export;
 mod hotkey;
