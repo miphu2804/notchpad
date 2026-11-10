@@ -17,7 +17,7 @@ use objc2_app_kit::{NSClickGestureRecognizer, NSControl, NSControlTextEditingDel
     NSTrackingAreaOptions, NSView, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_event_kit::EKEventStoreChangedNotification;
-use objc2_foundation::{NSMutableAttributedString, NSNumber, NSRange, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
+use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager, NSMutableAttributedString, NSNumber, NSRange, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_quartz_core::{CAMediaTiming, CATransition, kCATransitionFade};
 
 use crate::calendar::{self, Access, Calendar, Event};
@@ -26,6 +26,7 @@ use crate::clips::ClipHistory;
 use crate::settings::{self as prefs, Background, Settings, Shape, Size, TimerStyle};
 use crate::settings_window::SettingsWindow;
 use crate::day_plan::{self, Slot};
+use crate::url_command::{self, UrlCommand};
 use crate::days;
 use crate::export;
 use crate::focus_ring::FocusRing;
@@ -85,6 +86,9 @@ const CYCLE: usize = 4;
 const UNDO_SECS: f64 = 6.0;
 /// How long a task reminder card stays without an answer; the system notification remains.
 const REMINDER_SECS: f64 = 60.0;
+/// Apple Event class and id of an "open this URL" event ('GURL'), and its direct-object key ('----').
+const GET_URL: u32 = u32::from_be_bytes(*b"GURL");
+const KEY_DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
 /// How long the card saying what "Plan my day" moved stays.
 const PLAN_NOTICE_SECS: f64 = 6.0;
 /// How long a pomodoro card stays: it asks nothing.
@@ -471,6 +475,23 @@ define_class!(
         #[unsafe(method(planDay:))]
         fn plan_day(&self, _item: &NSMenuItem) {
             self.plan_today();
+        }
+
+        /// A `notchgo://` link opened by Shortcuts, a launcher or a browser; see `url_command`.
+        #[unsafe(method(handleURL:withReply:))]
+        fn handle_url(&self, event: &NSAppleEventDescriptor, _reply: &NSAppleEventDescriptor) {
+            let param: Option<Retained<NSAppleEventDescriptor>> = unsafe { msg_send![event, paramDescriptorForKeyword: KEY_DIRECT_OBJECT] };
+            let url = param.and_then(|d| d.stringValue()).map(|s| s.to_string());
+            match url.as_deref().and_then(url_command::parse) {
+                Some(UrlCommand::Plan) => self.plan_today(),
+                Some(UrlCommand::Add(line)) => {
+                    self.push_task(&line, &days::key(0), "");
+                    let title = self.ivars().tasks.borrow().last().map(|t| t.text.clone()).unwrap_or_default();
+                    let notice = Notice { symbol: "plus.circle.fill", tint: &rgba(120, 170, 255, 1.0), title: &title, subtitle: "Added to today", actions: false };
+                    self.notify(None, &notice, PLAN_NOTICE_SECS);
+                }
+                None => eprintln!("notchpad: ignored link {url:?}"),
+            }
         }
 
         #[unsafe(method(copyMarkdown:))]
@@ -915,6 +936,9 @@ impl Controller {
             let clips = NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(0.5, this.target(), sel!(pollClips:), None, true);
             clips.setTolerance(0.25);
         }
+        // Registered before the run loop starts, so a link that launches the app is not lost.
+        let events = NSAppleEventManager::sharedAppleEventManager();
+        let _: () = unsafe { msg_send![&events, setEventHandler: this.target(), andSelector: sel!(handleURL:withReply:), forEventClass: GET_URL, andEventID: GET_URL] };
         this.sync_now_playing();
         this.load_events();
         this.refresh();

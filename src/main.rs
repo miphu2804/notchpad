@@ -36,6 +36,7 @@ mod terminal_palette;
 mod terminal_session;
 mod terminal_view;
 mod tomato_view;
+mod url_command;
 mod week_bars;
 mod widgets;
 
