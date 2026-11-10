@@ -1,3 +1,24 @@
+### [2026-11-10 10:15 UTC+07:00] — [Fix] Bar shape drawn as a smaller notch
+
+**Done:** The Bar shape was a flat rectangle with square top corners, which looked out of place beside the hardware notch. It now uses the notch silhouette (concave ears, rounded bottom corners) at the smaller Bar size (160×24).
+
+**Changed  files:**
+- `src/panel.rs` — modified: one outline for every shape; `bar` look and `bar_radius` removed
+- `src/notch_banner.rs`, `src/controller.rs` — modified: `set_look(glass)`
+
+**Flow explained:** `Shape::is_bar` still picks the size in `notch_rects`; `NotchShape` draws the same outline at whatever size its window has.
+
+### [2026-11-10 10:11 UTC+07:00] — [Feature] Plan the rest of today
+
+**Done:** Header menu item that gives today's untimed open tasks a start time in the free gaps until 22:00, high priority first, around calendar events and timed tasks.
+
+**Changed  files:**
+- `src/day_plan.rs` — created: the deterministic planner and its tests
+- `src/calendar.rs` — modified: `Event::span` in minutes since midnight
+- `src/controller.rs`, `src/main.rs`, `README.md` — modified: menu action, module, usage line
+
+**Flow explained:** `planDay:` collects event spans as busy time, `day_plan::plan` ranks tasks and places each in the earliest gap from the next quarter hour, then the tasks are saved and the notch refreshes.
+
 ### [2026-11-10 10:03 UTC+07:00] — [Fix] Notch stays still during Desktop swipes
 
 **Done:**
@@ -106,27 +127,3 @@ EventKit returns events overlapping the range, so an event under way stays until
 
 **Flow explained:**
 - `remind_tasks` withdraws pending system requests for tasks due next minute, and `task_alerts::sync` schedules from the minute after; the notch card covers the gap.
-
-### [2026-11-10 00:20 UTC+07:00] — [Integration] Linear browser authorization with PKCE
-
-**Done:**
-- Replaced the new-key form with browser OAuth, cancellable callback handling, Keychain token storage and serialized refresh. Disconnect prevents late writes and blocks reconnect until pending credential deletion finishes.
-- Preserved existing personal-key reads, stable `linear:<identifier>` tasks and the direct Insights callback. Removed unused key-entry code and made config-escaping tests exercise the production helper.
-- Documented the registered public client ID and exact loopback redirect. No client secret is embedded; an unconfigured Connect reports setup missing without opening a browser.
-
-**Changed  files:**
-- `src/linear.rs`, `src/settings_window.rs`, `macos/bundle.sh`, `README.md`, `BLOCKERS.md` — modified
-
-**Flow explained:**
-Settings starts a worker and polls its result on the main thread; PKCE/state-validated callbacks exchange tokens, then enable the existing sync. Refresh and disconnect use generation/transition guards to prevent stale credential writes. Verified: 110 tests pass (including callback rejection, timeout/cancel, PKCE, token rotation and disconnect/reconnect gating), release build without warnings, shell syntax and diff checks. Actual scratch-HOME Connect action stays disconnected with the explicit configuration error; `/tmp/notchpad-oauth/unconfigured.png` inspected. Temporary hooks removed. Real provider authorization remains unverified and blocked on registration; see `BLOCKERS.md`.
-
-### [2026-11-10 00:12 UTC+07:00] — [Fix] Preserve text height in the compact focus card
-
-**Done:**
-- The ring now shrinks before text rows. Its minimum allows the full phase, task and daily-total labels in the real 330 pt notch, while taller views retain the larger ring.
-
-**Changed  files:**
-- `src/controller.rs` — modified
-
-**Flow explained:**
-The preferred ring size previously competed with text compression, producing phase/count label heights of 8/7 pt instead of their 14 pt intrinsic heights and a zero-height task row. Lowering the ring preference to 200 and its minimum to 120 yields a 123 pt ring and restores every text row to its intrinsic height. Verified: reproduced before/after on the actual expanded notch, asserted all seven label heights, inspected `/tmp/notchpad-clipping/before.png` and `after.png`, and ran 100 passing tests. Temporary measurement/render hooks removed.
