@@ -6,9 +6,9 @@ use std::cell::RefCell;
 
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSFontWeightRegular, NSFontWeightSemibold, NSLineBreakMode, NSStackView, NSTextField};
+use objc2_app_kit::{NSFontWeightRegular, NSFontWeightSemibold, NSLineBreakMode, NSStackView, NSTextField, NSView};
 use objc2_foundation::NSString;
-use objc2_quartz_core::{CAMediaTiming, CAMediaTimingFunction, CATransition, kCAMediaTimingFunctionEaseInEaseOut, kCATransitionFromTop, kCATransitionPush};
+use objc2_quartz_core::{CAMediaTiming, CAMediaTimingFunction, CATransition, kCAMediaTimingFunctionEaseInEaseOut, kCATransitionFromBottom, kCATransitionPush};
 
 use crate::widgets as w;
 
@@ -17,8 +17,10 @@ const BREAK: &str = "♪";
 const SLIDE_SECS: f64 = 0.35;
 
 pub struct LyricsView {
-    /// Put this in the layout; hidden while there are no lyrics.
-    pub view: Retained<NSStackView>,
+    /// Put this in the layout; hidden while there are no lyrics. It clips the slide, which
+    /// moves `stack`'s own layer.
+    pub view: Retained<NSView>,
+    stack: Retained<NSStackView>,
     lines: [Retained<NSTextField>; 3],
     /// The line shown as being sung, to slide only when it changes.
     sung: RefCell<String>,
@@ -34,10 +36,17 @@ impl LyricsView {
         };
         let (regular, semibold) = unsafe { (NSFontWeightRegular, NSFontWeightSemibold) };
         let lines = [line(13.0, regular, 0.35), line(17.0, semibold, 0.95), line(13.0, regular, 0.35)];
-        let view = w::stack(&[&lines[0], &lines[1], &lines[2]], true, 4.0, mtm);
+        let stack = w::stack(&[&lines[0], &lines[1], &lines[2]], true, 4.0, mtm);
+        stack.setWantsLayer(true);
+        let view = NSView::new(mtm);
         view.setWantsLayer(true);
+        if let Some(layer) = view.layer() {
+            layer.setMasksToBounds(true);
+        }
+        view.addSubview(&stack);
+        w::pin(&stack, &view, 0.0, Some(0.0));
         view.setHidden(true);
-        Self { view, lines, sung: RefCell::new(String::new()) }
+        Self { view, stack, lines, sung: RefCell::new(String::new()) }
     }
 
     /// Shows `[before, sung, after]`, or hides the block for `None`.
@@ -62,11 +71,10 @@ impl LyricsView {
 
     /// The next drawn state pushes in from below, moving the old lines up.
     fn slide_up(&self) {
-        let Some(layer) = self.view.layer() else { return };
+        let Some(layer) = self.stack.layer() else { return };
         let push = CATransition::new();
         push.setType(unsafe { kCATransitionPush });
-        // Layers on macOS are not flipped, so "from top" in layer terms enters from the bottom on screen.
-        push.setSubtype(Some(unsafe { kCATransitionFromTop }));
+        push.setSubtype(Some(unsafe { kCATransitionFromBottom }));
         push.setDuration(SLIDE_SECS);
         push.setTimingFunction(Some(&CAMediaTimingFunction::functionWithName(unsafe { kCAMediaTimingFunctionEaseInEaseOut })));
         layer.addAnimation_forKey(&push, None);
