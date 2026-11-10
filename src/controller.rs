@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
 use objc2::{AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSClickGestureRecognizer, NSControl, NSControlTextEditingDelegate, NSTextFieldDelegate, NSTextView, NSLineBreakMode, NSPasteboard, NSPasteboardTypeString, NSControlStateValueOn, NSForegroundColorAttributeName, NSStrikethroughStyleAttributeName, NSUnderlineStyle, NSSound, 
+use objc2_app_kit::{NSUserInterfaceItemIdentification, NSClickGestureRecognizer, NSControl, NSControlTextEditingDelegate, NSTextFieldDelegate, NSTextView, NSLineBreakMode, NSPasteboard, NSPasteboardTypeString, NSControlStateValueOn, NSForegroundColorAttributeName, NSStrikethroughStyleAttributeName, NSUnderlineStyle, NSSound, 
     NSAppearance, NSImageScaling, NSAppearanceCustomization, NSAppearanceNameDarkAqua,
     NSApplication, NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSButton, NSCellImagePosition, NSColor, NSEvent, NSFont,
     NSFontWeightBold, NSFontWeightLight, NSFontWeightMedium, NSFontWeightRegular,
@@ -70,6 +70,8 @@ const ICON_TAB_WIDTH: f64 = 32.0;
 /// no bars.
 const ARTWORK_SIZE: f64 = 220.0;
 const MAX_CARD_ROWS: usize = 5;
+const ADD_PLACEHOLDER: &str = "Add a task · type ! # or / for hints";
+const EDIT_PLACEHOLDER: &str = "Edit task · Return saves · Esc cancels";
 /// Calendar events shown above the tasks; the rest of today's stay in the calendar app.
 const MAX_EVENT_ROWS: usize = 3;
 /// Gap between Today rows; a hairline is drawn in its middle.
@@ -250,6 +252,12 @@ pub struct State {
     /// Runs only while the Music tab is visible and a track is playing.
     music_timer: RefCell<Option<Retained<NSTimer>>>,
     show_completed: Cell<bool>,
+    /// First row of the page of today's list on screen; "+N more" moves it on, so only a few
+    /// tasks show at a time.
+    list_start: Cell<usize>,
+    /// The task open in the input for editing, as (index, title when opened); the title guards
+    /// against the list changing underneath.
+    editing: RefCell<Option<(usize, String)>>,
     /// Priority given to tasks added from the Today card unless the text names one.
     new_priority: Cell<usize>,
     /// Task index chosen with ▶; falls back to the first open task of today.
@@ -321,7 +329,11 @@ define_class!(
         /// While hints show, ↑/↓ move between them, Tab or Return takes one and Esc hides them;
         /// otherwise the field handles the key (Return adds the task).
         #[unsafe(method(control:textView:doCommandBySelector:))]
-        fn control_do_command(&self, _control: &NSControl, _editor: &NSTextView, command: Sel) -> Bool {
+        fn control_do_command(&self, control: &NSControl, _editor: &NSTextView, command: Sel) -> Bool {
+            if command == sel!(cancelOperation:) && self.ivars().hints.borrow().is_empty() && self.end_edit().is_some() {
+                control.setStringValue(&NSString::new());
+                return Bool::YES;
+            }
             Bool::new(self.hint_command(command))
         }
     }
@@ -375,10 +387,33 @@ define_class!(
         fn add_task(&self, field: &NSTextField) {
             let text = field.stringValue().to_string();
             let text = text.trim();
-            if !text.is_empty() {
+            if let Some(editing) = self.end_edit() {
+                self.apply_edit(editing, text);
+            } else if !text.is_empty() {
                 self.push_task(text, &days::key(0), PRIORITIES[self.ivars().new_priority.get()]);
             }
             field.setStringValue(&NSString::new());
+        }
+
+        /// A click on a task's title opens it in the input with all its fields; see `begin_edit`.
+        #[unsafe(method(editTask:))]
+        fn edit_task(&self, click: &NSClickGestureRecognizer) {
+            let index = click.view().and_then(|v| v.identifier()).and_then(|id| id.to_string().strip_prefix("task:")?.parse().ok());
+            if let Some(index) = index {
+                self.begin_edit(index);
+            }
+        }
+
+        #[unsafe(method(editTaskFromMenu:))]
+        fn edit_task_from_menu(&self, item: &NSMenuItem) {
+            self.begin_edit(item.tag() as usize);
+        }
+
+        /// "+N more" shows the next few tasks; past the last page it goes back to the first.
+        #[unsafe(method(nextPage:))]
+        fn next_page(&self, sender: &NSButton) {
+            self.ivars().list_start.set(sender.tag() as usize);
+            self.render_task_card();
         }
 
         #[unsafe(method(toggleTask:))]
@@ -551,12 +586,14 @@ define_class!(
         #[unsafe(method(showTodo:))]
         fn show_todo(&self, _sender: &AnyObject) {
             self.ivars().show_completed.set(false);
+            self.ivars().list_start.set(0);
             self.refresh();
         }
 
         #[unsafe(method(showCompleted:))]
         fn show_completed(&self, _sender: &AnyObject) {
             self.ivars().show_completed.set(true);
+            self.ivars().list_start.set(0);
             self.refresh();
         }
 
@@ -1117,6 +1154,38 @@ impl Controller {
         self.refresh();
     }
 
+    /// Puts the task at `index` in the input as a quick-add line with all its fields, so it can be
+    /// read in full and changed; Return saves it and Esc leaves it as it was.
+    fn begin_edit(&self, index: usize) {
+        let Some((title, line)) = self.ivars().tasks.borrow().get(index).map(|t| (t.text.clone(), quick_add::line(t, &days::key(1)))) else { return };
+        *self.ivars().editing.borrow_mut() = Some((index, title));
+        let input = &self.ui().tasks.input;
+        input.setStringValue(&NSString::from_str(&line));
+        input.setPlaceholderString(Some(&NSString::from_str(EDIT_PLACEHOLDER)));
+        let panel = &self.ui().panel;
+        panel.makeKeyWindow();
+        panel.makeFirstResponder(Some(input));
+    }
+
+    /// Leaves edit mode, if on, and returns what was being edited.
+    fn end_edit(&self) -> Option<(usize, String)> {
+        let editing = self.ivars().editing.borrow_mut().take()?;
+        self.ui().tasks.input.setPlaceholderString(Some(&NSString::from_str(ADD_PLACEHOLDER)));
+        Some(editing)
+    }
+
+    /// Rewrites the edited task's fields from `line`; its day stays unless the line names one.
+    /// An empty line, or a task that is no longer at its index, changes nothing.
+    fn apply_edit(&self, (index, title): (usize, String), line: &str) {
+        {
+            let mut tasks = self.ivars().tasks.borrow_mut();
+            let Some(task) = tasks.get_mut(index).filter(|t| t.text == title && !line.is_empty()) else { return };
+            let new = quick_add::parse(line, &task.day, &days::key(0), &days::key(1));
+            (task.text, task.day, task.time, task.priority, task.project, task.minutes) = (new.text, new.day, new.time, new.priority, new.project, new.minutes);
+        }
+        self.save_and_refresh();
+    }
+
     /// Starts a Reminders pass when the sync is on, allowed, and due.
     fn sync_reminders(&self) {
         let on = self.ivars().settings.borrow().reminders && reminders::access() == Access::Granted;
@@ -1594,8 +1663,9 @@ impl Controller {
             }
             add_full_width(&card.rows, &row, None);
         }
-        let fit = rows_that_fit(&tasks, shown, MAX_CARD_ROWS - events.len());
-        for (k, &i) in shown.iter().take(fit).enumerate() {
+        let start = Some(self.ivars().list_start.get()).filter(|&s| s < shown.len()).unwrap_or(0);
+        let fit = rows_that_fit(&tasks, &shown[start..], MAX_CARD_ROWS - events.len());
+        for (k, &i) in shown[start..].iter().take(fit).enumerate() {
             let row = ListRow::new(&tasks[i].text, &self.card_row(i, &tasks[i]), &white(0.07), self.mtm());
             unsafe { row.setMenu(Some(&self.task_menu(i, &tasks[i].priority))) };
             if k > 0 || !events.is_empty() {
@@ -1604,7 +1674,17 @@ impl Controller {
             add_full_width(&card.rows, &row, None);
         }
         let empty = if show_completed { "Nothing completed yet today" } else { "All clear. Add a task below." };
-        self.add_overflow_note(&card.rows, shown.len(), fit, empty, &white(0.5));
+        let after = shown.len() - start - fit;
+        if shown.is_empty() {
+            card.rows.addArrangedSubview(&w::label(empty, 12.0, unsafe { NSFontWeightRegular }, &white(0.5), self.mtm()));
+        } else if after > 0 || start > 0 {
+            let (title, next) = if after > 0 { (format!("+{after} more ›"), start + fit) } else { ("‹ Back to the first".to_owned(), 0) };
+            let more = w::pill(&title, 20.0, self.target(), sel!(nextPage:), self.mtm());
+            more.setTag(next as isize);
+            w::style_pill(&more, &white(0.0), &white(0.5), 6.0);
+            w::fit_pill(&more, 6.0);
+            card.rows.addArrangedSubview(&more);
+        }
         list_row::animate_changes(&card.rows, before);
     }
 
@@ -1709,6 +1789,10 @@ impl Controller {
             strike(&label);
         }
         let title = with_meta(task, label, &white(0.5), mtm);
+        title.setIdentifier(Some(&NSString::from_str(&format!("task:{index}"))));
+        let open = unsafe { NSClickGestureRecognizer::initWithTarget_action(mtm.alloc(), Some(self.target()), Some(sel!(editTask:))) };
+        title.addGestureRecognizer(&open);
+        title.setToolTip(Some(&NSString::from_str("Click to see and edit every field")));
         let play = w::icon_button("play.fill", "", 10.0, &white(0.45), self.target(), sel!(focusTask:), mtm);
         play.setTag(index as isize);
         play.setToolTip(Some(&NSString::from_str("Focus on this in the pomodoro")));
@@ -1875,6 +1959,7 @@ impl Controller {
         let add = |title: &str, action| menu.addItem(&item(title, action));
         let parent = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(mtm.alloc(), &NSString::from_str("Priority"), None, &NSString::new()) };
         parent.setSubmenu(Some(&levels));
+        add("Edit…", sel!(editTaskFromMenu:));
         menu.addItem(&parent);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         add("Move to Tomorrow", sel!(moveToTomorrow:));
@@ -1891,17 +1976,6 @@ impl Controller {
         self.save_and_refresh();
     }
 
-
-    fn add_overflow_note(&self, list: &NSStackView, total: usize, max: usize, empty: &str, color: &NSColor) {
-        let text = if total > max {
-            format!("+{} more", total - max)
-        } else if total == 0 && !empty.is_empty() {
-            empty.to_owned()
-        } else {
-            return;
-        };
-        list.addArrangedSubview(&w::label(&text, 12.0, unsafe { NSFontWeightRegular }, color, self.mtm()));
-    }
 
     // ---- building ------------------------------------------------------------------
 
@@ -2177,7 +2251,7 @@ impl Controller {
             view.widthAnchor().constraintEqualToAnchor(&top.widthAnchor()).setActive(true);
         }
 
-        let input = w::input("Add a task · type ! # or / for hints", &white(0.9), 0, self.target(), sel!(addTask:), mtm);
+        let input = w::input(ADD_PLACEHOLDER, &white(0.9), 0, self.target(), sel!(addTask:), mtm);
         unsafe { input.setDelegate(Some(ProtocolObject::from_ref(self))) };
         let bottom = self.add_row(&input, &white(0.5), mtm);
         let dots: Vec<_> = PRIORITIES
@@ -2415,22 +2489,7 @@ fn today_lists(tasks: &[Task], today: &str) -> (Vec<usize>, Vec<usize>) {
 /// A Markdown checklist in the quick-add syntax, so a line pasted back into the input keeps
 /// its time, priority and project.
 fn checklist<'a>(tasks: impl Iterator<Item = &'a Task>) -> String {
-    tasks
-        .map(|t| {
-            let mut line = format!("- [{}] ", if t.done { 'x' } else { ' ' });
-            if !t.time.is_empty() {
-                line += &format!("{} ", t.time);
-            }
-            line += &t.text;
-            if !t.priority.is_empty() {
-                line += &format!(" !{}", t.priority);
-            }
-            if !t.project.is_empty() {
-                line += &format!(" #{}", t.project);
-            }
-            line + "\n"
-        })
-        .collect()
+    tasks.map(|t| format!("- [{}] {}\n", if t.done { 'x' } else { ' ' }, quick_add::line(t, ""))).collect()
 }
 
 fn is_open_today(task: &Task, today: &str) -> bool {
@@ -2650,7 +2709,7 @@ mod tests {
     fn checklist_keeps_time_priority_and_project() {
         let open = Task { text: "Gym".into(), time: "18:00".into(), priority: "high".into(), project: "Health".into(), ..Task::default() };
         let done = Task { text: "Mail".into(), done: true, ..Task::default() };
-        assert_eq!(checklist([&open, &done].into_iter()), "- [ ] 18:00 Gym !high #Health\n- [x] Mail\n");
+        assert_eq!(checklist([&open, &done].into_iter()), "- [ ] Gym 18:00 !high #Health\n- [x] Mail\n");
     }
 
     #[test]

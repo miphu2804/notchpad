@@ -42,6 +42,29 @@ pub fn parse(input: &str, default_day: &str, today: &str, tomorrow: &str) -> Tas
     task
 }
 
+/// `task` as a line `parse` reads back to the same fields: title, then time, priority, project
+/// and estimate, and `tomorrow` when the task is on `tomorrow`. Other days are not named, so the
+/// line is parsed with the task's own day as the default.
+pub fn line(task: &Task, tomorrow: &str) -> String {
+    let mut parts = vec![task.text.clone()];
+    if !task.time.is_empty() {
+        parts.push(task.time.clone());
+    }
+    if !task.priority.is_empty() {
+        parts.push(format!("!{}", task.priority));
+    }
+    if !task.project.is_empty() {
+        parts.push(format!("#{}", task.project));
+    }
+    if task.minutes > 0 {
+        parts.push(format!("{}m", task.minutes));
+    }
+    if !task.day.is_empty() && task.day == tomorrow {
+        parts.push("tomorrow".to_owned());
+    }
+    parts.join(" ")
+}
+
 /// Words offered after `/`, in the order shown; `#` projects are added from the task list.
 const VOCABULARY: [&str; 10] = ["today", "tomorrow", "!high", "!medium", "!low", "9am", "2pm", "6pm", "25m", "~1h"];
 const PRIORITIES: [&str; 3] = ["!high", "!medium", "!low"];
@@ -133,6 +156,15 @@ mod tests {
 
     fn quick(input: &str) -> Task {
         parse(input, "D0", "D0", "D1")
+    }
+
+    #[test]
+    fn line_reads_back_to_the_same_fields() {
+        let task = quick("gym 6pm !high #health 45m tomorrow");
+        assert_eq!(line(&task, "D1"), "gym 18:00 !high #health 45m tomorrow");
+        let back = parse(&line(&task, "D1"), "D0", "D0", "D1");
+        assert_eq!((back.text, back.time, back.priority, back.project, back.minutes, back.day), ("gym".into(), "18:00".into(), "high".into(), "health".into(), 45, "D1".into()));
+        assert_eq!(line(&quick("mail"), "D1"), "mail");
     }
 
     #[test]
