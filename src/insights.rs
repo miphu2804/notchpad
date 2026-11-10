@@ -1,5 +1,5 @@
 //! The numbers behind the Insights view: per-day totals from the pomodoro log and the completed
-//! tasks, streaks, the month's active days, the best day and intensity buckets for the moon calendar.
+//! tasks, streaks, the month's active days and the best day.
 //!
 //! Pure: days are numbered (days since 1970-01-01) so ranges, streaks and month borders are plain
 //! arithmetic, and nothing here touches AppKit or the disk.
@@ -8,10 +8,8 @@ use std::collections::HashMap;
 
 use crate::store::Task;
 
-/// A day counts for the moon calendar by this many of its pomodoros-and-tasks points.
+/// A pomodoro counts for a day's score (the best day) as this many tasks.
 const POMODORO_POINTS: u32 = 2;
-/// Intensity buckets above empty: a day is 0 (nothing) to `LEVELS`.
-pub const LEVELS: u8 = 4;
 /// The rings look back this many days, today included: five weeks and a day.
 pub const SPAN: i64 = 36;
 
@@ -147,21 +145,8 @@ impl Insights {
     pub fn recent(&self, count: i64) -> Vec<Day> {
         (self.today - count + 1..=self.today).map(|n| self.day(n)).collect()
     }
-
-    /// The best score in the last [`SPAN`] days: the top of the intensity scale.
-    pub fn peak(&self) -> u32 {
-        self.recent(SPAN).iter().map(Day::score).max().unwrap_or(0)
-    }
 }
 
-/// Intensity 0 to [`LEVELS`] of `value` on a scale that tops out at `peak`: 0 only for nothing,
-/// otherwise at least 1, and `peak` itself is the top level.
-pub fn level(value: u32, peak: u32) -> u8 {
-    if value == 0 || peak == 0 {
-        return 0;
-    }
-    (value * LEVELS as u32).div_ceil(peak).clamp(1, LEVELS as u32) as u8
-}
 
 /// `YYYY-MM-DD` as a day number; anything else, including 30 February, is `None`.
 pub fn parse_day(text: &str) -> Option<i64> {
@@ -207,10 +192,6 @@ pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 }
 
 pub const MONTH_NAMES: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-/// Monday is 0, Sunday 6.
-pub fn weekday(n: i64) -> u32 {
-    (n + 3).rem_euclid(7) as u32
-}
 
 #[cfg(test)]
 mod tests {
@@ -236,8 +217,6 @@ mod tests {
         assert_eq!(data.longest_streak(), 0);
         assert_eq!(data.active_this_month(), (0, 9));
         assert!(data.best_day().is_none());
-        assert_eq!(data.peak(), 0);
-        assert_eq!(level(0, 0), 0);
     }
 
     #[test]
@@ -313,26 +292,9 @@ mod tests {
     }
 
     #[test]
-    fn intensity_buckets_run_from_empty_to_the_top_level() {
-        assert_eq!(level(0, 8), 0);
-        assert_eq!(level(1, 8), 1);
-        assert_eq!(level(2, 8), 1);
-        assert_eq!(level(3, 8), 2);
-        assert_eq!(level(4, 8), 2);
-        assert_eq!(level(5, 8), 3);
-        assert_eq!(level(6, 8), 3);
-        assert_eq!(level(7, 8), 4);
-        assert_eq!(level(8, 8), 4);
-        assert_eq!(level(9, 8), 4);
-        assert_eq!(level(1, 1000), 1);
-    }
-
-    #[test]
-    fn peak_looks_back_one_span_only() {
+    fn recent_ends_today() {
         let log = "2024-01-01 09:00 90 done\n2026-11-01 09:00 25 done\n2026-11-02 09:00 50 done\n";
         let data = build(log, &[], "2026-11-09");
-        // Two 1-pomodoro days in the span; the 2024 one is outside it.
-        assert_eq!(data.peak(), POMODORO_POINTS);
         assert_eq!(data.recent(7).len(), 7);
         assert_eq!(data.recent(7)[6], Day::default());
     }
@@ -357,10 +319,6 @@ mod tests {
             let (y, m, d) = civil(at(date));
             assert_eq!(format!("{y:04}-{m:02}-{d:02}"), date);
         }
-        // 9 November 2026 is a Monday; 1 January 1970 a Thursday.
-        assert_eq!(weekday(at("2026-11-09")), 0);
-        assert_eq!(weekday(0), 3);
-        assert_eq!(weekday(at("2026-11-08")), 6);
         assert_eq!(days_in_month(2026, 2), 28);
         assert_eq!(days_in_month(2100, 2), 28);
         assert_eq!(days_in_month(2000, 2), 29);

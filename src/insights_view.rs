@@ -1,5 +1,5 @@
-//! The Insights page of the dashboard window: stat cards, then month rings beside a moon calendar,
-//! in a scroll view for short windows. All numbers come from [`Insights`]; the charts are drawn by
+//! The Insights section: month rings beside a two-by-two grid of stat cards, sized to fit the
+//! compact notch, in a scroll view for anything shorter. All numbers come from [`Insights`]; the charts are drawn by
 //! [`Chart`]. The page redraws only when `show` is given different data, so it costs nothing while idle.
 
 use std::cell::{OnceCell, RefCell};
@@ -14,12 +14,11 @@ use objc2_app_kit::{
 use objc2_foundation::{NSObject, NSString};
 
 use crate::days;
-use crate::insights::{Day, Insights, MONTH_NAMES, SPAN, civil, days_in_month, level, weekday};
+use crate::insights::{Day, Insights, MONTH_NAMES, SPAN, civil};
 use crate::insights_chart::{AMBER, Chart, PINK, PURPLE, Plot, Rgb, SAGE};
 use crate::week_bars::{self, WeekBars};
 use crate::widgets::{self as w, SURFACE, rgba};
 
-const ROW_HEIGHT: f64 = 330.0;
 const GAP: f64 = 12.0;
 const CARD_INSET: f64 = 16.0;
 
@@ -37,8 +36,6 @@ struct Parts {
     best: Retained<NSTextField>,
     best_note: Retained<NSTextField>,
     petals: Retained<Chart>,
-    moon_month: Retained<NSTextField>,
-    moon: Retained<Chart>,
 }
 
 pub struct Ivars {
@@ -129,17 +126,6 @@ impl InsightsView {
             labels: (0..4).map(|q| q * SPAN / 4).map(|i| (i as usize, date_label(first_shown + i, today))).collect(),
             active: span.iter().filter(|d| d.active()).count() as u32,
         });
-
-        let peak = data.peak();
-
-        let (year_now, month, day_of_month) = civil(today);
-        let first = today - i64::from(day_of_month - 1);
-        parts.moon_month.setStringValue(&NSString::from_str(&format!("{} {year_now}", MONTH_NAMES[month as usize - 1])));
-        parts.moon.set(Plot::Moon {
-            lead: weekday(first),
-            days: (0..i64::from(days_in_month(year_now, month))).map(|k| (first + k <= today).then(|| level(data.day(first + k).score(), peak))).collect(),
-            today: day_of_month as usize - 1,
-        });
     }
 
     fn build(&self, mtm: MainThreadMarker) -> Parts {
@@ -154,22 +140,20 @@ impl InsightsView {
         size(&focus_bars, week_bars::WIDTH, week_bars::HEIGHT);
         let (focus_card, focus_time, focus_note) = stat_card("Focus time", "timer", PINK, Some(&focus_bars), "this week", mtm);
         let (best_card, best, best_note) = stat_card("Best day", "star", SAGE, None, "", mtm);
-        let stats = w::stack(&[&active_card, &streak_card, &focus_card, &best_card], false, GAP, mtm);
-        stats.setDistribution(NSStackViewDistribution::FillEqually);
+        let pair = |a: &NSView, b: &NSView| {
+            let row = w::stack(&[a, b], false, GAP, mtm);
+            row.setDistribution(NSStackViewDistribution::FillEqually);
+            row
+        };
+        let stats = w::stack(&[&pair(&active_card, &streak_card), &pair(&focus_card, &best_card)], true, GAP, mtm);
+        stats.setAlignment(NSLayoutAttribute::Width);
 
-        // Month rings beside the moon calendar.
+        // Month rings beside the stats, as tall as their grid.
         let petals = Chart::new(Plot::Blank, mtm);
-        let petals_card = card("Month rings", None, &petals, mtm);
-        petals.setToolTip(Some(&NSString::from_str("Estimated contribution: pomodoros = min(focus minutes, sessions × 25); deep focus = remaining minutes; tasks = completed tasks × 10. Colours show shares, not measured task time.")));
-        let moon_month = w::label("", 11.0, unsafe { NSFontWeightMedium }, &rgba(255, 255, 255, 0.5), mtm);
-        let moon = Chart::new(Plot::Blank, mtm);
-        let moon_card = card("Moon calendar", Some(&moon_month), &moon, mtm);
-        let charts = w::stack(&[&petals_card, &moon_card], false, GAP, mtm);
-        charts.setDistribution(NSStackViewDistribution::FillEqually);
-        charts.heightAnchor().constraintEqualToConstant(ROW_HEIGHT).setActive(true);
-
-        let rows = w::stack(&[&stats, &charts], true, GAP, mtm);
-        rows.setAlignment(NSLayoutAttribute::Width);
+        let petals_card = card("Month rings", &petals, mtm);
+        petals.setToolTip(Some(&NSString::from_str("Estimated contribution: pomodoros = min(focus minutes, sessions × 25); deep focus = remaining minutes; tasks = completed tasks × 10. Purple: mostly deep focus; amber: mostly pomodoros; green: mostly tasks. Petal length is the day against the busiest; colours show shares, not measured task time.")));
+        let rows = pair(&petals_card, &stats);
+        rows.setAlignment(NSLayoutAttribute::Height);
         let page = Chart::new(Plot::Blank, mtm);
         page.addSubview(&rows);
         rows.leadingAnchor().constraintEqualToAnchor(&page.leadingAnchor()).setActive(true);
@@ -204,8 +188,7 @@ impl InsightsView {
         empty.centerYAnchor().constraintEqualToAnchor(&body.centerYAnchor()).setActive(true);
 
         Parts {
-            body, scroll, empty, ring, active_pct, streak, streak_note, focus_time, focus_note, focus_bars, best, best_note, petals, moon_month,
-            moon,
+            body, scroll, empty, ring, active_pct, streak, streak_note, focus_time, focus_note, focus_bars, best, best_note, petals,
         }
     }
 }
@@ -216,23 +199,18 @@ fn size(view: &NSView, width: f64, height: f64) {
 }
 
 /// A rounded card with a title top-left, `accessory` top-right and `content` filling the rest.
-fn card(title: &str, accessory: Option<&NSView>, content: &NSView, mtm: MainThreadMarker) -> Retained<NSView> {
+/// A titled card whose content runs up beside the title, so a round chart gets the full height.
+fn card(title: &str, content: &NSView, mtm: MainThreadMarker) -> Retained<NSView> {
     let card = surface(mtm);
     let title = w::label(title, 13.0, unsafe { NSFontWeightSemibold }, &rgba(255, 255, 255, 0.9), mtm);
     title.setTranslatesAutoresizingMaskIntoConstraints(false);
     card.addSubview(&title);
     title.leadingAnchor().constraintEqualToAnchor_constant(&card.leadingAnchor(), CARD_INSET).setActive(true);
     title.topAnchor().constraintEqualToAnchor_constant(&card.topAnchor(), 14.0).setActive(true);
-    if let Some(accessory) = accessory {
-        accessory.setTranslatesAutoresizingMaskIntoConstraints(false);
-        card.addSubview(accessory);
-        accessory.trailingAnchor().constraintEqualToAnchor_constant(&card.trailingAnchor(), -CARD_INSET).setActive(true);
-        accessory.centerYAnchor().constraintEqualToAnchor(&title.centerYAnchor()).setActive(true);
-    }
     card.addSubview(content);
     content.leadingAnchor().constraintEqualToAnchor_constant(&card.leadingAnchor(), CARD_INSET).setActive(true);
     content.trailingAnchor().constraintEqualToAnchor_constant(&card.trailingAnchor(), -CARD_INSET).setActive(true);
-    content.topAnchor().constraintEqualToAnchor_constant(&card.topAnchor(), 42.0).setActive(true);
+    content.topAnchor().constraintEqualToAnchor_constant(&card.topAnchor(), 14.0).setActive(true);
     content.bottomAnchor().constraintEqualToAnchor_constant(&card.bottomAnchor(), -14.0).setActive(true);
     card
 }
