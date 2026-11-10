@@ -161,6 +161,13 @@ define_class!(
             self.commit(settings);
         }
 
+        #[unsafe(method(toggleLyrics:))]
+        fn toggle_lyrics(&self, sender: &NSSwitch) {
+            let mut settings = self.ivars().settings.borrow().clone();
+            settings.lyrics = sender.state() == NSControlStateValueOn;
+            self.commit(settings);
+        }
+
         #[unsafe(method(toggleWing:))]
         fn toggle_wing(&self, sender: &NSSwitch) {
             let mut settings = self.ivars().settings.borrow().clone();
@@ -426,7 +433,16 @@ impl SettingsWindow {
             menu_row("textformat", "Notch countdown", Some("How the time beside the notch looks"), Some((TimerStyle::ALL.iter().map(|t| t.name().to_owned()).collect(), settings.timer_style as usize, sel!(setFocusOption:)))),
             Row { symbol: "speaker.wave.2", name: "Sound", blurb: Some("Chime when a session ends or a task is due"), switch: Some((settings.sound, sel!(toggleSound:))), ..Row::default() },
         ];
-        let general = [Row { symbol: "power", name: "Open at login", switch: Some((opens_at_login(), sel!(toggleLogin:))), ..Row::default() }];
+        let general = [
+            Row { symbol: "power", name: "Open at login", switch: Some((opens_at_login(), sel!(toggleLogin:))), ..Row::default() },
+            Row {
+                symbol: "quote.bubble",
+                name: "Synced lyrics",
+                blurb: Some("Looks up the playing song on lrclib.net"),
+                switch: Some((settings.lyrics, sel!(toggleLyrics:))),
+                ..Row::default()
+            },
+        ];
         let sections_pane = self.pane("Sections", &sections, mtm);
         let insights = [Row {
             symbol: "macwindow", name: "Insights window", blurb: Some("Insights in a larger, resizable window"),

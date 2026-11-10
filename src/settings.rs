@@ -3,7 +3,7 @@
 //!
 //! Plain `key=value` lines: `hidden=clips,terminal`, `size=terminal:xtall,clips:tall`,
 //! `wing_music=1`, `wing_focus=1`, `calendar=1` (show today's calendar events), `reminders=1` (two-way sync with the Reminders list "NotchGo"), `linear=1` (a Linear key is in the Keychain; the key itself is never written here), `timer_style=plain|dots`, `focus=25`, `short_break=5`, `long_break=15`, `sound=1`,
-//! `remind=10` (minutes ahead, `0` for only at the time, `off` for none), `shape=auto|notch|bar`, `background=black|glass`.
+//! `remind=10` (minutes ahead, `0` for only at the time, `off` for none), `shape=auto|notch|bar`, `background=black|glass`, `lyrics=1` (look up synced lyrics online).
 //! A missing file, a missing key, an unknown key or a garbled line leaves the default,
 //! which shows everything.
 
@@ -192,6 +192,9 @@ pub struct Settings {
     pub remind: Option<u32>,
     pub shape: Shape,
     pub background: Background,
+    /// Whether the Playing tab looks up synced lyrics on lrclib.net. Off by default because it
+    /// sends the song's title and artist over the network.
+    pub lyrics: bool,
 }
 
 impl Default for Settings {
@@ -212,6 +215,7 @@ impl Default for Settings {
             remind: Some(10),
             shape: Shape::default(),
             background: Background::default(),
+            lyrics: false,
         }
     }
 }
@@ -299,6 +303,7 @@ fn parse(text: &str) -> Settings {
             "remind" => settings.remind = value.parse().ok().filter(|m| REMIND_CHOICES.contains(&Some(*m))).map_or(settings.remind, Some),
             "shape" => settings.shape = Shape::ALL.into_iter().find(|s| s.key() == value).unwrap_or(settings.shape),
             "background" => settings.background = Background::ALL.into_iter().find(|b| b.key() == value).unwrap_or(settings.background),
+            "lyrics" => settings.lyrics = flag(settings.lyrics),
             _ => {}
         }
     }
@@ -318,7 +323,7 @@ fn format(settings: &Settings) -> String {
     let hidden: Vec<&str> = SECTIONS.iter().zip(settings.hidden).filter(|(_, h)| *h).map(|(s, _)| s.key).collect();
     let sizes: Vec<String> = SECTIONS.iter().zip(settings.sizes).filter(|(_, z)| *z != Size::Compact).map(|(s, z)| format!("{}:{}", s.key, z.key())).collect();
     format!(
-        "hidden={}\nsize={}\nwing_music={}\nwing_focus={}\ncalendar={}\nreminders={}\nlinear={}\ntimer_style={}\nfocus={}\nshort_break={}\nlong_break={}\nsound={}\nremind={}\nshape={}\nbackground={}\n",
+        "hidden={}\nsize={}\nwing_music={}\nwing_focus={}\ncalendar={}\nreminders={}\nlinear={}\ntimer_style={}\nfocus={}\nshort_break={}\nlong_break={}\nsound={}\nremind={}\nshape={}\nbackground={}\nlyrics={}\n",
         hidden.join(","),
         sizes.join(","),
         settings.wing_music as u8,
@@ -334,6 +339,7 @@ fn format(settings: &Settings) -> String {
         settings.remind.map_or("off".to_owned(), |m| m.to_string()),
         settings.shape.key(),
         settings.background.key(),
+        settings.lyrics as u8,
     )
 }
 
@@ -360,6 +366,13 @@ mod tests {
         assert!(format(&settings).starts_with("hidden=clips,terminal\nsize=\nwing_music=0\nwing_focus=1\n"));
         assert_eq!(parse(&format(&settings)), settings);
         assert_eq!(parse(&format(&Settings::default())), Settings::default());
+    }
+
+    #[test]
+    fn lyrics_are_off_unless_the_file_says_so() {
+        assert!(!parse("").lyrics);
+        let settings = parse("lyrics=1\n");
+        assert!(settings.lyrics && format(&settings).ends_with("lyrics=1\n"));
     }
 
     #[test]
@@ -442,7 +455,7 @@ mod tests {
     fn appearance_defaults_to_auto_and_black() {
         let settings = parse("");
         assert_eq!((settings.shape, settings.background), (Shape::Auto, Background::Black));
-        assert!(format(&settings).ends_with("shape=auto\nbackground=black\n"));
+        assert!(format(&settings).contains("shape=auto\nbackground=black\n"));
     }
 
     #[test]

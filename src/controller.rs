@@ -27,6 +27,8 @@ use crate::settings::{self as prefs, Background, Settings, Shape, Size, TimerSty
 use crate::settings_window::SettingsWindow;
 use crate::day_plan::{self, Slot};
 use crate::url_command::{self, UrlCommand};
+use crate::lyrics::Lyrics;
+use crate::lyrics_view::LyricsView;
 use crate::days;
 use crate::export;
 use crate::focus_ring::FocusRing;
@@ -168,6 +170,7 @@ struct MusicView {
     elapsed: Retained<NSTextField>,
     total: Retained<NSTextField>,
     toggle: Retained<NSButton>,
+    lyrics: LyricsView,
 }
 
 struct TerminalPane {
@@ -251,6 +254,7 @@ pub struct State {
     wings: Cell<f64>,
     /// Runs only while the Music tab is visible and a track is playing.
     music_timer: RefCell<Option<Retained<NSTimer>>>,
+    lyrics: RefCell<Lyrics>,
     show_completed: Cell<bool>,
     /// First row of the page of today's list on screen; "+N more" moves it on, so only a few
     /// tasks show at a time.
@@ -634,6 +638,14 @@ define_class!(
         #[unsafe(method(musicNext:))]
         fn music_next(&self, _sender: &AnyObject) {
             self.ivars().now_playing.borrow_mut().send(Command::Next);
+        }
+
+        /// A lyrics lookup finished; see `Lyrics::want`.
+        #[unsafe(method(lyricsFetched:))]
+        fn lyrics_fetched(&self, _arg: Option<&AnyObject>) {
+            if self.ivars().lyrics.borrow_mut().take() {
+                self.render_music();
+            }
         }
 
         #[unsafe(method(nowPlayingChanged:))]
@@ -1338,10 +1350,15 @@ impl Controller {
     fn sync_music_timer(&self) {
         let state = self.ivars();
         let wanted = state.expanded.get() && state.tab.get() == Tab::Music && state.now_playing.borrow().playing();
+        // Lyrics need a finer tick than the clock, or a line would show up to a second late.
+        let every = if state.lyrics.borrow().has_lines() { 0.25 } else { 1.0 };
         let mut timer = state.music_timer.borrow_mut();
+        if timer.as_ref().is_some_and(|t| t.timeInterval() != every) {
+            timer.take().expect("checked above").invalidate();
+        }
         if wanted && timer.is_none() {
             *timer = Some(unsafe {
-                NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(1.0, self.target(), sel!(tickMusic:), None, true)
+                NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(every, self.target(), sel!(tickMusic:), None, true)
             });
         } else if !wanted && let Some(timer) = timer.take() {
             timer.invalidate();
@@ -1418,6 +1435,14 @@ impl Controller {
                 let fraction = if track.duration > 0.0 { track.position() / track.duration } else { 0.0 };
                 view.progress.setConstant(MUSIC_PROGRESS_WIDTH * fraction.clamp(0.0, 1.0));
                 view.toggle.setImage(Some(&w::symbol(if track.playing { "pause.fill" } else { "play.fill" })));
+            }
+            let mut lyrics = self.ivars().lyrics.borrow_mut();
+            match now.track.as_ref().filter(|_| self.ivars().settings.borrow().lyrics) {
+                Some(track) => {
+                    lyrics.want(&track.artist, &track.title, track.duration, self.target(), sel!(lyricsFetched:));
+                    view.lyrics.show(lyrics.around(track.position()));
+                }
+                None => view.lyrics.show(None),
             }
         }
         self.sync_music_timer();
@@ -2382,8 +2407,10 @@ impl Controller {
         let next = button("forward.fill", 20.0, sel!(musicNext:));
         let controls = w::stack(&[&previous, &toggle, &next], false, 10.0, mtm);
 
-        let column = w::stack(&[&title.view, &subtitle.view, &track, &times, &controls], true, 6.0, mtm);
+        let lyrics = LyricsView::new(MUSIC_PROGRESS_WIDTH, mtm);
+        let column = w::stack(&[&title.view, &subtitle.view, &lyrics.view, &track, &times, &controls], true, 6.0, mtm);
         column.setCustomSpacing_afterView(18.0, &subtitle.view);
+        column.setCustomSpacing_afterView(16.0, &lyrics.view);
         column.setCustomSpacing_afterView(12.0, &times);
         let now = w::stack(&[&art, &column], false, 24.0, mtm);
 
@@ -2396,7 +2423,7 @@ impl Controller {
             view.centerXAnchor().constraintEqualToAnchor(&body.centerXAnchor()).setActive(true);
             view.centerYAnchor().constraintEqualToAnchor(&body.centerYAnchor()).setActive(true);
         }
-        MusicView { body, now, empty, art, art_size, title, subtitle, progress, elapsed, total, toggle }
+        MusicView { body, now, empty, art, art_size, title, subtitle, progress, elapsed, total, toggle, lyrics }
     }
 
     /// A card holding the terminal view.
