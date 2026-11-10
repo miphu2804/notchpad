@@ -1,3 +1,29 @@
+### [2026-11-10 09:49 UTC+07:00] — [Docs] README layout
+
+**Done:**
+- README opens with Workspace and Insights screenshots (demo data), a contents line, and a Features table by section.
+- Integrations start with a summary table; Reminders now describes instant sync, last-edit-wins and `#tag` projects. Release links point to `miphu2804/notchpad`.
+
+**Changed  files:**
+- `README.md` — modified
+- `assets/screenshots/workspace.png`, `assets/screenshots/insights.png` — created
+
+**Flow explained:**
+- Screenshots are window-only captures (`screencapture -o -l`) of a probe build with a scratch HOME.
+
+### [2026-11-10 09:45 UTC+07:00] — [UI] Stat notes clear of charts, larger Playing tab, instant Reminders sync
+
+**Done:**
+- Insights stat cards: fixed ring card width, slimmer week bars and a wrapping note, so "this week · N tasks" no longer runs under the bars.
+- Playing: 220 pt artwork sized to the image's aspect (16:9 stream thumbnails have no bars), 24 pt title, larger controls.
+- Merged `feat/reminders-sync-gaps`: projects travel as a `#tag` in the notes, the side changed last wins, and `EKEventStoreChangedNotification` triggers a pass.
+
+**Changed  files:**
+- `src/insights_view.rs`, `src/week_bars.rs`, `src/controller.rs`, `src/reminders*.rs` — modified
+
+**Flow explained:**
+- `render_music` sets the artwork's width and height constraints from the image size inside a 220 pt box.
+
 ### [2026-11-10 09:36 UTC+07:00] — [Feature] Insights as a notch section
 
 **Done:**
@@ -106,27 +132,3 @@ The preferred ring size previously competed with text compression, producing pha
 
 **Flow explained:**
 `render_focus` updates the ring from elapsed/session time and builds four cycle states; daily focus minutes are read with the existing log refresh, not every tick. Verified: 100 tests pass, cycle rollover regression test, scratch-HOME AppKit Start/tick/Pause/+5/End assertions, and real-window renders for idle, quarter, half, near-end, long break, stopwatch and tall. Screenshots inspected under `/tmp/notchpad-pomo/shots/`; temporary hooks removed.
-
-### [2026-11-09 23:47 UTC+07:00] — [Fix] Direct entry points for Insights
-
-**Done:**
-- Settings › Sections now includes an Insights row with Open, and the notch header menu includes Open Insights. Both open the dashboard and select Insights directly; Settings closes out of the way.
-
-**Changed  files:**
-- `src/controller.rs`, `src/settings_window.rs`, `README.md` — modified
-
-**Flow explained:**
-The Settings window receives an `on_insights` callback backed by a weak controller reference. Both entry points use `show_insights_dashboard`, which opens the host window before selecting the dashboard-only tab. Verified: 99 tests pass; a temporary scratch-HOME hook clicked the actual Settings Open button and invoked the header action, asserting dashboard visibility and the Insights tab. Real window screenshots checked at `/tmp/notchpad-entry/shots/`; hooks removed.
-
-### [2026-11-09 23:09 UTC+07:00] — [UI] Rounded Insights petals and stacked Pulse
-
-**Done:**
-- Rounded, pastel petals replace thin month-ring strokes; idle days remain dots. Pulse uses full-height columns split by contribution, with faint columns on idle days. The week strip remains in Insights, not the pomodoro card.
-- Chart contribution is a daily estimate: pomodoro minutes are capped at session count × 25; remaining focus minutes are deep focus, and each task weighs 10 equivalent minutes. The tooltip explains this; it does not claim measured task time.
-
-**Changed  files:**
-- `src/insights.rs`, `src/insights_chart.rs`, `src/insights_view.rs`, `src/week_bars.rs`, `README.md` — modified
-
-**Flow explained:**
-`Day::effort` builds contribution weights, `shares` normalizes Pulse segments, and `dominant` selects petal colour. Charts still redraw only when their plot changes; no timer was added. Verified: 80 tests pass and real-window screenshots inspected with populated, empty and one-task scratch HOME fixtures under `/tmp/notchpad-finish/insights/`. Temporary rendering hooks removed. Idle CPU not yet remeasured.
-
