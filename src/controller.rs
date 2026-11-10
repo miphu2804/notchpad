@@ -62,9 +62,9 @@ const DEFAULT_NOTCH: (f64, f64) = (185.0, 32.0);
 /// Collapsed bar: about the height of the menu bar, flush with the top edge.
 const BAR: (f64, f64) = (160.0, 24.0);
 const FOCUS_CARD_WIDTH: f64 = 236.0;
-const MUSIC_PROGRESS_WIDTH: f64 = 340.0;
+const MUSIC_PROGRESS_WIDTH: f64 = 440.0;
 const ICON_TAB_WIDTH: f64 = 32.0;
-const ARTWORK_SIZE: f64 = 120.0;
+const ARTWORK_SIZE: f64 = 200.0;
 const MAX_CARD_ROWS: usize = 5;
 /// Calendar events shown above the tasks; the rest of today's stay in the calendar app.
 const MAX_EVENT_ROWS: usize = 3;
@@ -2194,8 +2194,8 @@ impl Controller {
             layer.setMasksToBounds(true);
         }
 
-        let title = Marquee::new(NSFont::systemFontOfSize_weight(17.0, unsafe { NSFontWeightBold }), white(0.95), MUSIC_PROGRESS_WIDTH, mtm);
-        let subtitle = Marquee::new(NSFont::systemFontOfSize_weight(12.0, unsafe { NSFontWeightRegular }), white(0.6), MUSIC_PROGRESS_WIDTH, mtm);
+        let title = Marquee::new(NSFont::systemFontOfSize_weight(24.0, unsafe { NSFontWeightBold }), white(0.95), MUSIC_PROGRESS_WIDTH, mtm);
+        let subtitle = Marquee::new(NSFont::systemFontOfSize_weight(14.0, unsafe { NSFontWeightRegular }), white(0.6), MUSIC_PROGRESS_WIDTH, mtm);
 
         let track = w::filled(&white(0.15), 1.5, mtm);
         fixed_size(&track, MUSIC_PROGRESS_WIDTH, 3.0);
@@ -2214,18 +2214,18 @@ impl Controller {
 
         let button = |symbol: &str, size: f64, action| {
             let button = w::icon_button(symbol, "", size, &white(0.9), self.target(), action, mtm);
-            fixed_size(&button, 40.0, 36.0);
+            fixed_size(&button, 52.0, 44.0);
             button
         };
-        let previous = button("backward.fill", 16.0, sel!(musicPrevious:));
-        let toggle = button("play.fill", 22.0, sel!(musicPlayPause:));
-        let next = button("forward.fill", 16.0, sel!(musicNext:));
+        let previous = button("backward.fill", 20.0, sel!(musicPrevious:));
+        let toggle = button("play.fill", 30.0, sel!(musicPlayPause:));
+        let next = button("forward.fill", 20.0, sel!(musicNext:));
         let controls = w::stack(&[&previous, &toggle, &next], false, 10.0, mtm);
 
         let column = w::stack(&[&title.view, &subtitle.view, &track, &times, &controls], true, 6.0, mtm);
-        column.setCustomSpacing_afterView(12.0, &subtitle.view);
-        column.setCustomSpacing_afterView(10.0, &times);
-        let now = w::stack(&[&art, &column], false, 20.0, mtm);
+        column.setCustomSpacing_afterView(18.0, &subtitle.view);
+        column.setCustomSpacing_afterView(12.0, &times);
+        let now = w::stack(&[&art, &column], false, 24.0, mtm);
 
         let empty = w::label("Nothing playing.", 12.0, unsafe { NSFontWeightRegular }, &white(0.45), mtm);
         let body = NSView::new(mtm);
