@@ -12,8 +12,8 @@ use crate::insights_chart::PURPLE;
 use crate::pomodoros::DAILY_GOAL;
 use crate::widgets::rgba;
 
-const BAR_WIDTH: f64 = 8.0;
-const GAP: f64 = 6.0;
+const BAR_WIDTH: f64 = 6.0;
+const GAP: f64 = 4.0;
 const BAR_AREA: f64 = 24.0;
 const LABEL_AREA: f64 = 11.0;
 /// Idle days keep a round dot so the week still reads as seven bars.
