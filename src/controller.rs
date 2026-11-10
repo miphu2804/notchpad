@@ -62,9 +62,11 @@ const DEFAULT_NOTCH: (f64, f64) = (185.0, 32.0);
 /// Collapsed bar: about the height of the menu bar, flush with the top edge.
 const BAR: (f64, f64) = (160.0, 24.0);
 const FOCUS_CARD_WIDTH: f64 = 236.0;
-const MUSIC_PROGRESS_WIDTH: f64 = 340.0;
+const MUSIC_PROGRESS_WIDTH: f64 = 440.0;
 const ICON_TAB_WIDTH: f64 = 32.0;
-const ARTWORK_SIZE: f64 = 120.0;
+/// The box artwork fits in; the view takes the image's own shape, so a wide video still has
+/// no bars.
+const ARTWORK_SIZE: f64 = 220.0;
 const MAX_CARD_ROWS: usize = 5;
 /// Calendar events shown above the tasks; the rest of today's stay in the calendar app.
 const MAX_EVENT_ROWS: usize = 3;
@@ -149,6 +151,8 @@ struct MusicView {
     now: Retained<NSStackView>,
     empty: Retained<NSTextField>,
     art: Retained<NSImageView>,
+    /// Width and height of `art`.
+    art_size: [Retained<NSLayoutConstraint>; 2],
     title: Marquee,
     subtitle: Marquee,
     progress: Retained<NSLayoutConstraint>,
@@ -1298,7 +1302,13 @@ impl Controller {
             view.now.setHidden(now.track.is_none());
             view.empty.setHidden(now.track.is_some());
             if let Some(track) = &now.track {
-                view.art.setImage(Some(&track.artwork.clone().unwrap_or_else(|| w::symbol("music.note"))));
+                let image = track.artwork.clone().unwrap_or_else(|| w::symbol("music.note"));
+                let size = if track.artwork.is_some() { image.size() } else { NSSize::new(1.0, 1.0) };
+                let aspect = if size.width > 0.0 && size.height > 0.0 { size.width / size.height } else { 1.0 };
+                let (width, height) = if aspect >= 1.0 { (ARTWORK_SIZE, ARTWORK_SIZE / aspect) } else { (ARTWORK_SIZE * aspect, ARTWORK_SIZE) };
+                view.art_size[0].setConstant(width);
+                view.art_size[1].setConstant(height);
+                view.art.setImage(Some(&image));
                 view.title.set_text(&track.title);
                 let credits = [track.artist.as_str(), track.album.as_str()];
                 view.subtitle.set_text(&credits.iter().filter(|c| !c.is_empty()).copied().collect::<Vec<_>>().join(" · "));
@@ -2188,14 +2198,18 @@ impl Controller {
         let art = NSImageView::new(mtm);
         art.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
         art.setContentTintColor(Some(&white(0.4)));
-        fixed_size(&art, ARTWORK_SIZE, ARTWORK_SIZE);
+        art.setTranslatesAutoresizingMaskIntoConstraints(false);
+        let art_size = [art.widthAnchor().constraintEqualToConstant(ARTWORK_SIZE), art.heightAnchor().constraintEqualToConstant(ARTWORK_SIZE)];
+        for constraint in &art_size {
+            constraint.setActive(true);
+        }
         w::paint(&art, &white(0.08), 14.0);
         if let Some(layer) = art.layer() {
             layer.setMasksToBounds(true);
         }
 
-        let title = Marquee::new(NSFont::systemFontOfSize_weight(17.0, unsafe { NSFontWeightBold }), white(0.95), MUSIC_PROGRESS_WIDTH, mtm);
-        let subtitle = Marquee::new(NSFont::systemFontOfSize_weight(12.0, unsafe { NSFontWeightRegular }), white(0.6), MUSIC_PROGRESS_WIDTH, mtm);
+        let title = Marquee::new(NSFont::systemFontOfSize_weight(24.0, unsafe { NSFontWeightBold }), white(0.95), MUSIC_PROGRESS_WIDTH, mtm);
+        let subtitle = Marquee::new(NSFont::systemFontOfSize_weight(14.0, unsafe { NSFontWeightRegular }), white(0.6), MUSIC_PROGRESS_WIDTH, mtm);
 
         let track = w::filled(&white(0.15), 1.5, mtm);
         fixed_size(&track, MUSIC_PROGRESS_WIDTH, 3.0);
@@ -2214,18 +2228,18 @@ impl Controller {
 
         let button = |symbol: &str, size: f64, action| {
             let button = w::icon_button(symbol, "", size, &white(0.9), self.target(), action, mtm);
-            fixed_size(&button, 40.0, 36.0);
+            fixed_size(&button, 52.0, 44.0);
             button
         };
-        let previous = button("backward.fill", 16.0, sel!(musicPrevious:));
-        let toggle = button("play.fill", 22.0, sel!(musicPlayPause:));
-        let next = button("forward.fill", 16.0, sel!(musicNext:));
+        let previous = button("backward.fill", 20.0, sel!(musicPrevious:));
+        let toggle = button("play.fill", 30.0, sel!(musicPlayPause:));
+        let next = button("forward.fill", 20.0, sel!(musicNext:));
         let controls = w::stack(&[&previous, &toggle, &next], false, 10.0, mtm);
 
         let column = w::stack(&[&title.view, &subtitle.view, &track, &times, &controls], true, 6.0, mtm);
-        column.setCustomSpacing_afterView(12.0, &subtitle.view);
-        column.setCustomSpacing_afterView(10.0, &times);
-        let now = w::stack(&[&art, &column], false, 20.0, mtm);
+        column.setCustomSpacing_afterView(18.0, &subtitle.view);
+        column.setCustomSpacing_afterView(12.0, &times);
+        let now = w::stack(&[&art, &column], false, 24.0, mtm);
 
         let empty = w::label("Nothing playing.", 12.0, unsafe { NSFontWeightRegular }, &white(0.45), mtm);
         let body = NSView::new(mtm);
@@ -2236,7 +2250,7 @@ impl Controller {
             view.centerXAnchor().constraintEqualToAnchor(&body.centerXAnchor()).setActive(true);
             view.centerYAnchor().constraintEqualToAnchor(&body.centerYAnchor()).setActive(true);
         }
-        MusicView { body, now, empty, art, title, subtitle, progress, elapsed, total, toggle }
+        MusicView { body, now, empty, art, art_size, title, subtitle, progress, elapsed, total, toggle }
     }
 
     /// A card holding the terminal view.
