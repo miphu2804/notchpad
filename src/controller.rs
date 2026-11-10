@@ -777,7 +777,8 @@ define_class!(
         #[unsafe(method(reload:))]
         fn reload(&self, _timer: &NSTimer) {
             self.remind_tasks();
-            if self.ivars().settings.borrow().calendar && *self.ivars().events_day.borrow() != days::key(0) {
+            let stale = *self.ivars().events_day.borrow() != days::key(0) || self.ivars().events.borrow().iter().any(Event::ended);
+            if self.ivars().settings.borrow().calendar && stale {
                 self.load_events();
                 self.render_task_card();
             }
