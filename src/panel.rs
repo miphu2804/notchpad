@@ -72,15 +72,13 @@ pub enum FileDrag {
 
 pub struct ShapeIvars {
     on_file_drag: Box<dyn Fn(FileDrag)>,
-    /// Flat bar on the top edge instead of the notch silhouette.
-    bar: Cell<bool>,
     glass: Cell<bool>,
     /// Behind everything else; visible only for the glass background.
     effect: Retained<NSView>,
 }
 
 define_class!(
-    /// Notch silhouette (or flat bar), black or glass: concave ears at the top corners flowing into the bezel,
+    /// Notch silhouette, black or glass: concave ears at the top corners flowing into the bezel,
     /// rounded bottom corners. Radii follow the current height, so the shape morphs
     /// smoothly while the window animates between collapsed and expanded.
     /// Also the drop target for files dragged onto the notch.
@@ -132,7 +130,7 @@ impl NotchShape {
     pub fn new(frame: NSRect, on_file_drag: Box<dyn Fn(FileDrag)>, mtm: MainThreadMarker) -> Retained<Self> {
         let effect = effect_view(mtm);
         effect.setHidden(true);
-        let ivars = ShapeIvars { on_file_drag, bar: Cell::new(false), glass: Cell::new(false), effect };
+        let ivars = ShapeIvars { on_file_drag, glass: Cell::new(false), effect };
         let this = mtm.alloc::<Self>().set_ivars(ivars);
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         this.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
@@ -146,19 +144,19 @@ impl NotchShape {
         this
     }
 
-    pub fn set_look(&self, bar: bool, glass: bool) {
+    pub fn set_look(&self, glass: bool) {
         let s = self.ivars();
-        s.bar.set(bar);
         s.glass.set(glass);
         s.effect.setHidden(!glass);
         self.update_mask();
         self.setNeedsDisplay(true);
     }
 
-    /// The silhouette, from the view's own size: notch with ears, or flat bar.
+    /// The silhouette, from the view's own size. The Bar shape is the same silhouette at a
+    /// smaller size, so it reads as a notch on any display.
     fn outline(&self) -> Retained<NSBezierPath> {
         let b = self.bounds();
-        outline(b.size.width, b.size.height, self.ivars().bar.get())
+        outline(b.size.width, b.size.height)
     }
 
     fn update_mask(&self) {
@@ -189,37 +187,23 @@ fn effect_view(mtm: MainThreadMarker) -> Retained<NSView> {
     }
 }
 
-/// Radius of the bar's rounded bottom corners: small, a little larger as the bar opens.
-fn bar_radius(height: f64) -> f64 {
-    (height * 0.08).clamp(5.0, 12.0)
-}
-
-/// Silhouette in a `w` by `h` view whose ears are reserved on both sides, so the frames
-/// are the same for both shapes.
-fn outline(w: f64, h: f64, bar: bool) -> Retained<NSBezierPath> {
+/// Silhouette in a `w` by `h` view, ears included.
+fn outline(w: f64, h: f64) -> Retained<NSBezierPath> {
     // Cubic Bézier factor for a quarter circle.
     const K: f64 = 0.5523;
     let e = ear(h);
-    let r = if bar { bar_radius(h) } else { bottom_radius(h) }.min((w - 2.0 * e) / 2.0);
+    let r = bottom_radius(h).min((w - 2.0 * e) / 2.0);
     let p = |x: f64, y: f64| NSPoint::new(x, y);
 
     let path = NSBezierPath::bezierPath();
-    if bar {
-        path.moveToPoint(p(e, h));
-    } else {
-        path.moveToPoint(p(0.0, h));
-        path.curveToPoint_controlPoint1_controlPoint2(p(e, h - e), p(K * e, h), p(e, h - e + K * e));
-    }
+    path.moveToPoint(p(0.0, h));
+    path.curveToPoint_controlPoint1_controlPoint2(p(e, h - e), p(K * e, h), p(e, h - e + K * e));
     path.lineToPoint(p(e, r));
     path.curveToPoint_controlPoint1_controlPoint2(p(e + r, 0.0), p(e, r - K * r), p(e + r - K * r, 0.0));
     path.lineToPoint(p(w - e - r, 0.0));
     path.curveToPoint_controlPoint1_controlPoint2(p(w - e, r), p(w - e - r + K * r, 0.0), p(w - e, r - K * r));
-    if bar {
-        path.lineToPoint(p(w - e, h));
-    } else {
-        path.lineToPoint(p(w - e, h - e));
-        path.curveToPoint_controlPoint1_controlPoint2(p(w, h), p(w - e, h - e + K * e), p(w - K * e, h));
-    }
+    path.lineToPoint(p(w - e, h - e));
+    path.curveToPoint_controlPoint1_controlPoint2(p(w, h), p(w - e, h - e + K * e), p(w - K * e, h));
     path.closePath();
     path
 }
@@ -229,18 +213,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bar_corners_stay_small_and_grow_with_the_panel() {
-        assert_eq!(bar_radius(24.0), 5.0);
-        assert!(bar_radius(150.0) > bar_radius(24.0));
-        assert_eq!(bar_radius(330.0), 12.0);
-    }
-
-    #[test]
-    fn bar_outline_spans_the_view_minus_the_ears() {
-        let bounds = outline(200.0, 24.0, true).bounds();
-        let e = ear(24.0);
-        assert_eq!((bounds.origin.x, bounds.size.width, bounds.size.height), (e, 200.0 - 2.0 * e, 24.0));
-        // The notch shape reaches the view's edges through its ears.
-        assert_eq!(outline(200.0, 24.0, false).bounds().size.width, 200.0);
+    fn outline_reaches_the_view_edges_through_its_ears() {
+        for (w, h) in [(160.0, 24.0), (185.0, 32.0), (640.0, 330.0)] {
+            let bounds = outline(w, h).bounds();
+            assert_eq!((bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height), (0.0, 0.0, w, h));
+        }
     }
 }

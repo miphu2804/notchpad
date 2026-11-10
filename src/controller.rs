@@ -990,16 +990,16 @@ impl Controller {
         let (collapsed, expanded, safe_top) = self.rects();
         let ui = self.ui();
         let settings = self.ivars().settings.borrow();
-        let (bar, glass) = (is_bar(self.mtm(), settings.shape), settings.background == Background::Glass);
+        let glass = settings.background == Background::Glass;
         ui.header_height.setConstant(header_band(safe_top));
         for constraint in &ui.notch_gaps {
             constraint.setConstant(notch_gap(collapsed, safe_top));
         }
         ui.activity.center_in(collapsed.size.height - TOP_SLOP);
         if let Some(Ok(shape)) = ui.panel.contentView().map(|view| view.downcast::<NotchShape>()) {
-            shape.set_look(bar, glass);
+            shape.set_look(glass);
         }
-        ui.banner.set_look(bar, glass);
+        ui.banner.set_look(glass);
         self.place(collapsed, expanded);
     }
 
@@ -2538,10 +2538,6 @@ fn notch_screen(mtm: MainThreadMarker) -> Retained<NSScreen> {
         .find(|s| s.safeAreaInsets().top > 0.0)
         .or_else(|| NSScreen::mainScreen(mtm))
         .expect("no screen available")
-}
-
-fn is_bar(mtm: MainThreadMarker, shape: Shape) -> bool {
-    shape.is_bar(notch_screen(mtm).safeAreaInsets().top > 0.0)
 }
 
 /// Returns (collapsed rect over the notch or bar, expanded rect for `size`, safe-area height the

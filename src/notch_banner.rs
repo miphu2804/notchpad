@@ -211,10 +211,10 @@ impl NotchBanner {
         self.panel.contentView().expect("content view set in new")
     }
 
-    /// Draws the card as a bar or notch, black or glass, like the notch it hangs from.
-    pub fn set_look(&self, bar: bool, glass: bool) {
+    /// Draws the card black or glass, like the notch it hangs from.
+    pub fn set_look(&self, glass: bool) {
         if let Ok(shape) = self.content().downcast::<NotchShape>() {
-            shape.set_look(bar, glass);
+            shape.set_look(glass);
         }
     }
 
