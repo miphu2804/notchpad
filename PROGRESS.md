@@ -1,3 +1,15 @@
+### [2026-11-10 09:36 UTC+07:00] — [Feature] Insights as a notch section
+
+**Done:**
+- Insights is a fifth notch section (chart icon after Terminal), shown by default and switchable in Settings › Sections; Settings' "Insights window" still opens it in the dashboard.
+- The page fits the compact notch: month rings beside a 2×2 grid of the stat cards. The moon calendar and its intensity buckets are gone; the ring dropped its legend (now in the tooltip), names "today"/"start" at the top and uses the card's full height.
+
+**Changed  files:**
+- `src/settings.rs`, `src/controller.rs`, `src/settings_window.rs`, `src/insights.rs`, `src/insights_chart.rs`, `src/insights_view.rs` — modified
+
+**Flow explained:**
+- `Tab::Insights` indexes `SECTIONS[4]`, so hiding and sizing go through the same settings arrays as the other sections; the dashboard shows Insights even while the notch hides it.
+
 ### [2026-11-10 09:14 UTC+07:00] — [Fix] Hide in Mission Control, drop finished events
 
 **Done:**
@@ -118,15 +130,3 @@ The Settings window receives an `on_insights` callback backed by a weak controll
 **Flow explained:**
 `Day::effort` builds contribution weights, `shares` normalizes Pulse segments, and `dominant` selects petal colour. Charts still redraw only when their plot changes; no timer was added. Verified: 80 tests pass and real-window screenshots inspected with populated, empty and one-task scratch HOME fixtures under `/tmp/notchpad-finish/insights/`. Temporary rendering hooks removed. Idle CPU not yet remeasured.
 
-### [2026-11-09 23:55 UTC+07:00] — [Refactor] Week strip moved from the focus card to Insights
-
-**Done:**
-- The pomodoro card no longer shows the week bars, "15m · 4 tasks" and the streak line; its column stays centred.
-- Insights' Focus time card now says "this week · N tasks"; streak and week bars were already there.
-- Removed `pomodoros::Week`, `week()` and the controller's `week` state; today's count comes from `Insights::build`.
-
-**Changed  files:**
-- `src/controller.rs`, `src/pomodoros.rs`, `src/insights_view.rs`, `README.md` — modified
-
-**Flow explained:**
-`reload_done_today` builds `Insights` from the log on each refresh and keeps today's pomodoro count for the goal row and break messages. Verified with 80 tests (the five `pomodoros` week tests went with the code; `insights` tests cover the same parsing) and renders of Workspace and Insights.
