@@ -5,6 +5,7 @@
 //! Access is asked for only by [`Reminders::request_access`], which runs when the user turns the
 //! sync on; every other call just reads the current authorization.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -13,14 +14,15 @@ use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, Sel};
 use objc2_event_kit::{EKCalendar, EKEntityType, EKEventStore, EKReminder};
-use objc2_foundation::{NSArray, NSDateComponents, NSError, NSString};
+use objc2_foundation::{NSArray, NSDate, NSDateComponents, NSError, NSString};
 
 use crate::calendar::{self, Access};
 use crate::reminders_sync::{self, Changes, PREFIX, Reminder};
 use crate::store::Task;
 
 const LIST: &str = "NotchGo";
-/// How often the phone's edits are picked up when nothing changed here.
+/// How often the phone's edits are picked up when nothing changed here and no
+/// `EKEventStoreChangedNotification` arrived (see [`Reminders::store_changed`]).
 const SYNC_EVERY: Duration = Duration::from_secs(30);
 /// `NSDateComponentUndefined`: a component the reminder does not set.
 const UNDEFINED: isize = isize::MAX;
@@ -32,8 +34,9 @@ pub fn access() -> Access {
 #[derive(Default)]
 pub struct Reminders {
     store: Option<Retained<EKEventStore>>,
-    /// Filled by the fetch's completion; `None` until then, or when EventKit returned nothing.
-    fetched: Arc<Mutex<Option<Vec<Reminder>>>>,
+    /// Filled by the fetch's completion, each reminder with its last modification; `None` until
+    /// then, or when EventKit returned nothing.
+    fetched: Arc<Mutex<Option<Vec<(Reminder, Option<SystemTime>)>>>>,
     pending: bool,
     /// The list was created by the fetch in flight, so an empty result is not a deletion.
     list_created: bool,
@@ -57,6 +60,13 @@ impl Reminders {
     /// Whether a pass is due: none in flight, and the tasks changed or the phone may have.
     pub fn due(&self, tasks_modified: Option<SystemTime>) -> bool {
         !self.pending && (tasks_modified != self.synced || self.last.is_none_or(|at| at.elapsed() >= SYNC_EVERY))
+    }
+
+    /// The Reminders database changed (the phone's edit arrived through iCloud, or this app
+    /// wrote): the next [`due`](Self::due) check runs a pass without waiting for the interval.
+    /// A pass after this app's own write finds nothing to change, so it does not loop.
+    pub fn store_changed(&mut self) {
+        self.last = None;
     }
 
     /// Reads every reminder of the list (creating the list on first use); `selector` runs on the
@@ -84,11 +94,14 @@ impl Reminders {
         }
     }
 
-    /// The finished fetch and whether its list was new; `None` when EventKit failed.
-    pub fn take(&mut self) -> Option<(Vec<Reminder>, bool)> {
+    /// The finished fetch, each reminder's last modification by id, and whether the list was
+    /// new; `None` when EventKit failed.
+    pub fn take(&mut self) -> Option<(Vec<Reminder>, HashMap<String, SystemTime>, bool)> {
         self.pending = false;
         let list_created = std::mem::take(&mut self.list_created);
-        self.fetched.lock().unwrap().take().map(|found| (found, list_created))
+        let found = self.fetched.lock().unwrap().take()?;
+        let modified = found.iter().filter_map(|(r, at)| Some((r.id.clone(), (*at)?))).collect();
+        Some((found.into_iter().map(|(r, _)| r).collect(), modified, list_created))
     }
 
     /// Writes `changes` to the list and creates a reminder for each new local task, linking it.
@@ -159,22 +172,29 @@ fn find(store: &EKEventStore, id: &str) -> Option<Retained<EKReminder>> {
     unsafe { store.calendarItemWithIdentifier(&NSString::from_str(id)) }?.downcast::<EKReminder>().ok()
 }
 
-fn read(reminder: &EKReminder) -> Reminder {
+fn read(reminder: &EKReminder) -> (Reminder, Option<SystemTime>) {
     let (day, time) = unsafe { reminder.dueDateComponents() }.map_or_else(Default::default, |due| due_strings(&due));
-    Reminder {
+    let fields = Reminder {
         id: unsafe { reminder.calendarItemIdentifier() }.to_string(),
         text: unsafe { reminder.title() }.to_string(),
         day,
         time,
         priority: priority_name(unsafe { reminder.priority() }).to_owned(),
+        project: reminders_sync::project_of(&notes(reminder)),
         done: unsafe { reminder.isCompleted() },
-    }
+    };
+    (fields, unsafe { reminder.lastModifiedDate() }.map(|date| system_time(&date)))
 }
 
 fn write(reminder: &EKReminder, fields: &Reminder) {
+    let notes = notes(reminder);
+    let tagged = reminders_sync::with_project(&notes, &fields.project);
     unsafe {
         reminder.setTitle(Some(&NSString::from_str(&reminders_sync::clean(&fields.text))));
         reminder.setDueDateComponents(due_components(&fields.day, &fields.time).as_deref());
+        if tagged != notes {
+            reminder.setNotes((!tagged.is_empty()).then(|| NSString::from_str(&tagged)).as_deref());
+        }
         // Keep the phone's exact 1-9 when it already means the same level.
         if priority_name(reminder.priority()) != fields.priority {
             reminder.setPriority(priority_value(&fields.priority));
@@ -183,6 +203,14 @@ fn write(reminder: &EKReminder, fields: &Reminder) {
             reminder.setCompleted(fields.done);
         }
     }
+}
+
+fn notes(reminder: &EKReminder) -> String {
+    unsafe { reminder.notes() }.map(|n| n.to_string()).unwrap_or_default()
+}
+
+fn system_time(date: &NSDate) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs_f64(date.timeIntervalSince1970().max(0.0))
 }
 
 fn due_strings(due: &NSDateComponents) -> (String, String) {
