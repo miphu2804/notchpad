@@ -8,7 +8,7 @@ use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSFontWeightBold, NSFontWeightMedium, NSFontWeightRegular,
-    NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSScrollView, NSStackView, NSStackViewDistribution, NSTextAlignment, NSTextField,
+    NSFontWeightSemibold, NSImageView, NSLayoutAttribute, NSLineBreakMode, NSScrollView, NSStackView, NSStackViewDistribution, NSTextAlignment, NSTextField,
     NSView,
 };
 use objc2_foundation::{NSObject, NSString};
@@ -20,6 +20,9 @@ use crate::week_bars::{self, WeekBars};
 use crate::widgets::{self as w, SURFACE, rgba};
 
 const GAP: f64 = 12.0;
+const RING_CARD_WIDTH: f64 = 316.0;
+/// Room for a note beside a stat card's chart; longer notes wrap onto a second line.
+const NOTE_BESIDE_CHART: f64 = 66.0;
 const CARD_INSET: f64 = 16.0;
 
 struct Parts {
@@ -152,7 +155,10 @@ impl InsightsView {
         let petals = Chart::new(Plot::Blank, mtm);
         let petals_card = card("Month rings", &petals, mtm);
         petals.setToolTip(Some(&NSString::from_str("Estimated contribution: pomodoros = min(focus minutes, sessions × 25); deep focus = remaining minutes; tasks = completed tasks × 10. Purple: mostly deep focus; amber: mostly pomodoros; green: mostly tasks. Petal length is the day against the busiest; colours show shares, not measured task time.")));
-        let rows = pair(&petals_card, &stats);
+        // The ring is limited by the notch's height, so a fixed width for its card loses nothing
+        // and leaves the stat cards room for their charts beside the text.
+        petals_card.widthAnchor().constraintEqualToConstant(RING_CARD_WIDTH).setActive(true);
+        let rows = w::stack(&[&petals_card, &stats], false, GAP, mtm);
         rows.setAlignment(NSLayoutAttribute::Height);
         let page = Chart::new(Plot::Blank, mtm);
         page.addSubview(&rows);
@@ -256,6 +262,10 @@ fn stat_card(title: &str, symbol: &str, hue: Rgb, chart: Option<&NSView>, note: 
         card.addSubview(chart);
         chart.trailingAnchor().constraintEqualToAnchor_constant(&card.trailingAnchor(), -CARD_INSET).setActive(true);
         chart.bottomAnchor().constraintEqualToAnchor_constant(&card.bottomAnchor(), -14.0).setActive(true);
+        // The note shares the bottom row with the chart, so it wraps rather than running under it.
+        note.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+        note.setPreferredMaxLayoutWidth(NOTE_BESIDE_CHART);
+        note.trailingAnchor().constraintLessThanOrEqualToAnchor_constant(&chart.leadingAnchor(), -8.0).setActive(true);
     }
     column.trailingAnchor().constraintLessThanOrEqualToAnchor_constant(&card.trailingAnchor(), -CARD_INSET).setActive(true);
     (card, value, note)
