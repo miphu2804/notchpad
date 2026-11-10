@@ -1856,7 +1856,11 @@ impl Controller {
         unsafe { panel.setReleasedWhenClosed(false) };
         panel.setLevel(NSMainMenuWindowLevel + 1);
         panel.setCollectionBehavior(
+            // Stationary keeps the drawn notch over the hardware one while a Desktop swipe
+            // slides everything else; Transient alone slides it too. Transient still asks
+            // Mission Control to hide it.
             NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::Stationary
                 | NSWindowCollectionBehavior::Transient
                 | NSWindowCollectionBehavior::FullScreenAuxiliary
                 | NSWindowCollectionBehavior::IgnoresCycle,

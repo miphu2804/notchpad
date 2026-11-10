@@ -80,7 +80,11 @@ impl NotchBanner {
         // Above the notch panel, so the card reads as the notch growing.
         panel.setLevel(NSMainMenuWindowLevel + 2);
         panel.setCollectionBehavior(
+            // Stationary keeps the drawn notch over the hardware one while a Desktop swipe
+            // slides everything else; Transient alone slides it too. Transient still asks
+            // Mission Control to hide it.
             NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::Stationary
                 | NSWindowCollectionBehavior::Transient
                 | NSWindowCollectionBehavior::FullScreenAuxiliary
                 | NSWindowCollectionBehavior::IgnoresCycle,

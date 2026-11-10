@@ -1,3 +1,14 @@
+### [2026-11-10 10:03 UTC+07:00] — [Fix] Notch stays still during Desktop swipes
+
+**Done:**
+- The notch panel and banner are `Stationary` and `Transient` together: the drawn notch no longer slides off the hardware notch on a Desktop swipe, and Mission Control still hides it (confirmed on the user's Mac).
+
+**Changed  files:**
+- `src/controller.rs`, `src/notch_banner.rs` — modified
+
+**Flow explained:**
+- `Transient` alone (set to hide the panel in Mission Control) let the window move with the Space transition; adding `Stationary` pins it while keeping the Mission Control hiding.
+
 ### [2026-11-10 09:49 UTC+07:00] — [Docs] README layout
 
 **Done:**
@@ -119,16 +130,3 @@ Settings starts a worker and polls its result on the main thread; PKCE/state-val
 
 **Flow explained:**
 The preferred ring size previously competed with text compression, producing phase/count label heights of 8/7 pt instead of their 14 pt intrinsic heights and a zero-height task row. Lowering the ring preference to 200 and its minimum to 120 yields a 123 pt ring and restores every text row to its intrinsic height. Verified: reproduced before/after on the actual expanded notch, asserted all seven label heights, inspected `/tmp/notchpad-clipping/before.png` and `after.png`, and ran 100 passing tests. Temporary measurement/render hooks removed.
-
-### [2026-11-10 00:06 UTC+07:00] — [UI] Pomodoro ring and four pixel tomatoes
-
-**Done:**
-- Large elapsed-progress ring around the timer, four unchanged pixel sprites for the current cycle, separate daily count and focus minutes. The current tomato ripens green → orange → red; completed cycles stay fully red during the long break.
-- The ring uses the existing controller timer, changes to green on breaks, and stays neutral in the unbounded stopwatch. Its preferred 164 pt size fits the compact card.
-
-**Changed  files:**
-- `src/focus_ring.rs` — created
-- `src/controller.rs`, `src/main.rs`, `src/tomato_view.rs`, `README.md` — modified
-
-**Flow explained:**
-`render_focus` updates the ring from elapsed/session time and builds four cycle states; daily focus minutes are read with the existing log refresh, not every tick. Verified: 100 tests pass, cycle rollover regression test, scratch-HOME AppKit Start/tick/Pause/+5/End assertions, and real-window renders for idle, quarter, half, near-end, long break, stopwatch and tall. Screenshots inspected under `/tmp/notchpad-pomo/shots/`; temporary hooks removed.
