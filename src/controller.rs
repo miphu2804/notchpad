@@ -63,8 +63,9 @@ const SCREEN_MARGIN: f64 = 40.0;
 pub const TOP_SLOP: f64 = 1.0;
 /// MacBook Pro 14" (M4 Pro) notch, used on displays without one.
 const DEFAULT_NOTCH: (f64, f64) = (185.0, 32.0);
-/// Collapsed bar: about the height of the menu bar, flush with the top edge.
-const BAR: (f64, f64) = (160.0, 24.0);
+/// Compact on displays without a cut-out; live wings add room only when needed.
+/// The height leaves 3 pt above and below the 22 pt artwork.
+const BAR: (f64, f64) = (80.0, 28.0);
 const FOCUS_CARD_WIDTH: f64 = 236.0;
 const MUSIC_PROGRESS_WIDTH: f64 = 440.0;
 const ICON_TAB_WIDTH: f64 = 32.0;
@@ -2823,6 +2824,23 @@ mod tests {
     }
 
     #[test]
+    fn bar_stays_compact_on_a_13_inch_m1_display() {
+        // Default and More Space logical resolutions on the 2020 13-inch MacBook Pro.
+        for (width, height) in [(1440.0, 900.0), (1680.0, 1050.0)] {
+            let screen = NSRect::new(NSPoint::ZERO, NSSize::new(width, height));
+            let (bar, expanded) = frames_at_top(screen, BAR.0, BAR.1, HEIGHT);
+            let (notch, _) = frames_at_top(screen, DEFAULT_NOTCH.0, DEFAULT_NOTCH.1, HEIGHT);
+            assert_eq!(bar.size.width, 92.0);
+            assert_eq!(bar.size.height - TOP_SLOP, 28.0);
+            assert!(bar.size.width < notch.size.width / 2.0);
+            assert_eq!(notch_gap(bar, 0.0), 0.0);
+            assert_eq!(expanded.size.height, HEIGHT + TOP_SLOP);
+            assert!(expanded.size.width < width);
+            assert!(expanded.origin.y > SCREEN_MARGIN);
+        }
+    }
+
+    #[test]
     fn panel_tracks_screen_top_and_center_in_every_arrangement() {
         // Main, above, below, left and right: AppKit coordinates need not start at zero.
         for (x, y, w, h) in [
@@ -2833,7 +2851,7 @@ mod tests {
             (1800.0, 200.0, 2560.0, 1440.0),
         ] {
             let screen = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
-            for (width, height) in [DEFAULT_NOTCH, (185.0, 38.0)] {
+            for (width, height) in [BAR, DEFAULT_NOTCH, (185.0, 38.0)] {
                 let (collapsed, expanded) = frames_at_top(screen, width, height, HEIGHT);
                 for rect in [collapsed, expanded] {
                     assert_eq!(rect.origin.y + rect.size.height, y + h + TOP_SLOP);

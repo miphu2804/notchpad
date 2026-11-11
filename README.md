@@ -36,7 +36,7 @@ Around the sections:
 
 ## Install
 
-Requires macOS 14 or later. The release build is for Apple Silicon; build from source for an Intel Mac. On a display without a notch, NotchGo draws its own.
+Requires macOS 14 or later. The release build is for Apple Silicon; build from source for an Intel Mac. On a display without a notch (including the 13-inch MacBook Pro M1, 2020), **Settings › Notch › Shape: Auto** uses a compact dynamic bar. It widens for music or a focus countdown and shrinks when idle; hover it or press **Option-N** for the full panel.
 
 **Release.** Download the zip from the [latest release](https://github.com/miphu2804/notchpad/releases/latest), unzip it and drag **NotchGo.app** into **Applications**. The app is not notarized, so macOS blocks the first launch: open **System Settings › Privacy & Security** and click **Open Anyway**, or run:
 

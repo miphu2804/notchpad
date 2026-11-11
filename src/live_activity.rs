@@ -69,6 +69,11 @@ impl Activity<'_> {
     }
 }
 
+/// Pixel-aligned vertical position shared by initial layout and screen/shape changes.
+fn row_y(height: f64, content_height: f64) -> f64 {
+    ((height - content_height) / 2.0).round()
+}
+
 pub struct LiveActivity {
     pub view: Retained<NSView>,
     art: Retained<NSImageView>,
@@ -91,7 +96,7 @@ impl LiveActivity {
         view.setAlphaValue(0.0);
 
         let notch_height = collapsed.size.height - crate::controller::TOP_SLOP;
-        let y = ((notch_height - ART) / 2.0).round();
+        let y = row_y(notch_height, ART);
         let right_edge = collapsed.size.width - ear - WING;
 
         let art = NSImageView::new(mtm);
@@ -133,12 +138,12 @@ impl LiveActivity {
         // panel's corner and start clear of the hardware notch once the panel grows by TIME_WING.
         // Label height is its line height; centre it on the artwork row.
         let time_x = collapsed.size.width - ear - ART_INSET - TIME_WIDTH;
-        time.setFrame(NSRect::new(NSPoint::new(time_x, y + (ART - 16.0) / 2.0), NSSize::new(TIME_WIDTH, 16.0)));
+        time.setFrame(NSRect::new(NSPoint::new(time_x, row_y(notch_height, 16.0)), NSSize::new(TIME_WIDTH, 16.0)));
         time.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
 
         // Right-aligned in the label's place and centred on the artwork row.
         let size = NSSize::new(COLS as f64 * DOT_PITCH, ROWS as f64 * DOT_PITCH);
-        let origin = NSPoint::new(time_x + TIME_WIDTH - size.width, y + ((ART - size.height) / 2.0).round());
+        let origin = NSPoint::new(time_x + TIME_WIDTH - size.width, row_y(notch_height, size.height));
         let dots = NSView::initWithFrame(mtm.alloc(), NSRect::new(origin, size));
         dots.setWantsLayer(true);
         dots.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
@@ -164,9 +169,9 @@ impl LiveActivity {
 
     /// Centres the wings' contents vertically in a collapsed panel `notch_height` tall.
     pub fn center_in(&self, notch_height: f64) {
-        let y = ((notch_height - ART) / 2.0).round();
-        for (view, dy) in [(&*self.art as &NSView, 0.0), (&*self.bars, 0.0), (&*self.time, (ART - 16.0) / 2.0)] {
-            view.setFrameOrigin(NSPoint::new(view.frame().origin.x, y + dy));
+        for view in [&*self.art as &NSView, &*self.bars, &*self.time, &*self.dots] {
+            let frame = view.frame();
+            view.setFrameOrigin(NSPoint::new(frame.origin.x, row_y(notch_height, frame.size.height)));
         }
     }
 
@@ -230,5 +235,34 @@ impl LiveActivity {
             bounce.setTimingFunction(Some(&ease));
             bar.addAnimation_forKey(&bounce, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activity_rows_fit_and_recenter_between_bar_and_notch() {
+        for height in [24.0, 28.0, 32.0, 38.0] {
+            for content_height in [ART, 16.0, ROWS as f64 * DOT_PITCH] {
+                let y = row_y(height, content_height);
+                assert!(y >= 0.0 && y + content_height <= height);
+                assert!((y + content_height / 2.0 - height / 2.0).abs() <= 0.5);
+            }
+        }
+        assert_ne!(row_y(28.0, ROWS as f64 * DOT_PITCH), row_y(38.0, ROWS as f64 * DOT_PITCH));
+    }
+
+    #[test]
+    fn bar_only_grows_for_visible_activities() {
+        let idle = Activity { music: None, countdown: None, dots: None };
+        let music = Activity { music: Some(None), countdown: None, dots: None };
+        let focus = Activity { music: None, countdown: Some(("25:00", false)), dots: None };
+        let both = Activity { music: Some(None), countdown: Some(("25:00", false)), dots: Some(0) };
+        assert!(!idle.is_live());
+        assert_eq!(idle.wing(), 0.0);
+        assert!(music.is_live() && focus.is_live() && both.is_live());
+        assert_eq!((music.wing(), focus.wing(), both.wing()), (34.0, 50.0, 50.0));
     }
 }
